@@ -40,6 +40,18 @@ func defaultPlan() string {
 // underEncounter reports whether a path belongs to the encounter rather than to
 // the code: the state, the briefs, the reports, the lane sessions.
 func underEncounter(planPath, file string) bool {
+	// git reports changed files relative to the directory it runs in, so a
+	// lane's own .dungeon/ never matches the plan's encounter by subtraction.
+	// Every .dungeon component is encounter scratch: the state, a brief, a
+	// report, a screenshot.
+	for _, part := range strings.Split(filepath.ToSlash(file), "/") {
+		if part == ".dungeon" {
+			return true
+		}
+	}
+	if !filepath.IsAbs(file) {
+		return false
+	}
 	rel, err := filepath.Rel(encounterDir(planPath), file)
 	if err != nil {
 		return false
