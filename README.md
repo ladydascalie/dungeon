@@ -116,10 +116,10 @@ a right-aligned status column (`working w5M:p8`, `waits TOK4`, `needs you`), and
 a boxed strip under the list holds everything about the selected unit: goal,
 deps, note, and where its lane is.
 
-The rows and the card take at most two thirds of the frame. A row that spans a
-280 column terminal puts the status at the far edge and stretches the goal into
-a line nobody reads; two thirds keeps the status next to the text it belongs to
-and leaves the rest of the screen quiet. Two layouts, `t` and `s`:
+The text on the left of a row stops at two thirds of the frame. The status
+column stays right-aligned at the edge, so a wide terminal gets a reading column
+of ids, lanes and goals, a gap, then the status: the line never stretches a goal
+across the whole screen to reach it. Two layouts, `t` and `s`:
 
 - **tree** (default): dependencies as nesting, drawn with box-drawing
   connectors. Each unit hangs under its deepest dependency, ties going to the

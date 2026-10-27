@@ -380,12 +380,11 @@ func (m viewModel) headerView() string {
 		ruleStyle.Render(strings.Repeat("─", max(0, m.width)))
 }
 
-// contentWidth caps the list and the card at two thirds of the frame. A row that
-// spans a 280 column terminal puts the status column at the far edge and
-// stretches the goal into an unreadable line; two thirds keeps the status near
-// the text it belongs to and leaves the rest of the screen quiet.
+// contentWidth caps the text on the left of a row at two thirds of the frame.
+// The status column stays right aligned at the frame edge, so on a wide terminal
+// the goal stops early and the gap between them is what keeps the row readable.
 func (m viewModel) contentWidth() int {
-	return min(m.width, max(60, m.width*2/3))
+	return min(m.width, max(40, m.width*2/3))
 }
 
 func (m viewModel) bodyView() string {
@@ -394,7 +393,7 @@ func (m viewModel) bodyView() string {
 		detailH = 7
 	}
 	rows := max(3, m.height-5-detailH)
-	width := m.contentWidth()
+	width := m.width
 	lines, cursorLine := m.listLines(width)
 	lines = window(lines, cursorLine, rows)
 	body := strings.Join(lines, "\n")
@@ -514,7 +513,7 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 	avail := max(10, width-1)
 	right := truncate(linkMark(u)+m.statusText(u)+suffix, max(6, avail/3))
 
-	budget := avail - runeLen(right) - 2
+	budget := min(avail-runeLen(right)-2, m.contentWidth())
 	fixed := runeLen(head) + runeLen(lead) + runeLen(id) + 1
 	if budget < fixed {
 		plain := truncate(head+lead+id, max(4, budget))

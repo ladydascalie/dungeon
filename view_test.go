@@ -385,34 +385,36 @@ func TestCardIsOneLinePerField(t *testing.T) {
 	}
 }
 
-func TestContentIsCappedAtTwoThirds(t *testing.T) {
-	plan := writePlan(t, statusPlan)
+func TestTextIsCappedAtTwoThirdsAndStatusStaysRight(t *testing.T) {
+	plan := writePlan(t, strings.Replace(statusPlan,
+		"goal: first", "goal: "+strings.Repeat("a long goal ", 30), 1))
 	state := filepath.Join(t.TempDir(), "state.json")
 	m := newTestView(t, plan, state)
 
-	for _, width := range []int{284, 200, 120, 80} {
+	for _, width := range []int{284, 200, 120} {
 		m.width, m.height = width, 40
-		want := width * 2 / 3
-		if want < 60 {
-			want = 60
+		cap := width * 2 / 3
+		if got := m.contentWidth(); got != cap {
+			t.Fatalf("%d wide: cap %d, want %d", width, got, cap)
 		}
-		if want > width {
-			want = width
-		}
-		if got := m.contentWidth(); got != want {
-			t.Fatalf("%d wide: content %d, want %d", width, got, want)
-		}
-		// The rows and the card honour the width they are given; the header and
-		// footer rules are chrome and stay full width.
-		lines, _ := m.listLines(m.contentWidth())
-		for _, line := range lines {
-			if got := runeLen(strings.TrimRight(line, " ")); got > want {
-				t.Fatalf("%d wide: a row is %d, cap is %d: %q", width, got, want, line)
+		lines, _ := m.listLines(width)
+		row := ""
+		for _, l := range lines {
+			if strings.Contains(l, "ready") {
+				row = l
 			}
 		}
-		box := m.detailBox(m.contentWidth(), 7)
-		if got := runeLen(strings.Split(box, "\n")[0]); got > want {
-			t.Fatalf("%d wide: the card is %d, cap is %d", width, got, want)
+		if row == "" {
+			t.Fatalf("%d wide: no row with a status", width)
+		}
+		// The status is right aligned at the frame edge.
+		if got := runeLen(strings.TrimRight(row, " ")); got != width-1 {
+			t.Fatalf("%d wide: row ends at %d, want %d", width, got, width-1)
+		}
+		// The goal stops at two thirds, leaving a gap before the status.
+		idx := strings.Index(row, "ready")
+		if left := runeLen(strings.TrimRight(row[:idx], " ")); left > cap {
+			t.Fatalf("%d wide: the text runs to %d, cap is %d: %q", width, left, cap, row)
 		}
 	}
 }
