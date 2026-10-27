@@ -136,6 +136,19 @@ dependency graph unchanged. It validates clean. Gates become reviewer verdicts;
 the single `orchestrator` owner becomes one gatekeeper plus one integrator. A
 test compares the two plans unit by unit, so the graph cannot drift.
 
+## The skill
+
+`skills/dungeon/SKILL.md` teaches a pi agent to run this tool, and its first
+rule is the one that matters: the parent orchestrates and does not do the work.
+Link it where pi looks for skills:
+
+```sh
+ln -s ~/Code/Personal/dungeon/skills/dungeon ~/.agents/skills/dungeon
+```
+
+The skill covers writing a plan, the dispatch loop, what each state means,
+what to do when a unit is rejected, and the moves a parent must never make.
+
 ## Design
 
 `~/.agents/store/plans/changes/pi/dungeon/README.md`.
