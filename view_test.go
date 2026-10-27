@@ -331,3 +331,56 @@ func TestAttachRefusesAFileThatIsNotThere(t *testing.T) {
 		t.Fatalf("unknown unit: exit %d, want 2", code)
 	}
 }
+
+func TestFrameNeverExceedsTheTerminal(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	st, _ := LoadState(state)
+	// A long goal and a long note are exactly what used to grow the card.
+	long := strings.Repeat("a very long goal that must not wrap the card ", 6)
+	if err := st.SetUnit("A", "blocked", long); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(state, st); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestView(t, plan, state)
+	if err := os.WriteFile(filepath.Join(t.TempDir(), "x"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, size := range [][2]int{{100, 30}, {80, 24}, {60, 20}, {120, 40}, {40, 12}} {
+		m.width, m.height = size[0], size[1]
+		lines := strings.Split(m.View(), "\n")
+		if len(lines) > m.height {
+			t.Fatalf("%dx%d: frame has %d lines, terminal has %d", m.width, m.height, len(lines), m.height)
+		}
+		for _, line := range lines {
+			if runeLen(line) > m.width {
+				t.Fatalf("%dx%d: line is %d wide: %q", m.width, m.height, runeLen(line), line)
+			}
+		}
+	}
+}
+
+func TestCardIsOneLinePerField(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	st, _ := LoadState(state)
+	long := strings.Repeat("a long goal that would wrap ", 8)
+	p, _ := Decode([]byte(strings.Replace(statusPlan, "goal: first", "goal: "+long, 1)))
+	if err := SaveState(state, st); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestView(t, plan, state)
+	m.plan, m.snap = p, buildSnapshot(p, plan, st, nil)
+	m.rebuildOrder("")
+
+	box := m.detailBox(100, 7)
+	if n := len(strings.Split(box, "\n")); n != 7 {
+		t.Fatalf("card is %d lines, want exactly 7:\n%s", n, box)
+	}
+	if !strings.Contains(box, "…") {
+		t.Fatalf("a long goal should be ellipsised, not wrapped:\n%s", box)
+	}
+}

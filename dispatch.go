@@ -22,6 +22,7 @@ type dispatchOpts struct {
 	acceptTimeout time.Duration
 	poll          time.Duration
 	dryRun        bool
+	skipGate      bool
 	out           io.Writer
 }
 
@@ -58,11 +59,11 @@ func (d digest) String() string {
 }
 
 func briefPath(planPath, unit string) string {
-	return filepath.Join(filepath.Dir(planPath), "briefs", unit+".md")
+	return filepath.Join(encounterDir(planPath), "briefs", unit+".md")
 }
 
 func reportPath(planPath, unit string) string {
-	return filepath.Join(filepath.Dir(planPath), "reports", unit+".md")
+	return filepath.Join(encounterDir(planPath), "reports", unit+".md")
 }
 
 func minionDir(p Plan, m Minion) string {
@@ -99,6 +100,8 @@ func briefText(p Plan, m Minion, u Unit, dir, report string) string {
 - Touch a file outside the paths above.
 - Edit the plan or the state file. They are not yours.
 - Claim work you did not do.
+- Leave work uncommitted. Commit on your branch, or there is nothing to land
+  and the unit stays blocked.
 
 Write the report to the path above. Keep it short: what changed, what you ran,
 what you did not do.
@@ -153,6 +156,11 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 	report := reportPath(o.planPath, u.ID)
 	if _, err := os.Stat(report); err != nil {
 		st.SetUnit(u.ID, "blocked", "settled with no report at "+report)
+		return "blocked"
+	}
+	// A lane that leaves work uncommitted leaves nothing to land, so the unit is
+	// not done no matter what its accept command says about the working tree.
+	if blockedByWorktree(o, p, st, u, m) {
 		return "blocked"
 	}
 	if u.Accept == "" {

@@ -34,6 +34,9 @@ case "$1 $2" in
     printf ']}}'
     ;;
   "tab create") echo '{"result":{"root_pane":{"pane_id":"w9:p1"}}}' ;;
+  "tab list") echo '{"result":{"tabs":[{"tab_id":"w9:t1","label":"enc"}]}}' ;;
+  "tab close") echo '{"result":{"type":"ok"}}' ;;
+  "pane close") echo '{"result":{"type":"ok"}}' ;;
   "pane split") echo '{"result":{"pane":{"pane_id":"w9:p2"}}}' ;;
   "agent start") echo "$3:${FAKE_STATUS:-idle}" >> "$FAKE_STARTED"
                  echo '{"result":{"type":"ok"}}' ;;

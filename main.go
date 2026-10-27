@@ -42,6 +42,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return upCmd(ctx, args[1:], stdout, stderr)
 	case "next":
 		return nextCmd(ctx, args[1:], stdout, stderr)
+	case "land":
+		return landCmd(ctx, args[1:], stdout, stderr)
+	case "down":
+		return downCmd(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -84,13 +88,21 @@ func usage(w io.Writer) {
       Settle the lanes that stopped, dispatch the units whose deps landed, and
       wait. The only path to done is the unit's accept command exiting 0.
 
+  dungeon land   [--no-gate] [--plan path] [--state path]
+      Merge the done units into <encounter>/integration in declaration order,
+      then run each unit's accept command against the merged result. It never
+      touches the base branch and never pushes.
+
+  dungeon down   [--force] [--plan path] [--state path]
+      Close the lanes and the encounter tab. A working lane is refused unless
+      --force. The plan, the state, the briefs and the reports stay.
+
   dungeon view   [--once] [--interval 2s] [--plan path] [--state path]
       The live table. j/k move, g/G ends, r refresh, q quit.
       Piped output and --once print one frame instead.
 
 The plan defaults to `+defaultPlanPath+`. State lives beside it in state.json.
 
-land and down are not built yet.
 `)
 }
 

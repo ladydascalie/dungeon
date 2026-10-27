@@ -276,7 +276,7 @@ func (m viewModel) selected() (UnitRow, bool) {
 	return m.rowByID(id), true
 }
 
-func (m viewModel) View() string {
+func (m viewModel) render() string {
 	if m.err != nil {
 		return titleStyle.Render("dungeon") + "\n\n" + m.err.Error() + "\n\n" + dimStyle.Render("press r to retry, q to quit") + "\n"
 	}
@@ -536,12 +536,7 @@ func (m viewModel) detailBox(width, height int) string {
 	head += dimStyle.Render(truncate("  "+tail, max(0, inner-runeLen(u.ID)-runeLen(u.Status)-4)))
 	lines = append(lines, head)
 
-	for _, line := range strings.Split(wrap(u.Goal, inner), "\n") {
-		lines = append(lines, line)
-		if len(lines) >= 2 {
-			break
-		}
-	}
+	lines = append(lines, truncate(u.Goal, inner))
 
 	deps := fmt.Sprintf("deps %d/%d", u.DepsDone, u.DepsTotal)
 	if len(u.WaitsOn) > 0 {
@@ -574,12 +569,12 @@ func (m viewModel) detailBox(width, height int) string {
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1).
-		Width(max(10, inner)).
+		Width(max(10, inner+2)). // lipgloss counts padding inside Width; +2 keeps the box at the frame width
 		Render(strings.Join(lines, "\n"))
 }
 
 func (m viewModel) footerView() string {
-	keys := "j/k move · d detail · space fold · c/e all folds · t/s layout · h hide done · ? help · q quit"
+	keys := "j/k · d detail · space fold · h hide done · t/s layout · ? help · q quit"
 	if m.state.UpdatedAt == "" {
 		keys = "no state yet · " + keys
 	}

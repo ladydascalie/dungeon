@@ -53,7 +53,7 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 	if _, err := os.Stat(p.Repo); err != nil {
 		return res, fmt.Errorf("repo %s is not readable", p.Repo)
 	}
-	dir := filepath.Dir(planPath)
+	dir := encounterDir(planPath)
 
 	var root string
 	for i, m := range p.Minions {
