@@ -1,0 +1,33 @@
+encounter: fix-auth-timeouts
+repo: ~/Code/Personal/api
+base: main
+concurrency: 3
+minions:
+  - {id: scout, role: scout}
+  - {id: w1, role: worker, worktree: fix-auth-w1}
+  - {id: w2, role: worker, worktree: fix-auth-w2}
+  - {id: r1, role: reviewer, of: w1}
+  - {id: r2, role: reviewer, of: w2}
+  - {id: land, role: integrator, worktree: fix-auth-int}
+units:
+  - id: recon
+    minion: scout
+    goal: Where is the read timeout set? Cite file:line.
+  - id: api-timeout
+    minion: w1
+    paths: [apps/api/**]
+    deps: [recon]
+    goal: Read timeout comes from config.Default. Make it injectable.
+    accept: go test ./apps/api/...
+  - id: web-timeout
+    minion: w2
+    paths: [apps/web/**]
+    deps: [recon]
+    goal: Send the injected timeout on every request.
+    accept: bun test
+  - {id: review-api, minion: r1, deps: [api-timeout]}
+  - {id: review-web, minion: r2, deps: [web-timeout]}
+  - id: land
+    minion: land
+    deps: [review-api, review-web]
+    accept: mise run gate
