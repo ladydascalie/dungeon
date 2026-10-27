@@ -162,7 +162,7 @@ func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(rest) > 0 {
 		*planPath = rest[0]
 	}
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}

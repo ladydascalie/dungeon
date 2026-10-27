@@ -110,9 +110,12 @@ func usage(w io.Writer) {
 
   dungeon view   [--once] [--interval 2s] [--plan path] [--state path]
       The live table. j/k move, g/G ends, d detail, ctrl+d actions.
-      Piped output and --once print one frame instead.
+      Piped output and --once print one frame instead. With more than one
+      encounter under .dungeon and no --plan, view opens a picker.
 
-The plan defaults to `+defaultPlanPath+`. State lives beside it in state.json.
+The plan defaults to `+defaultPlanPath+`. Extra encounters live at
+.dungeon/<name>/plan.yaml, each with its own state. With more than one,
+view opens a picker and the other commands require --plan.
 
 `)
 }
@@ -158,7 +161,7 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func planFlags(fs *flag.FlagSet) (*string, *string) {
-	plan := fs.String("plan", defaultPlan(), "path to the plan")
+	plan := fs.String("plan", "", "path to the plan")
 	state := fs.String("state", "", "path to state.json (default: beside the plan)")
 	return plan, state
 }
@@ -175,6 +178,9 @@ func check(args []string, stdout, stderr io.Writer) int {
 		*plan = pos[0]
 	}
 
+	if code := resolvePlan(fs, plan, stderr); code != 0 {
+		return code
+	}
 	p, findings, err := DecodeFile(*plan)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
@@ -221,7 +227,7 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		*planPath = pos[0]
 	}
 
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -263,7 +269,7 @@ func setCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	kind, id, status := rest[0], rest[1], rest[2]
 
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -328,6 +334,49 @@ func setCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// planFlagSet reports whether --plan was passed. An empty value means the
+// command has not chosen an encounter yet.
+func planFlagSet(fs *flag.FlagSet) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "plan" {
+			set = true
+		}
+	})
+	return set
+}
+
+// resolvePlan refuses to guess between encounters. An explicit flag or
+// positional wins. With exactly one encounter under .dungeon it uses that one;
+// with none it leaves the default path so the error names it.
+func resolvePlan(fs *flag.FlagSet, planPath *string, stderr io.Writer) int {
+	if planFlagSet(fs) || *planPath != "" {
+		return 0
+	}
+	found := discoverPlans()
+	if len(found) == 0 {
+		*planPath = defaultPlan()
+		return 0
+	}
+	if len(found) == 1 {
+		*planPath = found[0].Path
+		return 0
+	}
+	fmt.Fprintf(stderr, "dungeon: %d encounters under %s\n", len(found), shortPath(filepath.Dir(found[0].Path)))
+	printEncounters(stderr, found)
+	fmt.Fprintln(stderr, "pass --plan to choose one")
+	return 2
+}
+
+// loadPlanFor resolves the encounter first, so a nested plan and a refusal are
+// decided before anything reads the wrong file.
+func loadPlanFor(fs *flag.FlagSet, planPath *string, stderr io.Writer) (Plan, int) {
+	if code := resolvePlan(fs, planPath, stderr); code != 0 {
+		return Plan{}, code
+	}
+	return loadValidPlan(*planPath, stderr)
+}
+
 // loadValidPlan refuses to work on a plan that does not validate: a status
 // table over a broken plan is a lie with columns.
 func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
@@ -352,7 +401,7 @@ func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
 func dispatchFlags(fs *flag.FlagSet, statePath *string) (*dispatchOpts, *string) {
 	o := &dispatchOpts{}
 	o.parentPane = os.Getenv("HERDR_PANE_ID")
-	plan := fs.String("plan", defaultPlan(), "path to the plan")
+	plan := fs.String("plan", "", "path to the plan")
 	fs.StringVar(statePath, "state", "", "path to state.json (default: beside the plan)")
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "how long next may wait for lanes")
 	fs.DurationVar(&o.acceptTimeout, "accept-timeout", 10*time.Minute, "how long one accept command may run")
@@ -373,7 +422,7 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(rest) > 0 {
 		*planPath = rest[0]
 	}
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -438,7 +487,7 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(rest) > 0 {
 		*planPath = rest[0]
 	}
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -490,7 +539,7 @@ func linkCmd(args []string, stdout, stderr io.Writer) int {
 		raw = ""
 	}
 
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -542,7 +591,7 @@ func attachCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	unit, path := rest[0], rest[1]
 
-	p, code := loadValidPlan(*planPath, stderr)
+	p, code := loadPlanFor(fs, planPath, stderr)
 	if code != 0 {
 		return code
 	}

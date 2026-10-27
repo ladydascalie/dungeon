@@ -162,6 +162,7 @@ collapses without leaving orphaned connectors.
 
 The cursor follows a unit across a refresh, not a row. A row shows its state
 twice: the id takes the state's colour, and the right column names it in words.
+The goal and lane are faint, so the id and the status column carry the eye.
 `ctrl+d ?` opens the legend for every key. `j`/`k` move and `g`/`G` jump;
 `ctrl+d r` refreshes and `ctrl+d q` quits. Piped output prints one frame
 instead of opening a TUI.
@@ -204,6 +205,18 @@ units, 16 minions, every unit assigned, every worker unit owning paths, and the
 dependency graph unchanged. It validates clean. Gates become reviewer verdicts;
 the single `orchestrator` owner becomes one gatekeeper plus one integrator. A
 test compares the two plans unit by unit, so the graph cannot drift.
+
+## More than one encounter
+
+The default encounter is `.dungeon/plan.yaml`. A second one lives in its own
+fold, `.dungeon/<name>/plan.yaml`, so its state, briefs and reports stay
+separate. `dungeon init --encounter auth --plan .dungeon/auth/plan.yaml` writes one.
+
+With more than one under `.dungeon`, `dungeon view` opens a picker: `j`/`k`
+move, `enter` opens, `q` quits. Every other command refuses to guess, prints the
+list and requires `--plan`. With exactly one encounter no flag is needed.
+`--once` and piped output refuse too, because a frame cannot answer a prompt.
+
 
 ## In herdr
 

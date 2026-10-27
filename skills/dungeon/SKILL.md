@@ -81,13 +81,18 @@ Good units, in the order that matters:
 - **A small unit.** A unit a lane can finish in one sitting gets a report worth
   reading.
 
+More than one encounter under `.dungeon`: `dungeon view` opens a picker, and
+every other command needs `--plan`. Extra encounters live at
+`.dungeon/<name>/plan.yaml` with their own state, briefs and reports. A lane
+passes the full path; there is no picker outside the view.
+
 ## The loop
 
 ```bash
 dungeon up            # spawn a lane per minion, then one round of next
 dungeon next          # settle what landed, dispatch what is ready, wait
 dungeon status        # who is working, who is not, which pane
-dungeon view          # live graph. d detail, ctrl+d actions
+dungeon view          # live graph. d detail, ctrl+d actions. picker when >1
 ```
 
 Run `dungeon next` until it says nothing to do. It is idempotent and safe in a

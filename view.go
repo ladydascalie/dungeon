@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -72,7 +73,9 @@ type viewModel struct {
 	mode        string // "tree" or "sections"
 	hideSettled bool
 	help        bool
-	prefix      bool // ctrl+d is held: the next key names an action
+	prefix      bool        // ctrl+d is held: the next key names an action
+	choosing    []Encounter // a picker is open: choose an encounter before loading
+	choice      int
 
 	notice         string // the last thing that went wrong, shown in the footer until the next key
 	overlay        string // "", "detail" or "reader"
@@ -103,6 +106,9 @@ func newViewModel(planPath, statePath string, interval time.Duration) viewModel 
 }
 
 func (m viewModel) Init() tea.Cmd {
+	if m.choiceMode() {
+		return nil
+	}
 	return tea.Batch(m.refresh(), tick(m.interval))
 }
 
@@ -163,6 +169,9 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		m.notice = ""
 		key := msg.String()
+		if m.choiceMode() {
+			return m, m.choose(key)
+		}
 		if m.prefix {
 			m.prefix = false
 			return m, m.runPrefix(key)
@@ -320,6 +329,67 @@ func overlayBottomRight(body, box string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m viewModel) choiceMode() bool { return len(m.choosing) > 0 }
+
+// choose moves the picker and opens the selected encounter. No plan is loaded
+// until a choice is made.
+func (m *viewModel) choose(key string) tea.Cmd {
+	switch key {
+	case "j", "down":
+		m.choice++
+	case "k", "up":
+		m.choice--
+	case "enter":
+		e := m.choosing[m.choice]
+		m.choosing = nil
+		if e.Err != nil {
+			m.err = fmt.Errorf("%s: %w", shortPath(e.Path), e.Err)
+			return nil
+		}
+		m.planPath, m.statePath = e.Path, StatePath(e.Path)
+		return tea.Batch(m.refresh(), tick(m.interval))
+	case "q", "esc", "ctrl+c":
+		return tea.Quit
+	}
+	if m.choice < 0 {
+		m.choice = 0
+	}
+	if m.choice >= len(m.choosing) {
+		m.choice = len(m.choosing) - 1
+	}
+	return nil
+}
+
+// choiceView is the encounter picker: one line per plan, default first.
+func (m viewModel) choiceView() string {
+	width := 0
+	for _, e := range m.choosing {
+		width = max(width, runeLen(shortPath(e.Path)))
+	}
+	var b strings.Builder
+	for i, e := range m.choosing {
+		cursor := "  "
+		if i == m.choice {
+			cursor = "❯ "
+		}
+		name := e.Name
+		if e.Err != nil {
+			name = "unreadable"
+		}
+		fmt.Fprintf(&b, "%s%s  %s", cursor, pad(shortPath(e.Path), width), name)
+		if i+1 < len(m.choosing) {
+			b.WriteString("\n")
+		}
+	}
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		Render(b.String())
+	content := titleStyle.Render("dungeon") + "  choose an encounter\n\n" + box + "\n\n" +
+		dimStyle.Render("j/k move · enter open · q quit")
+	return lipgloss.Place(max(40, m.width), max(12, m.height), lipgloss.Center, lipgloss.Center, content)
+}
+
 // rebuildOrder recomputes the display list and keeps the cursor on the same
 // unit, not the same row: a refresh reorders everything.
 func (m *viewModel) rebuildOrder(keep string) {
@@ -399,6 +469,9 @@ func (m viewModel) selected() (UnitRow, bool) {
 }
 
 func (m viewModel) render() string {
+	if m.choiceMode() {
+		return m.choiceView()
+	}
 	if m.err != nil {
 		return titleStyle.Render("dungeon") + "\n\n" + m.err.Error() + "\n\n" + dimStyle.Render("ctrl+d r to retry, ctrl+d q to quit") + "\n"
 	}
@@ -698,10 +771,12 @@ func (m viewModel) paintRow(u UnitRow, plain, head, id, rest string) string {
 	style := statusStyles[u.Status]
 	settled := u.Status == "done" || u.Status == "canceled"
 	idStyle := style.Bold(true)
-	restStyle := lipgloss.NewStyle()
 	if settled {
-		idStyle, restStyle = dimStyle, dimStyle
+		idStyle = dimStyle
 	}
+	// The middle is context, not the headline: the id and the status column
+	// should win the eye. Faint keeps the goal readable without competing.
+	restStyle := dimStyle
 	return dimStyle.Render(head) + idStyle.Render(id) + " " + restStyle.Render(rest)
 }
 
@@ -895,12 +970,42 @@ func viewCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() > 0 {
 		*planPath = fs.Arg(0)
 	}
+	explicit := fs.NArg() > 0 || *planPath != ""
+	var found []Encounter
+	if !explicit {
+		found = discoverPlans()
+		switch len(found) {
+		case 0:
+			*planPath = defaultPlan()
+		case 1:
+			*planPath = found[0].Path
+			found = nil
+		}
+	}
 	if *statePath == "" {
 		*statePath = StatePath(*planPath)
 	}
 	if *mode != "tree" && *mode != "sections" {
 		fmt.Fprintf(stderr, "dungeon: mode must be tree or sections, not %q\n", *mode)
 		return 2
+	}
+	if len(found) > 1 {
+		if *once || !isTerminal(stdout) || *detail != "" {
+			fmt.Fprintf(stderr, "dungeon: %d encounters under %s\n", len(found), shortPath(filepath.Dir(found[0].Path)))
+			printEncounters(stderr, found)
+			fmt.Fprintln(stderr, "pass --plan to choose one")
+			return 2
+		}
+		pick := newViewModel(*planPath, *statePath, *interval)
+		pick.mode, pick.hideSettled = *mode, *hide
+		pick.width, pick.height = *width, *height
+		pick.choosing = found
+		prog := tea.NewProgram(pick, tea.WithAltScreen(), tea.WithContext(ctx))
+		if _, err := prog.Run(); err != nil {
+			fmt.Fprintf(stderr, "dungeon: %v\n", err)
+			return 2
+		}
+		return 0
 	}
 
 	m := newViewModel(*planPath, *statePath, *interval)

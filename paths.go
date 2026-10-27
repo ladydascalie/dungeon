@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -34,6 +37,100 @@ func defaultPlan() string {
 			return defaultPlanPath
 		}
 		dir = parent
+	}
+}
+
+// Encounter is one discoverable plan under a .dungeon directory. A plan that
+// does not parse is still listed, with Err, so the operator can see it.
+type Encounter struct {
+	Path string
+	Name string
+	Err  error
+}
+
+// encounterRoot finds the nearest .dungeon directory, the way defaultPlan finds
+// the nearest plan.
+func encounterRoot() (string, bool) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	for {
+		candidate := filepath.Join(dir, ".dungeon")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+// discoverPlans lists every encounter under the nearest .dungeon directory: the
+// default plan.yaml first, then one plan.yaml per subdirectory. Extra encounters
+// live in their own fold, so each keeps its own state, briefs and reports.
+func discoverPlans() []Encounter {
+	root, ok := encounterRoot()
+	if !ok {
+		return nil
+	}
+	var out []Encounter
+	add := func(path string) {
+		if _, err := os.Stat(path); err != nil {
+			return
+		}
+		e := Encounter{Path: path}
+		p, findings, err := DecodeFile(path)
+		switch {
+		case err != nil:
+			e.Err = err
+		case len(findings) > 0:
+			e.Err = fmt.Errorf("%s", findings[0])
+		}
+		e.Name = p.Encounter
+		if e.Name == "" {
+			e.Name = filepath.Base(filepath.Dir(path))
+		}
+		out = append(out, e)
+	}
+	add(filepath.Join(root, "plan.yaml"))
+	plans, _ := filepath.Glob(filepath.Join(root, "*", "plan.yaml"))
+	sort.Strings(plans)
+	for _, path := range plans {
+		add(path)
+	}
+	return out
+}
+
+// shortPath names a plan relative to the working directory when it can, so a
+// refusal and the picker read like the operator's shell.
+func shortPath(path string) string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return path
+	}
+	rel, err := filepath.Rel(wd, path)
+	if err != nil {
+		return path
+	}
+	return rel
+}
+
+// printEncounters lists plans one per line: path first, encounter name second.
+// Both the refusal and the picker read the same list.
+func printEncounters(w io.Writer, found []Encounter) {
+	width := 0
+	for _, e := range found {
+		width = max(width, runeLen(shortPath(e.Path)))
+	}
+	for _, e := range found {
+		name := e.Name
+		if e.Err != nil {
+			name = "unreadable"
+		}
+		fmt.Fprintf(w, "  %s  %s\n", pad(shortPath(e.Path), width), name)
 	}
 }
 
