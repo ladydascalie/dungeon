@@ -87,7 +87,7 @@ Good units, in the order that matters:
 dungeon up            # spawn a lane per minion, then one round of next
 dungeon next          # settle what landed, dispatch what is ready, wait
 dungeon status        # who is working, who is not, which pane
-dungeon view          # the live graph. f jumps to a lane, d detail, ? help
+dungeon view          # live graph. f lane, o link, d detail, ? help
 ```
 
 Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
@@ -159,12 +159,27 @@ The lane owns the fix. Your moves, in order:
 .dungeon/sessions/     the lane's pi sessions
 ```
 
+## Reading a unit in the view
+
+`d` opens the detail pane for the selected unit: goal, deps, note, history, the
+files kept with it, and its link. `tab` picks a file, `enter` reads it, `esc`
+steps back, `o` opens the unit's link in the browser, `f` jumps to its lane.
+
+A brief or a report is markdown, and the reader renders it: headings, lists,
+emphasis and code blocks all survive. Write them as markdown and the operator
+sees structure instead of a wall of text. A `.log` or any other extension is
+shown as plain text, because a build log is not prose.
+
+Only files are rendered. A unit's goal and note are plain text in the card, so
+do not put markdown in them expecting it to be styled.
+
 Attach anything else a unit needs, so the operator can read it from the view:
 `dungeon attach <unit> <path>`.
 
 When a unit has a pull request, link it so the operator can reach it in one
-keystroke: `dungeon link <unit> <url>`. The view marks the row `↗` and `o`
-opens it. Do not paste the URL into chat instead.
+keystroke: `dungeon link <unit> <url>`. The row is marked `↗` and `o` opens it.
+The URL is a plain http(s) link, so any forge works. Do not paste it into chat
+instead.
 
 ## Opening the view in herdr
 
