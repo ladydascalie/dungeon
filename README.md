@@ -112,8 +112,9 @@ the one `up` recorded or the one the plan pinned.
 Keys are modal. `ctrl+d` holds a prefix and opens a which-key pane bottom right,
 listing every action the prefix can take: focus, open link, reload, layout,
 hide, fold all, help, quit. Motion, `d`, `space` and the overlay keys stay
-direct. `esc` cancels the prefix without acting, the header says `PREFIX` while
-it is held, and the footer says `ctrl+d actions` otherwise.
+direct. `esc` cancels the prefix, closes an overlay or the legend, and never
+quits the app; `ctrl+c` quits. The header says `PREFIX` while the prefix is
+held, and the footer says `ctrl+d actions` otherwise.
 `d` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,
 `.dungeon/briefs/<unit>.md` and `.dungeon/reports/<unit>.md`; anything else comes

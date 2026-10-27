@@ -171,11 +171,17 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prefix = true
 			return m, nil
 		}
+		if key == "esc" && m.help {
+			m.help = false
+			return m, nil
+		}
 		if m.overlay != "" && m.handleOverlayKey(key) {
 			return m, nil
 		}
 		switch key {
-		case "esc", "ctrl+c":
+		case "esc":
+			return m, nil
+		case "ctrl+c":
 			return m, tea.Quit
 		case "d":
 			m.overlay, m.artIdx = "detail", 0
@@ -426,7 +432,8 @@ func (m viewModel) helpView() string {
 		"g / G      first and last",
 		"space      fold the selected branch",
 		"d          detail pane for the selected unit",
-		"esc        quit",
+		"esc        close the overlay or legend",
+		"ctrl+c     quit",
 		"",
 		"ctrl+d     then an action:",
 		"  f        jump to the selected unit's pane",

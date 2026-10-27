@@ -114,8 +114,8 @@ report and the accept command still decide. Then read the report.
 lane is asking the operator something, and the answer needs their eyes on that
 pane.
 
-The view is modal: `ctrl+d` opens a which-key pane bottom right, and `esc`
-cancels it.
+The view is modal: `ctrl+d` opens a which-key pane bottom right. `esc` closes
+whatever is open and never quits the app; `ctrl+c` quits.
 
 You may pin a minion to a pane the operator is already watching:
 `- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pin is a request.

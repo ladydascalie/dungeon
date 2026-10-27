@@ -323,6 +323,44 @@ func TestPrefixKeysDoNotActWithoutThePrefix(t *testing.T) {
 	}
 }
 
+func TestEscapeNeverQuitsAndClosesWhatIsOpen(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	m := newTestView(t, plan, state)
+
+	// In the default view esc does nothing and returns no command.
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("esc must not quit the app")
+	}
+	m = next.(viewModel)
+
+	// The legend closes on esc.
+	m = press(t, m, "ctrl+d", "?")
+	if !m.help {
+		t.Fatal("help should be open")
+	}
+	m = press(t, m, "esc")
+	if m.help {
+		t.Fatal("esc should close the legend")
+	}
+
+	// The detail pane closes on esc, and a second esc is harmless.
+	m = press(t, m, "d")
+	if m.overlay != "detail" {
+		t.Fatalf("overlay %q, want detail", m.overlay)
+	}
+	m = press(t, m, "esc")
+	if m.overlay != "" {
+		t.Fatalf("overlay %q, want closed", m.overlay)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("a second esc must not quit the app")
+	}
+	_ = next
+}
+
 func TestDetailOverlayListsAndReadsFiles(t *testing.T) {
 	plan := writePlan(t, statusPlan)
 	dir := t.TempDir()
