@@ -27,6 +27,7 @@ const (
 	ECycle         Code = "E_CYCLE"
 	ESplitInvalid  Code = "E_SPLIT_INVALID"
 	ESplitNoMinion Code = "E_SPLIT_NO_MINION"
+	EUnknownSplit  Code = "E_UNKNOWN_SPLIT"
 )
 
 type Finding struct {
@@ -45,6 +46,9 @@ func (f Finding) String() string {
 // A minion id becomes a herdr agent name, so it obeys that alphabet.
 var minionID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
+// The directions herdr can split a pane in.
+var splits = map[string]bool{"right": true, "down": true, "left": true, "up": true}
+
 // An encounter becomes a branch prefix, a tab label and a directory name, so it
 // is restricted to what all three accept.
 var encounterID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
@@ -60,6 +64,12 @@ func Validate(p Plan) []Finding {
 		f = append(f, Finding{
 			EBadEncounter, "encounter",
 			fmt.Sprintf("encounter %q must match [a-z0-9][a-z0-9-]{0,40}: it becomes a branch prefix", p.Encounter),
+		})
+	}
+	if p.Split != "" && !splits[p.Split] {
+		f = append(f, Finding{
+			EUnknownSplit, "split",
+			fmt.Sprintf("split %q is not one of right, down, left, up", p.Split),
 		})
 	}
 	if len(p.Minions) == 0 {

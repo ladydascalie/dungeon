@@ -94,7 +94,8 @@ Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
 loop, and there is no daemon to keep alive.
 
 `up` builds one workspace per encounter, one tab per role and one pane per
-minion, so the herdr layout reads like the plan.
+minion, so the herdr layout reads like the plan. Panes grow to the right unless
+the plan says `split: down`, and they are equal shares of the tab.
 
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.

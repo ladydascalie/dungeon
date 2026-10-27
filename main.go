@@ -85,10 +85,11 @@ func usage(w io.Writer) {
       Keep a file with a unit: a brief, a report, a handoff note. It shows up
       in the detail pane of dungeon view.
 
-  dungeon up     [--no-dispatch] [--plan path] [--state path]
-      Spawn a pane and a pi lane per minion, in one tab. A writer gets its own
-      git worktree on <encounter>/<minion>. Idempotent: a live minion is left
-      alone. Then it runs one round of next.
+  dungeon up     [--no-dispatch] [--split right|down|left|up]
+      Spawn a workspace, a tab per role and a pane per minion. Panes grow to the
+      right by default, because tall and narrow beats short and wide; the plan's
+      split: field or --split changes it. A writer gets its own git worktree on
+      <encounter>/<minion>. Idempotent: a live minion is left alone.
 
   dungeon next   [--timeout 30m] [--accept-timeout 10m] [--poll 2s] [--dry-run]
       Settle the lanes that stopped, dispatch the units whose deps landed, and
@@ -358,6 +359,7 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var statePath string
 	o, planPath := dispatchFlags(fs, &statePath)
 	noDispatch := fs.Bool("no-dispatch", false, "spawn the minions and stop")
+	split := fs.String("split", "", "override the plan's split direction: right, down, left, up")
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -386,7 +388,7 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	res, err := spawnMinions(ctx, *planPath, p, &st, stdout)
+	res, err := spawnMinions(ctx, *planPath, p, &st, *split, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2

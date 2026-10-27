@@ -15,6 +15,7 @@ type Plan struct {
 	Repo        string   `yaml:"repo"`
 	Base        string   `yaml:"base"`
 	Concurrency int      `yaml:"concurrency"`
+	Split       string   `yaml:"split"` // right (default) or down/left/up: how a role's panes grow
 	Minions     []Minion `yaml:"minions"`
 	Units       []Unit   `yaml:"units"`
 }

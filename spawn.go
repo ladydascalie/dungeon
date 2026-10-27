@@ -49,7 +49,7 @@ func worktreePath(repo, encounter, minion string) string {
 	return filepath.Join(filepath.Dir(repo), encounter+"-"+minion)
 }
 
-func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out io.Writer) (spawnResult, error) {
+func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, splitOverride string, out io.Writer) (spawnResult, error) {
 	var res spawnResult
 	h := newHerdrClient()
 	agents := h.agents(ctx)
@@ -59,6 +59,15 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 	}
 	dir := encounterDir(planPath)
 	_, counts := countRoles(p.Minions)
+	// Tall and narrow beats short and wide, so panes grow sideways unless the
+	// plan says otherwise.
+	direction := p.Split
+	if direction == "" {
+		direction = "right"
+	}
+	if splitOverride != "" {
+		direction = splitOverride
+	}
 
 	ws := h.findWorkspace(ctx, p.Encounter)
 	tabs := map[string]*tabFor{}
@@ -114,7 +123,7 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 			if err != nil {
 				return res, err
 			}
-			pane, err = t.next(ctx, h, cwd)
+			pane, err = t.next(ctx, h, cwd, direction)
 			if err != nil {
 				return res, err
 			}

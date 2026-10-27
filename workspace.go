@@ -148,13 +148,17 @@ type tabFor struct {
 	used  int
 }
 
-func (t *tabFor) next(ctx context.Context, h herdrClient, cwd string) (string, error) {
+func (t *tabFor) next(ctx context.Context, h herdrClient, cwd, direction string) (string, error) {
 	if t.used == 0 {
 		t.used++
 		return t.root, nil
 	}
-	ratio := 1.0 / float64(t.total-t.used)
-	pane, err := h.splitPane(ctx, t.root, "down", cwd, ratio)
+	// herdr's ratio is the share the pane being split keeps, so the new pane
+	// gets 1/(remaining+1) of the tab. Passing the new pane's share instead
+	// gave a 2 lane tab a 256/28 split, not two halves.
+	remaining := t.total - t.used
+	ratio := float64(remaining) / float64(remaining+1)
+	pane, err := h.splitPane(ctx, t.root, direction, cwd, ratio)
 	if err != nil {
 		return "", err
 	}

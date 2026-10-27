@@ -192,3 +192,72 @@ func TestPinnedMinionStaysOutOfTheWorkspace(t *testing.T) {
 		t.Fatalf("a fully pinned encounter needs no workspace:\n%s", calls)
 	}
 }
+
+func TestPanesGrowRightByDefault(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	planPath, _, _ := encounter(t, repo, strings.Replace(twoWorkerPlan, "%REPO%", repo, 1))
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "pane split w9:p1 --direction right") {
+		t.Fatalf("two workers should split to the right:\n%s", calls)
+	}
+}
+
+func TestSplitDirectionComesFromThePlanOrTheFlag(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	plan := strings.Replace(twoWorkerPlan, "%REPO%", repo, 1)
+	plan = strings.Replace(plan, "base: main", "base: main\nsplit: down", 1)
+	planPath, _, _ := encounter(t, repo, plan)
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "--direction down") {
+		t.Fatalf("the plan asked for down:\n%s", calls)
+	}
+
+	// The flag wins over the plan.
+	log2 := fakeHerdr(t, "")
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--split", "left", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	calls, _ = os.ReadFile(log2)
+	if !strings.Contains(string(calls), "--direction left") {
+		t.Fatalf("--split should override the plan:\n%s", calls)
+	}
+}
+
+func TestSplitDirectionIsValidated(t *testing.T) {
+	src := strings.Replace(goodPlan, "base: main", "base: main\nsplit: sideways", 1)
+	wantCodes(t, Validate(decodeOK(t, src)), EUnknownSplit)
+}
+
+func TestPanesGetEqualShares(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	plan := strings.Replace(twoWorkerPlan, "%REPO%", repo, 1)
+	plan = strings.Replace(plan, `  - {id: w2, role: worker, worktree: w2}`,
+		`  - {id: w2, role: worker, worktree: w2}
+  - {id: w3, role: worker, worktree: w3}`, 1)
+	planPath, _, _ := encounter(t, repo, plan)
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	callsRead, _ := os.ReadFile(log)
+	calls := string(callsRead)
+	// herdr's ratio is what the pane being split keeps: 2 of 3 for the second
+	// lane, 1 of 2 for the third, so all three end up a third of the tab.
+	if !strings.Contains(calls, "--ratio 0.6667") {
+		t.Fatalf("second lane should keep 2/3 of the root:\n%s", calls)
+	}
+	if !strings.Contains(calls, "--ratio 0.5000") {
+		t.Fatalf("third lane should keep 1/2 of the root:\n%s", calls)
+	}
+}

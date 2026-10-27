@@ -68,6 +68,10 @@ one minion, plural for more, so the tabs say how many lanes are in each. One
 pane per minion, split equally from the tab's root pane. A pinned minion stays
 in its own pane and is not moved into the workspace.
 
+Panes grow to the right by default, because tall and narrow beats short and
+wide. `split: down` in the plan, or `--split down` on `up`, changes it; `left`
+and `up` work too.
+
 A minion may name a pane to run in, and `up` uses it when herdr still has it:
 `- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pane the
 operator picked is where their attention already is, so the pin is honoured and
