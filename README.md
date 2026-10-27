@@ -127,9 +127,10 @@ are a view of the session, not part of the state file. `h` hides done and
 canceled units and splices their children into the parent, so a settled chain
 collapses without leaving orphaned connectors.
 
-The cursor follows a unit across a refresh, not a row. `?` opens the legend: what
-each glyph means, and every key. `j`/`k` move, `g`/`G` jump, `r` refreshes, `q`
-quits. Piped output prints one frame instead of opening
+The cursor follows a unit across a refresh, not a row. A row shows its state
+twice: the id takes the state's colour, and the right column names it in words.
+`?` opens the legend for every key. `j`/`k` move, `g`/`G` jump, `r` refreshes,
+`q` quits. Piped output prints one frame instead of opening
 a TUI.
 
 `dungeon attach <unit> <path>` keeps a file one keystroke from the unit: a

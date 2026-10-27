@@ -33,17 +33,6 @@ var (
 		"done":     lipgloss.NewStyle().Foreground(lipgloss.Color("71")),
 		"canceled": lipgloss.NewStyle().Faint(true),
 	}
-
-	statusGlyphs = map[string]string{
-		"blocked":  "●",
-		"working":  "◐",
-		"ready":    "○",
-		"waiting":  "·",
-		"unproven": "?",
-		"rejected": "✗",
-		"done":     "✓",
-		"canceled": "–",
-	}
 )
 
 type tickMsg time.Time
@@ -336,14 +325,8 @@ func (m viewModel) render() string {
 // coloured marks is not a substitute for naming them.
 func (m viewModel) helpView() string {
 	status := []string{
-		"● blocked     needs you, or an input failed",
-		"◐ working     a lane is on it",
-		"○ ready       deps met, no lane on it",
-		"· waiting     deps not met yet",
-		"? unproven    finished, and nothing can prove it",
-		"✗ rejected    sent back to the lane",
-		"✓ done        the accept command exited 0, dependents may start",
-		"– canceled    withdrawn from the plan",
+		"The id takes the state's colour. The right column names the state in words,",
+		"and says what the unit waits for, which pane it is in, or that it needs you.",
 	}
 	keys := []string{
 		"j / k      move",
@@ -514,9 +497,8 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 	head := prefix + fold
 	lead := ""
 	if head != "" {
-		lead = " " // air between the fold mark and the status glyph
+		lead = " " // air between the fold mark and the id
 	}
-	glyph := statusGlyphs[u.Status]
 	id := pad(u.ID, idWidth(m.snap))
 	rest := strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap))+" "+u.Goal, " ")
 
@@ -524,24 +506,24 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 	right := truncate(linkMark(u)+m.statusText(u)+suffix, max(6, avail/3))
 
 	budget := avail - runeLen(right) - 2
-	fixed := runeLen(head) + runeLen(lead) + 1 + runeLen(id) + 1
+	fixed := runeLen(head) + runeLen(lead) + runeLen(id) + 1
 	if budget < fixed {
-		plain := truncate(head+glyph+" "+id, max(4, budget))
-		return m.paintRow(u, plain, "", "", "", "")
+		plain := truncate(head+lead+id, max(4, budget))
+		return m.paintRow(u, plain, "", "", "")
 	}
 	rest = truncate(rest, max(0, budget-fixed))
-	plain := head + lead + glyph + " " + id + " " + rest
+	plain := head + lead + id + " " + rest
 	gap := max(1, avail-runeLen(plain)-runeLen(right))
-	return m.paintRow(u, plain, head+lead, glyph, id, rest) + strings.Repeat(" ", gap) + m.paintRight(u, right)
+	return m.paintRow(u, plain, head+lead, id, rest) + strings.Repeat(" ", gap) + m.paintRight(u, right)
 }
 
 // paintRow styles the left side. The selected row is plain text inside reverse
 // video, so nesting colours inside the highlight cannot fight it.
-func (m viewModel) paintRow(u UnitRow, plain, head, glyph, id, rest string) string {
+func (m viewModel) paintRow(u UnitRow, plain, head, id, rest string) string {
 	if u.ID == m.selectedID() {
 		return selectedStyle.Render(plain)
 	}
-	if head == "" && glyph == "" {
+	if head == "" && id == "" {
 		return plain
 	}
 	style := statusStyles[u.Status]
@@ -551,8 +533,7 @@ func (m viewModel) paintRow(u UnitRow, plain, head, glyph, id, rest string) stri
 	if settled {
 		idStyle, restStyle = dimStyle, dimStyle
 	}
-	return dimStyle.Render(head) + style.Render(glyph) + " " +
-		idStyle.Render(id) + " " + restStyle.Render(rest)
+	return dimStyle.Render(head) + idStyle.Render(id) + " " + restStyle.Render(rest)
 }
 
 func (m viewModel) paintRight(u UnitRow, right string) string {

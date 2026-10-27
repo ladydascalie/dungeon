@@ -210,7 +210,7 @@ func TestFoldHidesTheBranchAndSaysHowMuch(t *testing.T) {
 	}
 
 	// An expandable row says so before anything is folded.
-	if !strings.Contains(m.View(), "⛧ ○ A") {
+	if !strings.Contains(m.View(), "⛧ A") {
 		t.Fatalf("a branch should be marked expandable:\n%s", m.View())
 	}
 
@@ -225,7 +225,7 @@ func TestFoldHidesTheBranchAndSaysHowMuch(t *testing.T) {
 	if !strings.Contains(folded, "[+2]") {
 		t.Fatalf("a folded row should say how much it hides:\n%s", folded)
 	}
-	if !strings.Contains(folded, "⛧ ○ A") {
+	if !strings.Contains(folded, "⛧ A") {
 		t.Fatalf("a folded row should keep the fold mark:\n%s", folded)
 	}
 	if !strings.Contains(folded, "1 folded") {
@@ -253,7 +253,7 @@ func TestCollapseAllAndExpandAll(t *testing.T) {
 	}
 }
 
-func TestHelpExplainsTheGlyphs(t *testing.T) {
+func TestHelpExplainsTheView(t *testing.T) {
 	plan := writePlan(t, statusPlan)
 	state := filepath.Join(t.TempDir(), "state.json")
 	m := newTestView(t, plan, state)
@@ -263,7 +263,7 @@ func TestHelpExplainsTheGlyphs(t *testing.T) {
 	}
 	m = press(t, m, "?")
 	out := m.View()
-	for _, want := range []string{"STATUS", "done", "blocked", "space      fold", "∧N"} {
+	for _, want := range []string{"STATUS", "colour", "space      fold", "∧N"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
