@@ -210,7 +210,7 @@ func TestFoldHidesTheBranchAndSaysHowMuch(t *testing.T) {
 	}
 
 	// An expandable row says so before anything is folded.
-	if !strings.Contains(m.View(), "▾○ A") {
+	if !strings.Contains(m.View(), "⛧○ A") {
 		t.Fatalf("a branch should be marked expandable:\n%s", m.View())
 	}
 
@@ -225,8 +225,8 @@ func TestFoldHidesTheBranchAndSaysHowMuch(t *testing.T) {
 	if !strings.Contains(folded, "[+2]") {
 		t.Fatalf("a folded row should say how much it hides:\n%s", folded)
 	}
-	if !strings.Contains(folded, "▸○ A") {
-		t.Fatalf("a folded row should be marked as folded:\n%s", folded)
+	if !strings.Contains(folded, "⛧○ A") {
+		t.Fatalf("a folded row should keep the fold mark:\n%s", folded)
 	}
 	if !strings.Contains(folded, "1 folded") {
 		t.Fatalf("the header should count folds:\n%s", folded)

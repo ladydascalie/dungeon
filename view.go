@@ -430,9 +430,9 @@ func (m viewModel) treeLines(width int) ([]string, int) {
 		suffix, fold := "", " "
 		switch {
 		case counts[line.ID] > 0:
-			suffix, fold = fmt.Sprintf("  [+%d]", counts[line.ID]), "▸"
+			suffix, fold = fmt.Sprintf("  [+%d]", counts[line.ID]), "⛧"
 		case branches[line.ID]:
-			fold = "▾"
+			fold = "⛧"
 		}
 		if line.ID == cursor {
 			cursorLine = len(lines)

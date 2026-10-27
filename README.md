@@ -119,8 +119,8 @@ deps, note, and where its lane is. Two layouts, `t` and `s`:
   the joining unit, and the panel lists every input with its status.
 - **sections**: urgency-first groups, BLOCKED down to CANCELED.
 
-`space` folds the selected branch. A foldable row is marked `▾`, a folded one
-`▸` with `[+N]` for how much it hides, and the header counts the folds in force,
+`space` folds the selected branch. A foldable row is marked `⛧`, and a folded one
+adds `[+N]` for how much it hides. The header counts the folds in force,
 so a collapsed branch is never silent. `c` collapses every branch, `e` expands
 everything. Folds survive a refresh; they
 are a view of the session, not part of the state file. `h` hides done and
