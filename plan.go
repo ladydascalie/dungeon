@@ -2,12 +2,25 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
 )
+
+// PlanHash is the sha256 of the plan file as dispatched. Any edit changes it,
+// including a comment, because any edit changes what the lanes were told.
+func PlanHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
 
 // Plan is one encounter: who exists, and what each unit of work is.
 type Plan struct {

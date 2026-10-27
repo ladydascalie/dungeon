@@ -33,12 +33,44 @@ func ensureWorktree(repo, base, encounter, minion, path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil // resume: the worktree is already cut
 	}
-	branch := encounter + "/" + minion
-	cmd := exec.Command("git", "-C", repo, "worktree", "add", "-b", branch, path, base)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git worktree add %s: %s", path, strings.TrimSpace(stderr.String()))
+	return cutWorktree(repo, base, encounter+"/"+minion, path, true)
+}
+
+// cutWorktree cuts a worktree at path. Worktrunk does the work when it is
+// installed, so the operator's layout, hooks and ignored-file copies apply.
+// Plain git is the fallback, and only when wt is missing.
+func cutWorktree(repo, base, branch, path string, create bool) error {
+	if _, err := exec.LookPath("wt"); err == nil {
+		args := []string{
+			"--config-set", fmt.Sprintf("worktree-path=%q", path),
+			"-C", repo, "-y", "switch", "--no-cd", "--format", "json",
+		}
+		if create {
+			args = append(args, "--create", "--base", base)
+		}
+		args = append(args, branch)
+		var stderr strings.Builder
+		cmd := exec.Command("wt", args...)
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("wt switch %s: %s", branch, strings.TrimSpace(stderr.String()))
+		}
+	} else {
+		args := []string{"-C", repo, "worktree", "add"}
+		if create {
+			args = append(args, "-b", branch, path, base)
+		} else {
+			args = append(args, path, branch)
+		}
+		var stderr strings.Builder
+		cmd := exec.Command("git", args...)
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git worktree add %s: %s", path, strings.TrimSpace(stderr.String()))
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("worktree %s was not created: %w", path, err)
 	}
 	return nil
 }

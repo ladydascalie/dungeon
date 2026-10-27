@@ -62,7 +62,7 @@ func TestChangedFileUnderTheEncounterIsNotOutside(t *testing.T) {
 
 	p := Plan{Encounter: "enc", Repo: repo}
 	wt := worktreePath(repo, p.Encounter, "w1")
-	if err := ensureIntegrationWorktree(repo, "main", p.Encounter, wt, "w1"); err != nil {
+	if err := ensureIntegrationWorktree(repo, "main", wt, "w1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(wt, ".dungeon", "shots"), 0o755); err != nil {

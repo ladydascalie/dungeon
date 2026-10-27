@@ -70,16 +70,15 @@ func gitRun(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func ensureIntegrationWorktree(repo, base, encounter, path, branch string) error {
+func ensureIntegrationWorktree(repo, base, path, branch string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
+	create := true
 	if _, err := gitRun(repo, "rev-parse", "--verify", branch); err == nil {
-		_, err := gitRun(repo, "worktree", "add", path, branch)
-		return err
+		create = false
 	}
-	_, err := gitRun(repo, "worktree", "add", "-b", branch, path, base)
-	return err
+	return cutWorktree(repo, base, branch, path, create)
 }
 
 // landable returns the done units that produced code: a staff unit has a
@@ -107,7 +106,7 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 	}
 	res.Branch = p.Encounter + "/integration"
 	res.Worktree = worktreePath(p.Repo, p.Encounter, "integration")
-	if err := ensureIntegrationWorktree(p.Repo, p.Base, p.Encounter, res.Worktree, res.Branch); err != nil {
+	if err := ensureIntegrationWorktree(p.Repo, p.Base, res.Worktree, res.Branch); err != nil {
 		return res, err
 	}
 
@@ -155,6 +154,7 @@ func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var statePath string
 	o, planPath := dispatchFlags(fs, &statePath)
 	noGate := fs.Bool("no-gate", false, "merge only, do not run the acceptance commands")
+	force := fs.Bool("force", false, "accept a plan edited after dispatch")
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -174,7 +174,10 @@ func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
 	}
-	o.planPath, o.statePath, o.out, o.skipGate = *planPath, statePath, stdout, *noGate
+	o.planPath, o.statePath, o.out, o.skipGate, o.force = *planPath, statePath, stdout, *noGate, *force
+	if code := o.guardPlan(&st, stderr); code != 0 {
+		return code
+	}
 
 	res, err := land(ctx, *o, p, &st)
 	if err != nil {

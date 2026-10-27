@@ -49,6 +49,8 @@ type MinionRow struct {
 type Snapshot struct {
 	Encounter string         `json:"encounter"`
 	PlanPath  string         `json:"plan_path"`
+	PlanHash  string         `json:"plan_hash,omitempty"`
+	PlanDrift bool           `json:"plan_drift"`
 	StateAge  string         `json:"state_age"`
 	Counts    map[string]int `json:"counts"`
 	Units     []UnitRow      `json:"units"`
@@ -141,8 +143,25 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 	return s
 }
 
+// markPlanDrift compares the plan on disk with the hash recorded at dispatch.
+// A state written before the guard carries no hash, so it cannot drift.
+func markPlanDrift(s *Snapshot, planPath string, st State) {
+	if st.PlanHash == "" {
+		return
+	}
+	h, err := PlanHash(planPath)
+	if err != nil {
+		return
+	}
+	s.PlanHash = h
+	s.PlanDrift = h != st.PlanHash
+}
+
 func renderText(w io.Writer, s Snapshot) {
 	fmt.Fprintf(w, "%s  plan %s  state %s\n", s.Encounter, s.PlanPath, s.StateAge)
+	if s.PlanDrift {
+		fmt.Fprintf(w, "plan changed since dispatch (%s): re-run dungeon up, or pass --force\n", shortHash(s.PlanHash))
+	}
 	fmt.Fprintf(w, "%d minions  %d units", len(s.Minions), len(s.Units))
 	for _, sec := range sections {
 		if n := s.Counts[sec.status]; n > 0 {

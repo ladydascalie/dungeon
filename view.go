@@ -120,6 +120,7 @@ func loadSnapshot(planPath, statePath string) refreshedMsg {
 		return refreshedMsg{err: err}
 	}
 	snap := buildSnapshot(p, planPath, st, probeAgents(context.Background()))
+	markPlanDrift(&snap, planPath, st)
 	return refreshedMsg{plan: p, state: st, snap: snap}
 }
 
@@ -368,6 +369,9 @@ func (m viewModel) headerView() string {
 	status := m.mode + " · state " + s.StateAge
 	if n := len(counts); n > 0 {
 		status = fmt.Sprintf("%s · %d folded", m.mode, n) + " · state " + s.StateAge
+	}
+	if s.PlanDrift {
+		status += " · plan drift"
 	}
 	right := dimStyle.Render(status)
 	chips := ""

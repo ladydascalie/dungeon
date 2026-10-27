@@ -88,17 +88,20 @@ func usage(w io.Writer) {
   dungeon up     [--no-dispatch] [--split right|down|left|up]
       Spawn a workspace, a tab per role and a pane per minion. Panes grow to the
       right by default, because tall and narrow beats short and wide; the plan's
-      split: field or --split changes it. A writer gets its own git worktree on
-      <encounter>/<minion>. Idempotent: a live minion is left alone.
+      split: field or --split changes it. A writer gets its own worktree on
+      <encounter>/<minion>. Worktrunk cuts it when wt is installed, plain git
+      otherwise. Idempotent: a live minion is left alone.
 
-  dungeon next   [--timeout 30m] [--accept-timeout 10m] [--poll 2s] [--dry-run]
+  dungeon next   [--timeout 30m] [--accept-timeout 10m] [--poll 2s] [--dry-run] [--force]
       Settle the lanes that stopped, dispatch the units whose deps landed, and
       wait. The only path to done is the unit's accept command exiting 0.
+      A plan edited after dispatch is refused unless --force.
 
-  dungeon land   [--no-gate] [--plan path] [--state path]
+  dungeon land   [--no-gate] [--plan path] [--state path] [--force]
       Merge the done units into <encounter>/integration in declaration order,
       then run each unit's accept command against the merged result. It never
       touches the base branch and never pushes.
+      A plan edited after dispatch is refused unless --force.
 
   dungeon down   [--force] [--plan path] [--state path]
       Close the lanes and the encounter tab. A working lane is refused unless
@@ -231,6 +234,7 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	}
 
 	snap := buildSnapshot(p, *planPath, st, probeAgents(ctx))
+	markPlanDrift(&snap, *planPath, st)
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -388,6 +392,13 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	h, err := PlanHash(*planPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	st.PlanHash = h
+
 	res, err := spawnMinions(ctx, *planPath, p, &st, *split, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
@@ -417,6 +428,7 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	var statePath string
 	o, planPath := dispatchFlags(fs, &statePath)
 	dryRun := fs.Bool("dry-run", false, "say what would be dispatched")
+	force := fs.Bool("force", false, "accept a plan edited after dispatch")
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -441,7 +453,10 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			statePath, st.Encounter, p.Encounter)
 		return 2
 	}
-	o.planPath, o.statePath, o.out, o.dryRun = *planPath, statePath, stdout, *dryRun
+	o.planPath, o.statePath, o.out, o.dryRun, o.force = *planPath, statePath, stdout, *dryRun, *force
+	if code := o.guardPlan(&st, stderr); code != 0 {
+		return code
+	}
 
 	d, err := next(ctx, *o, p, &st)
 	if err != nil {

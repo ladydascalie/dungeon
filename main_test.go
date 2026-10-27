@@ -3,11 +3,33 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestMain isolates the suite from the operator's worktrunk config. A
+// post-start hook would run inside a test repo and race the temp directory
+// cleanup. dungeon passes the worktree path explicitly, so an empty config is
+// the whole setting a test needs.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "dungeon-wt")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	cfg := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfg, nil, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	os.Setenv("WORKTRUNK_CONFIG_PATH", cfg)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 func writePlan(t *testing.T, src string) string {
 	t.Helper()

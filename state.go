@@ -14,6 +14,7 @@ import (
 // run must not rewrite the plan.
 type State struct {
 	Encounter string                 `json:"encounter"`
+	PlanHash  string                 `json:"plan_hash,omitempty"`
 	UpdatedAt string                 `json:"updated_at"`
 	Units     map[string]UnitState   `json:"units"`
 	Minions   map[string]MinionState `json:"minions"`

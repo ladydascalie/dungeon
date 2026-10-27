@@ -97,7 +97,7 @@ func TestLandStopsOnAConflict(t *testing.T) {
 		}
 	}
 
-	code, stdout, _ := runCLI("land", "--plan", planPath)
+	code, stdout, _ := runCLI("land", "--force", "--plan", planPath)
 	if code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
@@ -133,7 +133,7 @@ func TestLandReportsAFailedGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, _ := runCLI("land", "--plan", planPath)
+	code, stdout, _ := runCLI("land", "--force", "--plan", planPath)
 	if code != 1 {
 		t.Fatalf("exit %d, want 1\n%s", code, stdout)
 	}
@@ -161,7 +161,7 @@ func TestUncommittedWorkBlocksTheUnit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath)
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--force", "--plan", planPath)
 	if code != 0 {
 		t.Fatalf("next exit %d: %s", code, stderr)
 	}
@@ -196,7 +196,7 @@ func TestAChangeOutsideTheDeclaredPathsBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath)
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--force", "--plan", planPath)
 	if code != 0 {
 		t.Fatalf("next exit %d: %s", code, stderr)
 	}

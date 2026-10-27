@@ -57,10 +57,20 @@ A dispatch is five steps and only the last one can mark a unit `done`:
    anything else is `rejected`, and no command at all is `unproven`.
 
 `up` is idempotent: a minion whose agent is live is left alone, so a second `up`
-resumes instead of doubling the fleet. A writer gets its own git worktree at
+resumes instead of doubling the fleet. A writer gets its own worktree at
 `<repo>/../<encounter>-<minion>` on branch `<encounter>/<minion>`. Lanes run with
 `--no-skills --no-mcp` and a tool allowlist that matches their role: `read,bash`
 for staff work, `read,bash,edit,write` for writers.
+
+Worktrunk cuts the worktree when `wt` is on PATH, so its hooks and
+ignored-file copies run. dungeon pins the path through the `worktree-path`
+override, so a custom worktrunk layout cannot move a lane. Plain `git worktree
+add` is the fallback, used only when `wt` is missing.
+
+`up` records the plan's sha256 in the state. If the plan changes after that,
+`status` and the view say `plan changed since dispatch`, and `next` and `land`
+refuse to act until you re-run `up` or pass `--force`. The hash is the whole
+guard: an edit mid-run is shown to the operator, never silently applied.
 
 The layout follows the plan. One workspace per encounter, labelled with the
 encounter name. One tab per role, labelled `worker` or `workers`: singular for

@@ -23,7 +23,43 @@ type dispatchOpts struct {
 	poll          time.Duration
 	dryRun        bool
 	skipGate      bool
+	force         bool
 	out           io.Writer
+}
+
+// guardPlan refuses a plan edited after dispatch. The hash records what the
+// lanes were told; --force accepts the edit and records the new hash.
+func (o dispatchOpts) guardPlan(st *State, stderr io.Writer) int {
+	if st.PlanHash == "" {
+		return 0
+	}
+	h, err := PlanHash(o.planPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if h == st.PlanHash {
+		return 0
+	}
+	if !o.force {
+		fmt.Fprintf(stderr, "dungeon: plan changed since dispatch (%s, dispatched %s)\n",
+			shortHash(h), shortHash(st.PlanHash))
+		fmt.Fprintln(stderr, "dungeon: re-run dungeon up, or pass --force to accept the edit")
+		return 1
+	}
+	st.PlanHash = h
+	if err := SaveState(o.statePath, *st); err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	return 0
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }
 
 type digest struct {
