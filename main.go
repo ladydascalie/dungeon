@@ -91,6 +91,7 @@ func usage(w io.Writer) {
       split: field or --split changes it. A writer gets its own worktree on
       <encounter>/<minion>. Worktrunk cuts it when wt is installed, plain git
       otherwise. Idempotent: a live minion is left alone.
+      The brief tells each lane to ping the dispatching pane when it stops.
 
   dungeon next   [--timeout 30m] [--accept-timeout 10m] [--poll 2s] [--dry-run] [--force]
       Settle the lanes that stopped, dispatch the units whose deps landed, and
@@ -350,6 +351,7 @@ func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
 
 func dispatchFlags(fs *flag.FlagSet, statePath *string) (*dispatchOpts, *string) {
 	o := &dispatchOpts{}
+	o.parentPane = os.Getenv("HERDR_PANE_ID")
 	plan := fs.String("plan", defaultPlan(), "path to the plan")
 	fs.StringVar(statePath, "state", "", "path to state.json (default: beside the plan)")
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "how long next may wait for lanes")

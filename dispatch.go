@@ -25,6 +25,7 @@ type dispatchOpts struct {
 	skipGate      bool
 	force         bool
 	out           io.Writer
+	parentPane    string
 }
 
 // guardPlan refuses a plan edited after dispatch. The hash records what the
@@ -110,8 +111,9 @@ func minionDir(p Plan, m Minion) string {
 }
 
 // briefText is the whole contract the lane gets. It names what to do, what it
-// owns, what it may not touch, and where to leave the report.
-func briefText(p Plan, m Minion, u Unit, dir, report string) string {
+// owns, what it may not touch, where to leave the report, and how to ping the
+// parent.
+func briefText(p Plan, m Minion, u Unit, dir, report, parentPane string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n%s\n\n", u.ID, u.Goal)
 	fmt.Fprintf(&b, "minion: %s (%s)\nworktree: %s\n", m.ID, m.Role, dir)
@@ -130,6 +132,13 @@ func briefText(p Plan, m Minion, u Unit, dir, report string) string {
 		b.WriteString("accept: none. This unit cannot be marked done, so say plainly what you did.\n")
 	}
 	fmt.Fprintf(&b, "\nreport: %s\n", report)
+	if parentPane != "" {
+		fmt.Fprintf(&b, "\n## Ping the parent when you finish\n\n")
+		b.WriteString("Write the report first, then wake the parent agent:\n\n")
+		fmt.Fprintf(&b, "    herdr pane run %s %q\n\n", parentPane,
+			fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, report))
+		b.WriteString("That pane runs the agent that dispatched you. Do not wait for a reply.\n")
+	}
 	b.WriteString(`
 ## What you may not do
 
@@ -145,18 +154,18 @@ what you did not do.
 	return b.String()
 }
 
-func writeBrief(planPath string, p Plan, m Minion, u Unit) (string, error) {
-	path := briefPath(planPath, u.ID)
+func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit) (string, error) {
+	path := briefPath(o.planPath, u.ID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
 	// Every path in the brief is absolute: the lane runs in a worktree, where a
 	// relative .dungeon/ does not exist.
-	absReport, err := filepath.Abs(reportPath(planPath, u.ID))
+	absReport, err := filepath.Abs(reportPath(o.planPath, u.ID))
 	if err != nil {
 		return "", err
 	}
-	text := briefText(p, m, u, minionDir(p, m), absReport)
+	text := briefText(p, m, u, minionDir(p, m), absReport, o.parentPane)
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return "", err
 	}
@@ -164,7 +173,7 @@ func writeBrief(planPath string, p Plan, m Minion, u Unit) (string, error) {
 }
 
 func dispatchUnit(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st *State, u Unit, m Minion) error {
-	brief, err := writeBrief(o.planPath, p, m, u)
+	brief, err := writeBrief(o, p, m, u)
 	if err != nil {
 		return err
 	}

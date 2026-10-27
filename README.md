@@ -56,6 +56,12 @@ A dispatch is five steps and only the last one can mark a unit `done`:
 5. run the unit's `accept` command in the lane's worktree. Exit 0 is `done`,
    anything else is `rejected`, and no command at all is `unproven`.
 
+Every brief also names the dispatching pane, read from `$HERDR_PANE_ID`, and
+tells the lane to write its report and then run
+`herdr pane run <pane> "<unit> finished. Report: <path>"`. The ping wakes the
+parent agent so it can settle the unit. It carries no state: the report and the
+accept command still decide what `done` means.
+
 `up` is idempotent: a minion whose agent is live is left alone, so a second `up`
 resumes instead of doubling the fleet. A writer gets its own worktree at
 `<repo>/../<encounter>-<minion>` on branch `<encounter>/<minion>`. Lanes run with

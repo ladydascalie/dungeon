@@ -26,6 +26,7 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	os.Setenv("WORKTRUNK_CONFIG_PATH", cfg)
+	os.Setenv("HERDR_PANE_ID", "w9:p9") // every dispatch has a parent pane
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)

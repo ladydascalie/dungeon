@@ -100,6 +100,16 @@ the plan says `split: down`, and they are equal shares of the tab.
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
 
+## Lanes ping you
+
+Every brief tells the lane to write its report and then run `herdr pane run
+<your pane> "<unit> finished. Report: <path>"`. dungeon writes your pane id
+from `$HERDR_PANE_ID` at dispatch, so run dungeon from the pane that should
+receive the ping.
+
+A ping is a wake-up, not a verdict. Run `dungeon next` to settle the unit: the
+report and the accept command still decide. Then read the report.
+
 `f` jumps to the selected unit's lane. Use it on a `blocked` row: the lane is
 asking the operator something, and the answer needs their eyes on that pane.
 

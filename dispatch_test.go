@@ -210,7 +210,7 @@ func TestNextDispatchesAndSettlesOnTheAcceptCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Do the thing.", "src/**", "accept: true", "What you may not do"} {
+	for _, want := range []string{"Do the thing.", "src/**", "accept: true", "herdr pane run w9:p9", "A: w1 finished", "What you may not do"} {
 		if !strings.Contains(string(brief), want) {
 			t.Fatalf("brief missing %q:\n%s", want, brief)
 		}
@@ -313,5 +313,15 @@ func TestNextRespectsConcurrency(t *testing.T) {
 	st, _ := LoadState(statePath)
 	if got := st.UnitStatus("B"); got != "planned" {
 		t.Fatalf("B is %q, want planned while the cap is full\n%s", got, stdout)
+	}
+}
+
+func TestBriefHasNoPingWithoutAParentPane(t *testing.T) {
+	p := Plan{Encounter: "enc", Repo: "/repo"}
+	m := Minion{ID: "w1", Role: RoleWorker}
+	u := Unit{ID: "A", Goal: "Do it.", Paths: []string{"src/**"}}
+	text := briefText(p, m, u, "/repo", "/enc/reports/A.md", "")
+	if strings.Contains(text, "Ping the parent") {
+		t.Fatalf("no parent pane means no ping:\n%s", text)
 	}
 }
