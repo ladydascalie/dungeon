@@ -162,6 +162,10 @@ The lane owns the fix. Your moves, in order:
 Attach anything else a unit needs, so the operator can read it from the view:
 `dungeon attach <unit> <path>`.
 
+When a unit has a pull request, link it so the operator can reach it in one
+keystroke: `dungeon link <unit> <url>`. The view marks the row `↗` and `o`
+opens it. Do not paste the URL into chat instead.
+
 ## Opening the view in herdr
 
 `prefix+d` opens `dungeon view` in a right split, from anywhere in the repo:

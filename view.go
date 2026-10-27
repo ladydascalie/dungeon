@@ -173,6 +173,16 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
+		case "o":
+			u, ok := m.selected()
+			if !ok || u.Link == "" {
+				m.notice = "no link on this unit"
+				return m, nil
+			}
+			if err := openURL(u.Link); err != nil {
+				m.notice = "cannot open: " + err.Error()
+			}
+			return m, nil
 		case "f":
 			return m, m.focusCmd()
 		case "r":
@@ -334,6 +344,7 @@ func (m viewModel) helpView() string {
 		"j / k      move",
 		"g / G      first and last",
 		"f          jump to the selected unit's pane",
+		"o          open the unit's link (a pull request, a review)",
 		"space      fold the selected branch",
 		"c / e      collapse and expand every branch",
 		"t / s      tree and sections layouts",
@@ -500,7 +511,8 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 	rest := strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap))+" "+u.Goal, " ")
 
 	avail := max(10, width-1)
-	right := truncate(m.statusText(u)+suffix, max(6, avail/3))
+	right := truncate(linkMark(u)+m.statusText(u)+suffix, max(6, avail/3))
+
 	budget := avail - runeLen(right) - 2
 	fixed := runeLen(head) + 1 + runeLen(id) + 1
 	if budget < fixed {
@@ -587,6 +599,9 @@ func (m viewModel) detailBox(width, height int) string {
 		lines = append(lines, dimStyle.Render(truncate(line, inner)))
 	}
 
+	if u.Link != "" {
+		lines = append(lines, dimStyle.Render(truncate("link: "+u.Link, inner)))
+	}
 	for len(lines) < height-2 {
 		lines = append(lines, "")
 	}
@@ -600,7 +615,7 @@ func (m viewModel) detailBox(width, height int) string {
 }
 
 func (m viewModel) footerView() string {
-	keys := "j/k · f focus · d detail · space fold · h hide done · t/s · ? help · q quit"
+	keys := "j/k · f focus · o link · d detail · space fold · h hide · t/s · ? help · q quit"
 	if m.state.UpdatedAt == "" {
 		keys = "no state yet · " + keys
 	}

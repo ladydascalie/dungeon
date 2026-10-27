@@ -34,6 +34,7 @@ type UnitRow struct {
 	WaitsOn   []string `json:"waits_on,omitempty"`
 	Goal      string   `json:"goal"`
 	Note      string   `json:"note,omitempty"`
+	Link      string   `json:"link,omitempty"`
 }
 
 type MinionRow struct {
@@ -80,7 +81,7 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 			Goal:   u.Goal,
 		}
 		if us, ok := st.Units[u.ID]; ok {
-			row.Note = us.Note
+			row.Note, row.Link = us.Note, us.Link
 		}
 		if a, ok := agents[u.Minion]; ok {
 			row.Pane, row.Agent = a.Pane, a.Status

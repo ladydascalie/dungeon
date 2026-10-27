@@ -95,6 +95,9 @@ func (m viewModel) detailOverlay() string {
 	}
 
 	files := m.artifacts(u)
+	if u.Link != "" {
+		b.WriteString("\n" + sectionStyle.Render("LINK") + "\n" + truncate(u.Link, inner) + "\n")
+	}
 	b.WriteString("\n" + sectionStyle.Render(fmt.Sprintf("FILES %d", len(files))) + "\n")
 	for i, a := range files {
 		mark := " "

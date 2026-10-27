@@ -24,6 +24,7 @@ type UnitState struct {
 	Note    string   `json:"note,omitempty"`
 	At      string   `json:"at"`
 	Files   []string `json:"files,omitempty"`
+	Link    string   `json:"link,omitempty"` // a pull request or any URL: forge agnostic, http(s) only
 	History []Change `json:"history,omitempty"`
 }
 

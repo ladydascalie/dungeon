@@ -34,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return setCmd(ctx, args[1:], stdout, stderr)
 	case "view":
 		return viewCmd(ctx, args[1:], stdout, stderr)
+	case "link":
+		return linkCmd(args[1:], stdout, stderr)
 	case "attach":
 		return attachCmd(args[1:], stdout, stderr)
 	case "init":
@@ -74,6 +76,10 @@ func usage(w io.Writer) {
       Record a change. Unit statuses: blocked, working, planned,
       unproven, rejected, done, canceled.
       Minion statuses: spawned, busy, waiting, lost, absent.
+
+  dungeon link <unit> <url> | --clear
+      Pin a pull request, review or any http(s) url to a unit. The view shows
+      it and opens it with o, whatever the forge.
 
   dungeon attach <unit> <path>
       Keep a file with a unit: a brief, a report, a handoff note. It shows up
@@ -441,6 +447,66 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	fmt.Fprint(stdout, d)
+	return 0
+}
+
+func linkCmd(args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("link", stderr)
+	planPath, statePath := planFlags(fs)
+	clear := fs.Bool("clear", false, "forget the link")
+	rest, err := parseMixed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(rest) < 1 || (len(rest) < 2 && !*clear) {
+		fmt.Fprintln(stderr, "usage: dungeon link <unit> <url> | --clear")
+		return 2
+	}
+	unit := rest[0]
+	raw := ""
+	if len(rest) > 1 {
+		raw = rest[1]
+	}
+	if *clear {
+		raw = ""
+	}
+
+	p, code := loadValidPlan(*planPath, stderr)
+	if code != 0 {
+		return code
+	}
+	if _, ok := findUnit(p, unit); !ok {
+		fmt.Fprintf(stderr, "dungeon: unit %q is not in %s\n", unit, *planPath)
+		return 2
+	}
+	if *statePath == "" {
+		*statePath = StatePath(*planPath)
+	}
+	st, err := LoadState(*statePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if st.Encounter == "" {
+		st.Encounter = p.Encounter
+	}
+	if st.Encounter != p.Encounter {
+		fmt.Fprintf(stderr, "dungeon: %s holds encounter %q, the plan is %q\n", *statePath, st.Encounter, p.Encounter)
+		return 2
+	}
+	if err := st.SetLink(unit, raw); err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if err := SaveState(*statePath, st); err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if raw == "" {
+		fmt.Fprintf(stdout, "%s link cleared\n", unit)
+		return 0
+	}
+	fmt.Fprintf(stdout, "%s %s\n", unit, st.Units[unit].Link)
 	return 0
 }
 

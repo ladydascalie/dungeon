@@ -35,6 +35,8 @@ dungeon view --detail MOL1         # open the detail pane on one unit
 
 dungeon attach MOL1 /tmp/brief-mol1.md
 
+dungeon link MOL1 https://github.com/org/repo/pull/42
+
 dungeon up                         # spawn the lanes, then one round of next
 dungeon up --no-dispatch           # spawn only
 dungeon next --dry-run             # say what would go out
@@ -93,6 +95,10 @@ from `dungeon attach`. `tab` picks a file, `enter` reads it in place with `j`/`k
 scrolling, `esc` goes back. A `.md` brief or report is rendered as markdown, so
 the headings, lists and code blocks a lane wrote survive the trip. Anything else
 is shown as plain text. A missing brief is shown as missing, not hidden.
+
+`link` pins a pull request, a review, or any http(s) url to a unit. The tool
+never parses it, so no forge gets special treatment. The row is marked `↗`,
+the card shows the url, and `o` opens it in the browser. `--clear` forgets it.
 
 `view` is the same snapshot as `status`, rendered with charmbracelet. Rows carry
 a right-aligned status column (`working w5M:p8`, `waits TOK4`, `needs you`), and
