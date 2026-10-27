@@ -13,6 +13,10 @@ import (
 // up spawns the encounter's minions. It is idempotent: a minion whose agent is
 // already live is left alone, so a second up resumes rather than doubling the
 // fleet.
+//
+// The layout follows the plan's shape: one workspace per encounter, one tab per
+// role, one pane per minion. A pinned minion keeps its own pane and is not moved
+// into the workspace.
 
 type spawnResult struct {
 	Spawned []string
@@ -54,9 +58,37 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 		return res, fmt.Errorf("repo %s is not readable", p.Repo)
 	}
 	dir := encounterDir(planPath)
+	_, counts := countRoles(p.Minions)
 
-	var root string
-	for i, m := range p.Minions {
+	ws := h.findWorkspace(ctx, p.Encounter)
+	tabs := map[string]*tabFor{}
+
+	// tab returns the tab a role runs in, creating the workspace and the tab on
+	// first use. A resumed encounter reuses the workspace it finds.
+	tab := func(m Minion) (*tabFor, error) {
+		if t, ok := tabs[m.Role]; ok {
+			return t, nil
+		}
+		label := roleLabel(m.Role, counts[m.Role])
+		t := &tabFor{total: counts[m.Role]}
+		if ws == "" {
+			id, tabID, root, err := h.openWorkspace(ctx, p.Encounter, label, p.Repo)
+			if err != nil {
+				return nil, err
+			}
+			ws, t.tab, t.root = id, tabID, root
+		} else {
+			tabID, root, err := h.openTab(ctx, ws, label, p.Repo)
+			if err != nil {
+				return nil, err
+			}
+			t.tab, t.root = tabID, root
+		}
+		tabs[m.Role] = t
+		return t, nil
+	}
+
+	for _, m := range p.Minions {
 		if a, live := agents[m.ID]; live {
 			st.SetMinion(m.ID, "spawned", "already live")
 			st.PinPane(m.ID, a.Pane)
@@ -74,11 +106,23 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 			}
 		}
 
-		ratio := 1.0 / float64(len(p.Minions)-i)
-		pane, err := h.lanePane(ctx, p.Encounter, m.Pane, &root, cwd, ratio)
-		if err != nil {
-			return res, err
+		var pane string
+		if m.Pane != "" && h.paneExists(ctx, m.Pane) {
+			pane = m.Pane // the operator's pane wins over the layout
+		} else {
+			t, err := tab(m)
+			if err != nil {
+				return res, err
+			}
+			pane, err = t.next(ctx, h, cwd)
+			if err != nil {
+				return res, err
+			}
 		}
+		if m.Pane != "" && pane != m.Pane {
+			fmt.Fprintf(out, "%s: pane %s is gone, using %s\n", m.ID, m.Pane, pane)
+		}
+
 		sessionDir := filepath.Join(dir, "sessions", m.ID)
 		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 			return res, err

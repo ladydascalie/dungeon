@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 )
 
 // down stops the fleet and leaves everything the encounter wrote. Closing a pane
@@ -70,13 +69,7 @@ func down(ctx context.Context, p Plan, st *State, force bool, out io.Writer) (st
 	}
 
 	if len(refused) == 0 {
-		for _, tab := range h.listTabs(ctx, os.Getenv("HERDR_WORKSPACE_ID")) {
-			if tab.Label == p.Encounter {
-				if err := h.closeTab(ctx, tab.ID); err == nil {
-					break
-				}
-			}
-		}
+		closeEncounter(ctx, h, p)
 	}
 	stopped, refused = verifyDown(ctx, h, st, stopped, refused)
 	return stopped, refused, nil

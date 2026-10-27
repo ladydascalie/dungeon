@@ -33,7 +33,6 @@ case "$1 $2" in
     done < "$FAKE_STARTED"
     printf ']}}'
     ;;
-  "tab create") echo '{"result":{"root_pane":{"pane_id":"w9:p1"}}}' ;;
   "tab list") echo '{"result":{"tabs":[{"tab_id":"w9:t1","label":"enc"}]}}' ;;
   "tab close") echo '{"result":{"type":"ok"}}' ;;
   "pane get")
@@ -45,6 +44,11 @@ case "$1 $2" in
   "tab focus") echo '{"result":{"type":"ok"}}' ;;
     "pane close") : > "$FAKE_STARTED"; echo '{"result":{"type":"ok"}}' ;;  # closing the pane kills the agent in it
   "pane split") echo '{"result":{"pane":{"pane_id":"w9:p2"}}}' ;;
+    "workspace list") if [ -f "$FAKE_WS" ]; then echo '{"result":{"workspaces":[{"workspace_id":"w9","label":"enc"}]}}'; else echo '{"result":{"workspaces":[]}}'; fi ;;
+  "workspace create") touch "$FAKE_WS"; echo '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}' ;;
+  "workspace close") rm -f "$FAKE_WS"; echo '{"result":{"type":"ok"}}' ;;
+  "tab rename") echo '{"result":{"type":"ok"}}' ;;
+  "tab create") echo '{"result":{"tab":{"tab_id":"w9:t9"},"root_pane":{"pane_id":"w9:p9"}}}' ;;
   "agent start") echo "$3:${FAKE_STATUS:-idle}" >> "$FAKE_STARTED"
                  echo '{"result":{"type":"ok"}}' ;;
   "agent send-keys")
@@ -64,6 +68,7 @@ esac
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_LOG", log)
 	t.Setenv("FAKE_STARTED", startedFile)
+	t.Setenv("FAKE_WS", filepath.Join(dir, "workspace"))
 	return log
 }
 
@@ -147,7 +152,7 @@ func TestUpSpawnsOneLaneAndCutsAWorktree(t *testing.T) {
 		t.Fatalf("worktree not cut at %s: %v", wt, err)
 	}
 	calls, _ := os.ReadFile(log)
-	for _, want := range []string{"tab create", "pane split", "agent start w1"} {
+	for _, want := range []string{"workspace create", "tab rename", "agent start w1"} {
 		if !strings.Contains(string(calls), want) {
 			t.Fatalf("herdr was not asked to %q:\n%s", want, calls)
 		}

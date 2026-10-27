@@ -105,8 +105,8 @@ func TestAStaleGoneFallsBackToASplit(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
 	calls, _ := os.ReadFile(log)
-	if !strings.Contains(string(calls), "pane split") {
-		t.Fatalf("a gone pin should fall back to a split:\n%s", calls)
+	if !strings.Contains(string(calls), "workspace create") {
+		t.Fatalf("a gone pin should fall back to the encounter workspace:\n%s", calls)
 	}
 	st, _ := LoadState(statePath)
 	if got := st.Minions["w1"].Pane; got == "gone:p1" || got == "" {
@@ -132,5 +132,63 @@ func TestDownInterruptsAPinnedLaneInsteadOfClosingItsPane(t *testing.T) {
 	}
 	if strings.Contains(string(calls), "pane close") {
 		t.Fatalf("a pinned pane belongs to the operator:\n%s", calls)
+	}
+}
+
+func TestOneTabPerRole(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	plan := strings.Replace(twoWorkerPlan, "%REPO%", repo, 1)
+	plan = strings.Replace(plan, `  - {id: w2, role: worker, worktree: w2}`,
+		`  - {id: w2, role: worker, worktree: w2}
+  - {id: r1, role: reviewer, of: w1}`, 1)
+	plan = strings.Replace(plan, `  - id: B
+    minion: w2
+    paths: [b.txt]
+    goal: Second change.
+    accept: test -f b.txt`, `  - id: B
+    minion: w2
+    paths: [b.txt]
+    goal: Second change.
+    accept: test -f b.txt
+  - id: R
+    minion: r1
+    deps: [A]
+    goal: Review both.`, 1)
+	planPath, _, _ := encounter(t, repo, plan)
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	calls, _ := os.ReadFile(log)
+	s := string(calls)
+	if strings.Count(s, "workspace create") != 1 {
+		t.Fatalf("one workspace per encounter:\n%s", s)
+	}
+	if !strings.Contains(s, "tab rename w9:t1 workers") {
+		t.Fatalf("the first tab holds the two workers:\n%s", s)
+	}
+	if !strings.Contains(s, "tab create --workspace w9 --label reviewer") {
+		t.Fatalf("the reviewer gets its own tab, singular:\n%s", s)
+	}
+	if strings.Count(s, "pane split") != 1 {
+		t.Fatalf("two workers share one tab with one split:\n%s", s)
+	}
+}
+
+func TestPinnedMinionStaysOutOfTheWorkspace(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	plan := strings.Replace(planFor(repo),
+		"  - {id: w1, role: worker, worktree: w1}",
+		"  - {id: w1, role: worker, worktree: w1, pane: \"w1P:p9\"}", 1)
+	planPath, _, _ := encounter(t, repo, plan)
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	calls, _ := os.ReadFile(log)
+	if strings.Contains(string(calls), "workspace create") {
+		t.Fatalf("a fully pinned encounter needs no workspace:\n%s", calls)
 	}
 }

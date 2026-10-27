@@ -11,6 +11,10 @@ func downSetup(t *testing.T, started string) (planPath, statePath, log string) {
 	t.Helper()
 	repo := gitRepo(t)
 	log = fakeHerdr(t, started)
+	// A previous up would have created the encounter workspace.
+	if err := os.WriteFile(os.Getenv("FAKE_WS"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	planPath, statePath, _ = encounter(t, repo, strings.Replace(twoWorkerPlan, "%REPO%", repo, 1))
 	t.Setenv("HERDR_WORKSPACE_ID", "w9")
 	return planPath, statePath, log
@@ -33,8 +37,8 @@ func TestDownStopsIdleLanesAndLeavesTheRun(t *testing.T) {
 	if strings.Count(string(calls), "pane close") != 2 {
 		t.Fatalf("both panes should be closed:\n%s", calls)
 	}
-	if !strings.Contains(string(calls), "tab close") {
-		t.Fatalf("the encounter tab should be closed:\n%s", calls)
+	if !strings.Contains(string(calls), "workspace close") {
+		t.Fatalf("the encounter workspace should be closed:\n%s", calls)
 	}
 	st, _ := LoadState(statePath)
 	if st.MinionStatus("w1") != "absent" {
@@ -56,8 +60,8 @@ func TestDownRefusesToStopAWorkingLane(t *testing.T) {
 		t.Fatalf("output:\n%s", stdout)
 	}
 	calls, _ := os.ReadFile(log)
-	if strings.Contains(string(calls), "tab close") {
-		t.Fatalf("the tab must stay while a lane is working:\n%s", calls)
+	if strings.Contains(string(calls), "workspace close") {
+		t.Fatalf("the workspace must stay while a lane is working:\n%s", calls)
 	}
 	st, _ := LoadState(statePath)
 	if st.MinionStatus("w2") != "absent" {

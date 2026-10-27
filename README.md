@@ -60,6 +60,12 @@ resumes instead of doubling the fleet. A writer gets its own git worktree at
 `--no-skills --no-mcp` and a tool allowlist that matches their role: `read,bash`
 for staff work, `read,bash,edit,write` for writers.
 
+The layout follows the plan. One workspace per encounter, labelled with the
+encounter name. One tab per role, labelled `worker` or `workers`: singular for
+one minion, plural for more, so the tabs say how many lanes are in each. One
+pane per minion, split equally from the tab's root pane. A pinned minion stays
+in its own pane and is not moved into the workspace.
+
 A minion may name a pane to run in, and `up` uses it when herdr still has it:
 `- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pane the
 operator picked is where their attention already is, so the pin is honoured and
