@@ -162,11 +162,18 @@ The lane owns the fix. Your moves, in order:
 Attach anything else a unit needs, so the operator can read it from the view:
 `dungeon attach <unit> <path>`.
 
+## Opening the view in herdr
+
+`prefix+d` opens `dungeon view` in a right split, from anywhere in the repo:
+the plan is found by walking up. `f` then jumps from the graph to a lane.
+Tell the operator to look there when a unit is `blocked`; do not paste pane
+output into chat.
+
 ## Finishing
 
 ```bash
 dungeon land          # merge done units, re-run every accept against the result
-dungeon down          # close the lanes and the tab, keep the run
+dungeon down          # close the workspace, keep the run
 ```
 
 Report to the operator: what landed, what is blocked and why, and which branch

@@ -122,7 +122,7 @@ func tick(d time.Duration) tea.Cmd {
 func loadSnapshot(planPath, statePath string) refreshedMsg {
 	p, code := loadValidPlan(planPath, io.Discard)
 	if code != 0 {
-		return refreshedMsg{err: fmt.Errorf("plan %s does not validate: run dungeon check", planPath)}
+		return refreshedMsg{err: fmt.Errorf("no usable plan at %s: run dungeon init or dungeon check", planPath)}
 	}
 	st, err := LoadState(statePath)
 	if err != nil {

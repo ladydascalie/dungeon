@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -13,6 +14,27 @@ func encounterDir(planPath string) string {
 		return abs
 	}
 	return filepath.Dir(planPath)
+}
+
+// defaultPlan finds the encounter from wherever the command runs: the plan is
+// .dungeon/plan.yaml, searched up from the working directory the way git finds
+// its root. A herdr pane or a subdirectory of the repo then needs no flag.
+func defaultPlan() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return defaultPlanPath
+	}
+	for {
+		candidate := filepath.Join(dir, ".dungeon", "plan.yaml")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return defaultPlanPath
+		}
+		dir = parent
+	}
 }
 
 // underEncounter reports whether a path belongs to the encounter rather than to

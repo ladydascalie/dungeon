@@ -156,6 +156,22 @@ dependency graph unchanged. It validates clean. Gates become reviewer verdicts;
 the single `orchestrator` owner becomes one gatekeeper plus one integrator. A
 test compares the two plans unit by unit, so the graph cannot drift.
 
+## In herdr
+
+A keybinding that opens the view in a right split, from any directory in the
+repo. `dungeon` finds the plan by walking up, the way git finds its root:
+
+```toml
+[[keys.command]]
+key = "prefix+d"
+type = "shell"
+command = '''pane=$("$HERDR_BIN_PATH" pane split "$HERDR_ACTIVE_PANE_ID" --direction right --ratio 0.4 --focus --cwd "$HERDR_ACTIVE_PANE_CWD" | jq -r '.result.pane.pane_id'); "$HERDR_BIN_PATH" pane run "$pane" dungeon view'''
+description = "dungeon: open the encounter view"
+```
+
+Change `--direction right` for `down` or `left`. Drop `--focus` if the graph
+should open without stealing the cursor.
+
 ## The skill
 
 `skills/dungeon/SKILL.md` teaches a pi agent to run this tool, and its first

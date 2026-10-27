@@ -147,7 +147,7 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func planFlags(fs *flag.FlagSet) (*string, *string) {
-	plan := fs.String("plan", defaultPlanPath, "path to the plan")
+	plan := fs.String("plan", defaultPlan(), "path to the plan")
 	state := fs.String("state", "", "path to state.json (default: beside the plan)")
 	return plan, state
 }
@@ -339,7 +339,7 @@ func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
 
 func dispatchFlags(fs *flag.FlagSet, statePath *string) (*dispatchOpts, *string) {
 	o := &dispatchOpts{}
-	plan := fs.String("plan", defaultPlanPath, "path to the plan")
+	plan := fs.String("plan", defaultPlan(), "path to the plan")
 	fs.StringVar(statePath, "state", "", "path to state.json (default: beside the plan)")
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "how long next may wait for lanes")
 	fs.DurationVar(&o.acceptTimeout, "accept-timeout", 10*time.Minute, "how long one accept command may run")

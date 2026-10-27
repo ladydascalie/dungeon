@@ -183,7 +183,7 @@ func TestViewRefusesABrokenPlan(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d, want 1", code)
 	}
-	if !strings.Contains(stderr, "does not validate") {
+	if !strings.Contains(stderr, "no usable plan") {
 		t.Fatalf("stderr %q", stderr)
 	}
 }
