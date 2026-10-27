@@ -84,15 +84,17 @@ type viewModel struct {
 	hideSettled bool
 	help        bool
 
-	notice      string // the last thing that went wrong, shown in the footer until the next key
-	overlay     string // "", "detail" or "reader"
-	artIdx      int
-	reader      string
-	readerLines []string
-	readerTop   int
-	folded      map[string]bool
-	order       []string // unit ids in display order
-	cursor      int
+	notice         string // the last thing that went wrong, shown in the footer until the next key
+	overlay        string // "", "detail" or "reader"
+	artIdx         int
+	reader         string
+	readerLines    []string
+	readerTop      int
+	readerRendered []string // markdown, rendered once per width, never per frame
+	readerWidth    int
+	folded         map[string]bool
+	order          []string // unit ids in display order
+	cursor         int
 
 	width  int
 	height int
@@ -142,6 +144,9 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.overlay == "reader" {
+			m.renderReader()
+		}
 		return m, nil
 
 	case tickMsg:

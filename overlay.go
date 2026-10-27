@@ -144,13 +144,36 @@ func (m viewModel) detailOverlay() string {
 	return lipgloss.Place(m.width, max(4, m.height-5), lipgloss.Center, lipgloss.Center, box) + "\n" + hint
 }
 
+// readerDisplay is what the reader draws: rendered markdown when the file was
+// rendered at this width, else the source lines. Nothing here renders.
+func (m viewModel) readerDisplay() []string {
+	if len(m.readerRendered) > 0 {
+		return m.readerRendered
+	}
+	return m.readerLines
+}
+
+// renderReader turns the source into display lines once, when the file is
+// opened and again only when the pane's width changes. Rendering in the frame
+// path made every keystroke pay for a full markdown parse.
+func (m *viewModel) renderReader() {
+	m.readerRendered = nil
+	if !isMarkdown(m.reader) || len(m.readerLines) == 0 || len(m.readerLines) > 2000 {
+		m.readerWidth = 0
+		return
+	}
+	width := max(40, m.width-8)
+	if width == m.readerWidth && len(m.readerRendered) > 0 {
+		return
+	}
+	m.readerRendered = renderMarkdown(strings.Join(m.readerLines, "\n"), width)
+	m.readerWidth = width
+}
+
 func (m viewModel) readerView() string {
 	inner := max(20, m.width-6)
 	rows := max(3, m.height-8)
-	lines := m.readerLines
-	if isMarkdown(m.reader) {
-		lines = renderMarkdown(strings.Join(m.readerLines, "\n"), max(20, inner-2))
-	}
+	lines := m.readerDisplay()
 	body := ""
 	if len(lines) == 0 {
 		body = dimStyle.Render("empty file")
@@ -194,6 +217,7 @@ func (m *viewModel) openArtifact() {
 	}
 	m.readerTop = 0
 	m.overlay = "reader"
+	m.renderReader()
 }
 
 func (m *viewModel) handleOverlayKey(key string) bool {
@@ -221,7 +245,7 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 	case "reader":
 		switch key {
 		case "j", "down":
-			if m.readerTop+1 < len(m.readerLines) {
+			if m.readerTop+1 < len(m.readerDisplay()) {
 				m.readerTop++
 			}
 		case "k", "up":
@@ -231,7 +255,7 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 		case "g", "home":
 			m.readerTop = 0
 		case "G", "end":
-			m.readerTop = max(0, len(m.readerLines)-1)
+			m.readerTop = max(0, len(m.readerDisplay())-1)
 		case "esc", "d", "enter":
 			m.overlay = "detail"
 		default:

@@ -96,6 +96,13 @@ scrolling, `esc` goes back. A `.md` brief or report is rendered as markdown, so
 the headings, lists and code blocks a lane wrote survive the trip. Anything else
 is shown as plain text. A missing brief is shown as missing, not hidden.
 
+Markdown is rendered **once**, when the file is opened and again only when the
+pane's width changes. Rendering it in the frame path made every keystroke pay for
+a full parse, which is why scrolling a long report crawled. The style is
+`notty`: structure without per-word colour, which cut a 400 line report from
+520KB of escape codes to 40KB, and its render from 51ms to 10ms. The reader
+scrolls at about 1.3ms a frame.
+
 `link` pins a pull request, a review, or any http(s) url to a unit. The tool
 never parses it, so no forge gets special treatment. The row is marked `↗`,
 the card shows the url, and `o` opens it in the browser. `--clear` forgets it.
