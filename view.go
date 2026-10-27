@@ -413,12 +413,14 @@ func (m viewModel) listLines(width int) ([]string, int) {
 }
 
 func (m viewModel) treeLines(width int) ([]string, int) {
-	var lines []string
-	cursorLine := 0
-	cursor := m.selectedID()
+	type row struct {
+		u                    UnitRow
+		prefix, suffix, fold string
+	}
+	var rows []row
 	tree, counts, branches := m.tree()
 	for _, line := range tree {
-		// A leaf keeps an empty fold cell so the status glyphs stay aligned.
+		// A leaf keeps an empty fold cell so the ids stay aligned.
 		suffix, fold := "", " "
 		switch {
 		case counts[line.ID] > 0:
@@ -426,10 +428,24 @@ func (m viewModel) treeLines(width int) ([]string, int) {
 		case branches[line.ID]:
 			fold = "⛧"
 		}
-		if line.ID == cursor {
+		rows = append(rows, row{m.rowByID(line.ID), line.Prefix, suffix, fold})
+	}
+
+	parts := make([][5]string, 0, len(rows))
+	for _, r := range rows {
+		h, l, i, rest, right := m.rowParts(r.u, r.prefix, r.suffix, r.fold)
+		parts = append(parts, [5]string{h, l, i, rest, right})
+	}
+	mt := m.metricsOf(parts, max(10, width-1))
+
+	var lines []string
+	cursorLine := 0
+	cursor := m.selectedID()
+	for _, r := range rows {
+		if r.u.ID == cursor {
 			cursorLine = len(lines)
 		}
-		lines = append(lines, m.rowLine(m.rowByID(line.ID), width, line.Prefix, suffix, fold))
+		lines = append(lines, m.rowLine(r.u, width, r.prefix, r.suffix, r.fold, mt))
 	}
 	return lines, cursorLine
 }
@@ -448,6 +464,13 @@ func (m viewModel) sectionLines(width int) ([]string, int) {
 		if len(rows) == 0 {
 			continue
 		}
+		var parts [][5]string
+		for _, u := range rows {
+			h, l, i, rest, right := m.rowParts(u, "", "", "")
+			parts = append(parts, [5]string{h, l, i, rest, right})
+		}
+		mt := m.metricsOf(parts, max(10, width-1))
+
 		if len(lines) > 0 {
 			lines = append(lines, "")
 		}
@@ -456,10 +479,7 @@ func (m viewModel) sectionLines(width int) ([]string, int) {
 			if u.ID == cursor {
 				cursorLine = len(lines)
 			}
-			if u.ID == cursor {
-				cursorLine = len(lines)
-			}
-			lines = append(lines, m.rowLine(u, width, "", "", ""))
+			lines = append(lines, m.rowLine(u, width, "", "", "", mt))
 		}
 	}
 	return lines, cursorLine
@@ -487,13 +507,10 @@ func (m viewModel) statusText(u UnitRow) string {
 	return u.Status
 }
 
-// rowLine builds one unit row: connectors, fold marker, status glyph, id, join
-// count, where the work is, the goal, and a right aligned status.
-//
-// Only the glyph, the id and the right column carry the status colour. Colouring
-// the whole line made a full screen of work read as a wall of colour, and the
-// status is already in two places.
-func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) string {
+// rowParts splits a row into the two columns' worth of text. The left column is
+// the connectors, the fold mark, the id, the join count, the lane and the goal;
+// the right column is the status.
+func (m viewModel) rowParts(u UnitRow, prefix, suffix, fold string) (head, lead, id, rest, right string) {
 	join := ""
 	if len(u.Inputs) > 1 {
 		join = fmt.Sprintf(" ∧%d", len(u.Inputs))
@@ -502,27 +519,62 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 	if u.Pane != "" {
 		where += " " + u.Pane
 	}
-	head := prefix + fold
-	lead := ""
+	head = prefix + fold
 	if head != "" {
 		lead = " " // air between the fold mark and the id
 	}
-	id := pad(u.ID, idWidth(m.snap))
-	rest := strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap))+" "+u.Goal, " ")
+	id = pad(u.ID, idWidth(m.snap))
+	rest = strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap))+" "+u.Goal, " ")
+	right = linkMark(u) + m.statusText(u) + suffix
+	return head, lead, id, rest, right
+}
 
-	avail := max(10, width-1)
-	right := truncate(linkMark(u)+m.statusText(u)+suffix, max(6, avail/3))
+// rowMetrics sizes the two columns for the rows that are about to be drawn: the
+// left column as wide as its longest line, the right column as wide as its
+// longest status, and a small fixed gap between them. The pair then sits at the
+// left of the frame with nothing stretched to reach the far edge, which is what
+// makes a wide terminal readable.
+type rowMetrics struct {
+	left  int
+	right int
+	pad   int
+}
 
-	budget := min(avail-runeLen(right)-2, m.contentWidth())
+func (m viewModel) metricsOf(rows [][5]string, avail int) rowMetrics {
+	const pad = 2
+	left, right := 0, 0
+	for _, parts := range rows {
+		head, lead, id, rest, status := parts[0], parts[1], parts[2], parts[3], parts[4]
+		left = max(left, runeLen(head+lead+id+" "+rest))
+		right = max(right, runeLen(status))
+	}
+	// Keep the gap at pad and let the left column shrink instead.
+	left = min(left, max(20, avail-right-pad))
+	return rowMetrics{left: left, right: right, pad: pad}
+}
+
+// rowLine draws one row against those columns: the left text padded to the
+// column, the gap, then the status right aligned inside its own column.
+func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string, mt rowMetrics) string {
+	head, lead, id, rest, right := m.rowParts(u, prefix, suffix, fold)
+
 	fixed := runeLen(head) + runeLen(lead) + runeLen(id) + 1
-	if budget < fixed {
-		plain := truncate(head+lead+id, max(4, budget))
+	if mt.left < fixed {
+		plain := truncate(head+lead+id, max(4, mt.left))
 		return m.paintRow(u, plain, "", "", "")
 	}
-	rest = truncate(rest, max(0, budget-fixed))
+	// The padding belongs to the rest of the row, not to the line: paintRow
+	// rebuilds the row from its parts, so spaces added to the assembled string
+	// would be dropped and the status would drift left on short rows.
+	rest = truncate(rest, max(0, mt.left-fixed))
+	rest += strings.Repeat(" ", max(0, mt.left-fixed-runeLen(rest)))
 	plain := head + lead + id + " " + rest
-	gap := max(1, avail-runeLen(plain)-runeLen(right))
-	return m.paintRow(u, plain, head+lead, id, rest) + strings.Repeat(" ", gap) + m.paintRight(u, right)
+
+	right = truncate(right, mt.right)
+	if mt.right > runeLen(right) {
+		right = strings.Repeat(" ", mt.right-runeLen(right)) + right
+	}
+	return m.paintRow(u, plain, head+lead, id, rest) + strings.Repeat(" ", mt.pad) + m.paintRight(u, right)
 }
 
 // paintRow styles the left side. The selected row is plain text inside reverse

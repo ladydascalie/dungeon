@@ -185,8 +185,8 @@ instead.
 ## Opening the view in herdr
 
 `prefix+d` opens `dungeon view` in a right split, from anywhere in the repo:
-the plan is found by walking up. A row's text stops at two thirds of the pane and the
-status stays right-aligned, so a wide terminal gives you a reading column. `f` then jumps from the graph to a lane.
+the plan is found by walking up. Rows are a two column table sized to their content, with a
+two column gap, so a wide terminal shows a block rather than a stretched line. `f` then jumps from the graph to a lane.
 Tell the operator to look there when a unit is `blocked`; do not paste pane
 output into chat.
 

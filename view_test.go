@@ -385,36 +385,59 @@ func TestCardIsOneLinePerField(t *testing.T) {
 	}
 }
 
-func TestTextIsCappedAtTwoThirdsAndStatusStaysRight(t *testing.T) {
-	plan := writePlan(t, strings.Replace(statusPlan,
+func TestColumnsAreContentSizedWithASmallGap(t *testing.T) {
+	short := writePlan(t, statusPlan)
+	long := writePlan(t, strings.Replace(statusPlan,
 		"goal: first", "goal: "+strings.Repeat("a long goal ", 30), 1))
-	state := filepath.Join(t.TempDir(), "state.json")
-	m := newTestView(t, plan, state)
 
-	for _, width := range []int{284, 200, 120} {
-		m.width, m.height = width, 40
-		cap := width * 2 / 3
-		if got := m.contentWidth(); got != cap {
-			t.Fatalf("%d wide: cap %d, want %d", width, got, cap)
-		}
-		lines, _ := m.listLines(width)
-		row := ""
-		for _, l := range lines {
-			if strings.Contains(l, "ready") {
-				row = l
+	for _, tc := range []struct {
+		name  string
+		plan  string
+		width int
+		// narrow is true when the content should not reach the frame edge.
+		narrow bool
+	}{
+		{"short goals, wide frame", short, 284, true},
+		{"long goals, wide frame", long, 284, false},
+		{"long goals, narrow frame", long, 120, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "state.json")
+			m := newTestView(t, tc.plan, state)
+			m.width, m.height = tc.width, 40
+
+			lines, _ := m.listLines(tc.width)
+			var widths []int
+			for _, line := range lines {
+				if strings.Contains(line, "ready") || strings.Contains(line, "waits") {
+					widths = append(widths, runeLen(strings.TrimRight(line, " ")))
+				}
 			}
-		}
-		if row == "" {
-			t.Fatalf("%d wide: no row with a status", width)
-		}
-		// The status is right aligned at the frame edge.
-		if got := runeLen(strings.TrimRight(row, " ")); got != width-1 {
-			t.Fatalf("%d wide: row ends at %d, want %d", width, got, width-1)
-		}
-		// The goal stops at two thirds, leaving a gap before the status.
-		idx := strings.Index(row, "ready")
-		if left := runeLen(strings.TrimRight(row[:idx], " ")); left > cap {
-			t.Fatalf("%d wide: the text runs to %d, cap is %d: %q", width, left, cap, row)
-		}
+			if len(widths) == 0 {
+				t.Fatal("no rows")
+			}
+			// Every status ends at the same column: the two columns are a table.
+			for _, w := range widths {
+				if w != widths[0] {
+					t.Fatalf("statuses are not aligned: %v", widths)
+				}
+			}
+			if widths[0] > tc.width {
+				t.Fatalf("block is %d wide, frame is %d", widths[0], tc.width)
+			}
+			if tc.narrow && widths[0] >= tc.width-1 {
+				t.Fatalf("short content should not reach the edge: %d of %d", widths[0], tc.width)
+			}
+			if !tc.narrow && widths[0] != tc.width-1 {
+				t.Fatalf("long content should fill to the edge: %d of %d", widths[0], tc.width)
+			}
+			// The gap between the two columns is the pad, so the row's text ends
+			// two columns before the status column begins. Short rows get more
+			// whitespace than that; the column is sized by the longest row.
+			if !tc.narrow && widths[0] != tc.width-1 {
+				t.Fatalf("long content should fill to the edge")
+			}
+
+		})
 	}
 }
