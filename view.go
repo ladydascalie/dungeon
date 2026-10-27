@@ -427,6 +427,7 @@ func (m viewModel) treeLines(width int) ([]string, int) {
 	cursor := m.selectedID()
 	tree, counts, branches := m.tree()
 	for _, line := range tree {
+		// A leaf keeps an empty fold cell so the status glyphs stay aligned.
 		suffix, fold := "", " "
 		switch {
 		case counts[line.ID] > 0:
@@ -511,6 +512,10 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 		where += " " + u.Pane
 	}
 	head := prefix + fold
+	lead := ""
+	if head != "" {
+		lead = " " // air between the fold mark and the status glyph
+	}
 	glyph := statusGlyphs[u.Status]
 	id := pad(u.ID, idWidth(m.snap))
 	rest := strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap))+" "+u.Goal, " ")
@@ -519,15 +524,15 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string) st
 	right := truncate(linkMark(u)+m.statusText(u)+suffix, max(6, avail/3))
 
 	budget := avail - runeLen(right) - 2
-	fixed := runeLen(head) + 1 + runeLen(id) + 1
+	fixed := runeLen(head) + runeLen(lead) + 1 + runeLen(id) + 1
 	if budget < fixed {
 		plain := truncate(head+glyph+" "+id, max(4, budget))
 		return m.paintRow(u, plain, "", "", "", "")
 	}
 	rest = truncate(rest, max(0, budget-fixed))
-	plain := head + glyph + " " + id + " " + rest
+	plain := head + lead + glyph + " " + id + " " + rest
 	gap := max(1, avail-runeLen(plain)-runeLen(right))
-	return m.paintRow(u, plain, head, glyph, id, rest) + strings.Repeat(" ", gap) + m.paintRight(u, right)
+	return m.paintRow(u, plain, head+lead, glyph, id, rest) + strings.Repeat(" ", gap) + m.paintRight(u, right)
 }
 
 // paintRow styles the left side. The selected row is plain text inside reverse
