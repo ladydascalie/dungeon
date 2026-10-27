@@ -87,7 +87,7 @@ Good units, in the order that matters:
 dungeon up            # spawn a lane per minion, then one round of next
 dungeon next          # settle what landed, dispatch what is ready, wait
 dungeon status        # who is working, who is not, which pane
-dungeon view          # live graph. f lane, o link, d detail, ? help
+dungeon view          # live graph. d detail, ctrl+d actions
 ```
 
 Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
@@ -110,8 +110,12 @@ receive the ping.
 A ping is a wake-up, not a verdict. Run `dungeon next` to settle the unit: the
 report and the accept command still decide. Then read the report.
 
-`f` jumps to the selected unit's lane. Use it on a `blocked` row: the lane is
-asking the operator something, and the answer needs their eyes on that pane.
+`ctrl+d f` jumps to the selected unit's lane. Use it on a `blocked` row: the
+lane is asking the operator something, and the answer needs their eyes on that
+pane.
+
+The view is modal: `ctrl+d` opens a which-key pane bottom right, and `esc`
+cancels it.
 
 You may pin a minion to a pane the operator is already watching:
 `- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pin is a request.
@@ -174,7 +178,8 @@ The lane owns the fix. Your moves, in order:
 
 `d` opens the detail pane for the selected unit: goal, deps, note, history, the
 files kept with it, and its link. `tab` picks a file, `enter` reads it, `esc`
-steps back, `o` opens the unit's link in the browser, `f` jumps to its lane.
+steps back, `ctrl+d o` opens the unit's link in the browser, `ctrl+d f` jumps to
+its lane.
 
 A brief or a report is markdown, and the reader renders it: headings, lists,
 emphasis and code blocks all survive. Write them as markdown and the operator
@@ -188,7 +193,7 @@ Attach anything else a unit needs, so the operator can read it from the view:
 `dungeon attach <unit> <path>`.
 
 When a unit has a pull request, link it so the operator can reach it in one
-keystroke: `dungeon link <unit> <url>`. The row is marked `↗` and `o` opens it.
+keystroke: `dungeon link <unit> <url>`. The row is marked `↗` and `ctrl+d o` opens it.
 The URL is a plain http(s) link, so any forge works. Do not paste it into chat
 instead.
 
@@ -196,7 +201,8 @@ instead.
 
 `prefix+d` opens `dungeon view` in a right split, from anywhere in the repo:
 the plan is found by walking up. Rows are a two column table sized to their content, with a
-two column gap, so a wide terminal shows a block rather than a stretched line. `f` then jumps from the graph to a lane.
+two column gap, so a wide terminal shows a block rather than a stretched line.
+`ctrl+d f` then jumps from the graph to a lane.
 Tell the operator to look there when a unit is `blocked`; do not paste pane
 output into chat.
 

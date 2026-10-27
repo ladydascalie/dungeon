@@ -72,6 +72,7 @@ type viewModel struct {
 	mode        string // "tree" or "sections"
 	hideSettled bool
 	help        bool
+	prefix      bool // ctrl+d is held: the next key names an action
 
 	notice         string // the last thing that went wrong, shown in the footer until the next key
 	overlay        string // "", "detail" or "reader"
@@ -162,37 +163,20 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		m.notice = ""
 		key := msg.String()
+		if m.prefix {
+			m.prefix = false
+			return m, m.runPrefix(key)
+		}
+		if key == "ctrl+d" {
+			m.prefix = true
+			return m, nil
+		}
 		if m.overlay != "" && m.handleOverlayKey(key) {
 			return m, nil
 		}
 		switch key {
-		case "q", "esc", "ctrl+c":
+		case "esc", "ctrl+c":
 			return m, tea.Quit
-		case "o":
-			u, ok := m.selected()
-			if !ok || u.Link == "" {
-				m.notice = "no link on this unit"
-				return m, nil
-			}
-			if err := openURL(u.Link); err != nil {
-				m.notice = "cannot open: " + err.Error()
-			}
-			return m, nil
-		case "f":
-			return m, m.focusCmd()
-		case "r":
-			return m, m.refresh()
-		case "t":
-			m.mode = "tree"
-			m.rebuildOrder(m.selectedID())
-		case "s":
-			m.mode = "sections"
-			m.rebuildOrder(m.selectedID())
-		case "h":
-			m.hideSettled = !m.hideSettled
-			m.rebuildOrder(m.selectedID())
-		case "?":
-			m.help = !m.help
 		case "d":
 			m.overlay, m.artIdx = "detail", 0
 		case " ", "enter":
@@ -205,14 +189,6 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.rebuildOrder(id)
 			}
-		case "c":
-			for _, id := range foldable(pruneForest(buildForest(m.snap), m.hidden)) {
-				m.folded[id] = true
-			}
-			m.rebuildOrder(m.selectedID())
-		case "e":
-			m.folded = map[string]bool{}
-			m.rebuildOrder(m.selectedID())
 		case "j", "down":
 			m.cursor++
 		case "k", "up":
@@ -226,6 +202,116 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// prefixMenu is the set of actions behind ctrl+d. Motion, fold, detail and the
+// overlays stay direct; everything that changes the view or leaves it is here.
+var prefixMenu = []struct{ key, label string }{
+	{"f", "focus lane"},
+	{"o", "open link"},
+	{"r", "reload"},
+	{"t", "tree"},
+	{"s", "sections"},
+	{"h", "hide settled"},
+	{"c", "collapse all"},
+	{"e", "expand all"},
+	{"?", "help"},
+	{"q", "quit"},
+}
+
+// runPrefix executes one prefixed action. esc and ctrl+d cancel; an unknown
+// key says so and returns, so a stray press never changes the run.
+func (m *viewModel) runPrefix(key string) tea.Cmd {
+	switch key {
+	case "esc", "ctrl+d":
+		return nil
+	case "ctrl+c":
+		return tea.Quit
+	case "o":
+		u, ok := m.selected()
+		if !ok || u.Link == "" {
+			m.notice = "no link on this unit"
+			return nil
+		}
+		if err := openURL(u.Link); err != nil {
+			m.notice = "cannot open: " + err.Error()
+		}
+		return nil
+	case "f":
+		return m.focusCmd()
+	case "r":
+		return m.refresh()
+	case "t":
+		m.mode = "tree"
+		m.rebuildOrder(m.selectedID())
+	case "s":
+		m.mode = "sections"
+		m.rebuildOrder(m.selectedID())
+	case "h":
+		m.hideSettled = !m.hideSettled
+		m.rebuildOrder(m.selectedID())
+	case "c":
+		for _, id := range foldable(pruneForest(buildForest(m.snap), m.hidden)) {
+			m.folded[id] = true
+		}
+		m.rebuildOrder(m.selectedID())
+	case "e":
+		m.folded = map[string]bool{}
+		m.rebuildOrder(m.selectedID())
+	case "?":
+		m.help = !m.help
+	case "q":
+		return tea.Quit
+	default:
+		m.notice = "no action on " + key
+	}
+	m.clampCursor()
+	return nil
+}
+
+// prefixBox is the which-key pane: every action the prefix can take, drawn
+// bottom right while ctrl+d is held.
+func (m viewModel) prefixBox() string {
+	labelW := 0
+	for _, a := range prefixMenu {
+		labelW = max(labelW, runeLen(a.label))
+	}
+	var rows []string
+	for i := 0; i < len(prefixMenu); i += 2 {
+		row := fmt.Sprintf("%-2s %-*s", prefixMenu[i].key, labelW, prefixMenu[i].label)
+		if i+1 < len(prefixMenu) {
+			row += "   " + fmt.Sprintf("%-2s %-*s", prefixMenu[i+1].key, labelW, prefixMenu[i+1].label)
+		}
+		rows = append(rows, row)
+	}
+	head := dimStyle.Render("ctrl+d") + "   " + dimStyle.Render("esc cancels")
+	body := head + "\n" + strings.Join(rows, "\n")
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(0, 1).
+		Render(body)
+}
+
+// overlayBottomRight draws box over the last rows of body, flush right. Each
+// covered row is replaced whole: splicing styled text by column would cut
+// escape sequences.
+func overlayBottomRight(body, box string, width int) string {
+	lines := strings.Split(body, "\n")
+	boxLines := strings.Split(box, "\n")
+	pad := width - lipgloss.Width(box)
+	if pad < 0 {
+		pad = 0
+	}
+	offset := len(lines) - len(boxLines)
+	for i, line := range boxLines {
+		row := offset + i
+		if row < 0 || row >= len(lines) {
+			continue
+		}
+		lines[row] = strings.Repeat(" ", pad) + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // rebuildOrder recomputes the display list and keeps the cursor on the same
@@ -308,18 +394,24 @@ func (m viewModel) selected() (UnitRow, bool) {
 
 func (m viewModel) render() string {
 	if m.err != nil {
-		return titleStyle.Render("dungeon") + "\n\n" + m.err.Error() + "\n\n" + dimStyle.Render("press r to retry, q to quit") + "\n"
+		return titleStyle.Render("dungeon") + "\n\n" + m.err.Error() + "\n\n" + dimStyle.Render("ctrl+d r to retry, ctrl+d q to quit") + "\n"
 	}
-	if m.help {
-		return m.headerView() + "\n" + m.helpView() + "\n" + m.footerView()
+
+	var body string
+	switch {
+	case m.help:
+		body = m.helpView()
+	case m.overlay == "detail":
+		body = m.detailOverlay()
+	case m.overlay == "reader":
+		body = m.readerView()
+	default:
+		body = m.bodyView()
 	}
-	switch m.overlay {
-	case "detail":
-		return m.headerView() + "\n" + m.detailOverlay() + "\n" + m.footerView()
-	case "reader":
-		return m.headerView() + "\n" + m.readerView() + "\n" + m.footerView()
+	if m.prefix {
+		body = overlayBottomRight(body, m.prefixBox(), m.width)
 	}
-	return m.headerView() + "\n" + m.bodyView() + "\n" + m.footerView()
+	return m.headerView() + "\n" + body + "\n" + m.footerView()
 }
 
 // helpView is the legend. The glyphs mean nothing without one, and a screen of
@@ -332,16 +424,19 @@ func (m viewModel) helpView() string {
 	keys := []string{
 		"j / k      move",
 		"g / G      first and last",
-		"f          jump to the selected unit's pane",
-		"o          open the unit's link (a pull request, a review)",
 		"space      fold the selected branch",
-		"c / e      collapse and expand every branch",
-		"t / s      tree and sections layouts",
 		"d          detail pane for the selected unit",
-		"h          hide done and canceled",
-		"r          re-read plan, state and herdr",
-		"?          this legend",
-		"q          quit",
+		"esc        quit",
+		"",
+		"ctrl+d     then an action:",
+		"  f        jump to the selected unit's pane",
+		"  o        open the unit's link (a pull request, a review)",
+		"  r        re-read plan, state and herdr",
+		"  t / s    tree and sections layouts",
+		"  h        hide done and canceled",
+		"  c / e    collapse and expand every branch",
+		"  ?        this legend",
+		"  q        quit",
 	}
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render("STATUS") + "\n")
@@ -372,6 +467,9 @@ func (m viewModel) headerView() string {
 	}
 	if s.PlanDrift {
 		status += " · plan drift"
+	}
+	if m.prefix {
+		status += " · PREFIX"
 	}
 	right := dimStyle.Render(status)
 	chips := ""
@@ -673,8 +771,11 @@ func (m viewModel) detailBox(width, height int) string {
 }
 
 func (m viewModel) footerView() string {
-	keys := "j/k · f focus · o link · d detail · space fold · h hide · t/s · ? help · q quit"
-	if m.state.UpdatedAt == "" {
+	keys := "j/k move · d detail · space fold · ctrl+d actions"
+	if m.prefix {
+		keys = "ctrl+d: choose an action · esc cancels"
+	}
+	if m.state.UpdatedAt == "" && !m.prefix {
 		keys = "no state yet · " + keys
 	}
 	if m.notice != "" {

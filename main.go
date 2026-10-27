@@ -109,7 +109,7 @@ func usage(w io.Writer) {
       --force. The plan, the state, the briefs and the reports stay.
 
   dungeon view   [--once] [--interval 2s] [--plan path] [--state path]
-      The live table. j/k move, g/G ends, r refresh, q quit.
+      The live table. j/k move, g/G ends, d detail, ctrl+d actions.
       Piped output and --once print one frame instead.
 
 The plan defaults to `+defaultPlanPath+`. State lives beside it in state.json.

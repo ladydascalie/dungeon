@@ -30,7 +30,7 @@ func TestViewSectionsFrame(t *testing.T) {
 	m.rebuildOrder("")
 	out := m.View()
 
-	for _, want := range []string{"dungeon", "st", "READY 1", "WAITING 2", "q quit", "deps 0/0"} {
+	for _, want := range []string{"dungeon", "st", "READY 1", "WAITING 2", "ctrl+d actions", "deps 0/0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -101,15 +101,13 @@ func TestViewModeToggleKeepsTheCursor(t *testing.T) {
 	m.cursor = 1
 	want := m.selectedID()
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	m = next.(viewModel)
+	m = press(t, m, "ctrl+d", "s")
 	if got := m.selectedID(); got != want {
-		t.Fatalf("after s the cursor is on %q, want %q", got, want)
+		t.Fatalf("after ctrl+d s the cursor is on %q, want %q", got, want)
 	}
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	m = next.(viewModel)
+	m = press(t, m, "ctrl+d", "t")
 	if got := m.selectedID(); got != want {
-		t.Fatalf("after t the cursor is on %q, want %q", got, want)
+		t.Fatalf("after ctrl+d t the cursor is on %q, want %q", got, want)
 	}
 }
 
@@ -171,7 +169,7 @@ func TestViewPrintsOneFrameWhenPiped(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "dungeon") || !strings.Contains(stdout, "q quit") {
+	if !strings.Contains(stdout, "dungeon") || !strings.Contains(stdout, "ctrl+d actions") {
 		t.Fatalf("output:\n%s", stdout)
 	}
 }
@@ -192,6 +190,9 @@ func press(t *testing.T, m viewModel, keys ...string) viewModel {
 	t.Helper()
 	for _, k := range keys {
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+		if k == "ctrl+d" {
+			msg = tea.KeyMsg{Type: tea.KeyCtrlD}
+		}
 		if k == " " {
 			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")}
 		}
@@ -243,11 +244,11 @@ func TestCollapseAllAndExpandAll(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state.json")
 	m := newTestView(t, plan, state)
 
-	m = press(t, m, "c")
+	m = press(t, m, "ctrl+d", "c")
 	if len(m.order) != 1 {
 		t.Fatalf("collapse all should leave only roots, got %v", m.order)
 	}
-	m = press(t, m, "e")
+	m = press(t, m, "ctrl+d", "e")
 	if len(m.order) != 3 {
 		t.Fatalf("expand all should restore every unit, got %v", m.order)
 	}
@@ -261,16 +262,64 @@ func TestHelpExplainsTheView(t *testing.T) {
 	if strings.Contains(m.View(), "STATUS") {
 		t.Fatal("the legend should be hidden by default")
 	}
-	m = press(t, m, "?")
+	m = press(t, m, "ctrl+d", "?")
 	out := m.View()
 	for _, want := range []string{"STATUS", "colour", "space      fold", "∧N"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
-	m = press(t, m, "?")
+	m = press(t, m, "ctrl+d", "?")
 	if strings.Contains(m.View(), "STATUS") {
 		t.Fatal("? should close the legend")
+	}
+}
+
+func TestPrefixShowsTheActionPaneAndCancels(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	m := newTestView(t, plan, state)
+
+	m = press(t, m, "ctrl+d")
+	out := m.View()
+	for _, want := range []string{"PREFIX", "focus lane", "open link", "collapse all", "quit", "esc cancels"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("prefix should show %q:\n%s", want, out)
+		}
+	}
+	if !m.prefix {
+		t.Fatal("ctrl+d should hold the prefix")
+	}
+
+	m = press(t, m, "esc")
+	if m.prefix {
+		t.Fatal("esc should cancel the prefix")
+	}
+	if strings.Contains(m.View(), "focus lane") {
+		t.Fatal("the pane should close with the prefix")
+	}
+}
+
+func TestPrefixKeysDoNotActWithoutThePrefix(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	m := newTestView(t, plan, state)
+
+	m = press(t, m, "s")
+	if m.mode != "tree" {
+		t.Fatalf("s alone changed the mode to %q", m.mode)
+	}
+	m = press(t, m, "ctrl+d", "s")
+	if m.mode != "sections" {
+		t.Fatalf("ctrl+d s should switch to sections, mode %q", m.mode)
+	}
+
+	m = press(t, m, "ctrl+d", "z")
+	if !strings.Contains(m.View(), "no action on z") {
+		t.Fatalf("an unknown prefix key should say so:\n%s", m.View())
+	}
+	if m.prefix {
+		t.Fatal("an unknown key should close the prefix")
 	}
 }
 
@@ -437,7 +486,6 @@ func TestColumnsAreContentSizedWithASmallGap(t *testing.T) {
 			if !tc.narrow && widths[0] != tc.width-1 {
 				t.Fatalf("long content should fill to the edge")
 			}
-
 		})
 	}
 }

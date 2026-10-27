@@ -92,7 +92,7 @@ A minion may name a pane to run in, and `up` uses it when herdr still has it:
 `- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pane the
 operator picked is where their attention already is, so the pin is honoured and
 recorded as a hint in the state. If the pane is gone, `up` splits a fresh one
-and the note says so. `f` in the view jumps straight to the selected unit's
+and the note says so. `ctrl+d f` in the view jumps straight to the selected unit's
 lane: a live agent is focused exactly, and with no live agent the recorded
 pane's tab is focused instead. That is the shortcut for a `blocked` row.
 
@@ -105,9 +105,15 @@ pinned pane belongs to the operator, so `down` interrupts its agent and leaves
 the shell instead of closing the pane, then re-reads the fleet to check that
 the lane really stopped.
 
-`f` jumps to the selected unit's lane. A blocked row, a reviewer's verdict and a
+`ctrl+d f` jumps to the selected unit's lane. A blocked row, a reviewer's verdict and a
 lane asking for approval are all one keypress away, and the pane it lands on is
 the one `up` recorded or the one the plan pinned.
+
+Keys are modal. `ctrl+d` holds a prefix and opens a which-key pane bottom right,
+listing every action the prefix can take: focus, open link, reload, layout,
+hide, fold all, help, quit. Motion, `d`, `space` and the overlay keys stay
+direct. `esc` cancels the prefix without acting, the header says `PREFIX` while
+it is held, and the footer says `ctrl+d actions` otherwise.
 `d` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,
 `.dungeon/briefs/<unit>.md` and `.dungeon/reports/<unit>.md`; anything else comes
@@ -125,7 +131,7 @@ scrolls at about 1.3ms a frame.
 
 `link` pins a pull request, a review, or any http(s) url to a unit. The tool
 never parses it, so no forge gets special treatment. The row is marked `↗`,
-the card shows the url, and `o` opens it in the browser. `--clear` forgets it.
+the card shows the url, and `ctrl+d o` opens it in the browser. `--clear` forgets it.
 
 `view` is the same snapshot as `status`, rendered with charmbracelet. Rows carry
 a right-aligned status column (`working w5M:p8`, `waits TOK4`, `needs you`), and
@@ -155,9 +161,9 @@ collapses without leaving orphaned connectors.
 
 The cursor follows a unit across a refresh, not a row. A row shows its state
 twice: the id takes the state's colour, and the right column names it in words.
-`?` opens the legend for every key. `j`/`k` move, `g`/`G` jump, `r` refreshes,
-`q` quits. Piped output prints one frame instead of opening
-a TUI.
+`ctrl+d ?` opens the legend for every key. `j`/`k` move and `g`/`G` jump;
+`ctrl+d r` refreshes and `ctrl+d q` quits. Piped output prints one frame
+instead of opening a TUI.
 
 `dungeon attach <unit> <path>` keeps a file one keystroke from the unit: a
 brief, a report, a screenshot, a handoff note. It stores an absolute path, so
