@@ -9,8 +9,8 @@ that owns a worktree. Anything else fails validation.
 
 ## Status
 
-`init`, `check`, `status`, `set`, `view`, `attach`, `up` and `next` are built. `land`
-and `down` are not.
+Every command is built: `init`, `check`, `status`, `set`, `view`, `attach`, `up`,
+`next`, `land` and `down`.
 
 The loop: `dungeon up` spawns one pi lane per minion, `dungeon next` dispatches
 what is ready and settles what landed, `dungeon view` shows the graph while it
@@ -39,6 +39,9 @@ dungeon up                         # spawn the lanes, then one round of next
 dungeon up --no-dispatch           # spawn only
 dungeon next --dry-run             # say what would go out
 dungeon next --timeout 10m
+
+dungeon land                       # merge done units, re-run their accepts
+dungeon down                       # close the lanes, keep the run
 ```
 
 A dispatch is five steps and only the last one can mark a unit `done`:
@@ -56,6 +59,12 @@ resumes instead of doubling the fleet. A writer gets its own git worktree at
 `<repo>/../<encounter>-<minion>` on branch `<encounter>/<minion>`. Lanes run with
 `--no-skills --no-mcp` and a tool allowlist that matches their role: `read,bash`
 for staff work, `read,bash,edit,write` for writers.
+
+`land` merges the `done` units into `<encounter>/integration` in declaration
+order, aborts on the first conflict, then re-runs each merged unit's accept
+against the merged result. It never touches the base branch and never pushes.
+`down` closes the lanes and the encounter tab, refuses to stop a working lane
+unless you pass `--force`, and leaves the plan, state, briefs and reports.
 
 `d` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,
