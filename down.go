@@ -61,7 +61,7 @@ func down(ctx context.Context, p Plan, st *State, force bool, out io.Writer) (st
 			fmt.Fprintf(out, "%s is working in %s; not closing it. pass --force to stop it anyway\n", m.ID, a.Pane)
 			continue
 		}
-		if err := h.closePane(ctx, a.Pane); err != nil {
+		if err := h.stopLane(ctx, m.ID, a.Pane, m.Pane != "" && m.Pane == a.Pane); err != nil {
 			fmt.Fprintf(out, "%s: %v\n", m.ID, err)
 			continue
 		}
@@ -78,6 +78,7 @@ func down(ctx context.Context, p Plan, st *State, force bool, out io.Writer) (st
 			}
 		}
 	}
+	stopped, refused = verifyDown(ctx, h, st, stopped, refused)
 	return stopped, refused, nil
 }
 

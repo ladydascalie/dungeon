@@ -57,8 +57,9 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 
 	var root string
 	for i, m := range p.Minions {
-		if _, live := agents[m.ID]; live {
+		if a, live := agents[m.ID]; live {
 			st.SetMinion(m.ID, "spawned", "already live")
+			st.PinPane(m.ID, a.Pane)
 			res.Already = append(res.Already, m.ID)
 			continue
 		}
@@ -73,15 +74,8 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 			}
 		}
 
-		if root == "" {
-			created, err := h.createTab(ctx, p.Encounter, cwd)
-			if err != nil {
-				return res, err
-			}
-			root = created
-		}
 		ratio := 1.0 / float64(len(p.Minions)-i)
-		pane, err := h.splitPane(ctx, root, "down", cwd, ratio)
+		pane, err := h.lanePane(ctx, p.Encounter, m.Pane, &root, cwd, ratio)
 		if err != nil {
 			return res, err
 		}
@@ -95,6 +89,7 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, out i
 			continue
 		}
 		st.SetMinion(m.ID, "spawned", "")
+		st.PinPane(m.ID, pane)
 		res.Spawned = append(res.Spawned, m.ID)
 	}
 	return res, nil

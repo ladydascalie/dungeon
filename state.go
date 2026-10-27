@@ -31,6 +31,7 @@ type MinionState struct {
 	Status string `json:"status"`
 	Note   string `json:"note,omitempty"`
 	At     string `json:"at"`
+	Pane   string `json:"pane,omitempty"` // a hint, refreshed from herdr whenever the lane is live
 }
 
 type Change struct {
@@ -145,9 +146,11 @@ func (s *State) SetMinion(id, status, note string) error {
 	if !minionStatusSet[status] {
 		return fmt.Errorf("minion status %q is not one of %s", status, strings.Join(minionStatuses, ", "))
 	}
-	s.Minions[id] = MinionState{Status: status, Note: note, At: now()}
+	s.Minions[id] = MinionState{Status: status, Note: note, At: now(), Pane: s.Minions[id].Pane}
 	return nil
 }
+
+func (s *State) PinPane(id, pane string) { m := s.Minions[id]; m.Pane = pane; s.Minions[id] = m }
 
 // renamed maps the first vocabulary onto the current one, so a state file
 // written before the rename keeps reading correctly.

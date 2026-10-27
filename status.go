@@ -84,8 +84,9 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 		}
 		if a, ok := agents[u.Minion]; ok {
 			row.Pane, row.Agent = a.Pane, a.Status
+		} else if hint := st.Minions[u.Minion].Pane; hint != "" {
+			row.Pane = hint
 		}
-		row.Inputs = u.Deps
 		row.Inputs = u.Deps
 		for _, d := range u.Deps {
 			row.DepsTotal++
@@ -130,6 +131,8 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 			if row.Status == "absent" {
 				row.Status = "spawned"
 			}
+		} else if hint := st.Minions[m.ID].Pane; hint != "" {
+			row.Pane = hint
 		}
 		row.Unit = unitByMinion[m.ID]
 		s.Minions = append(s.Minions, row)

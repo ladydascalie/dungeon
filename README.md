@@ -60,12 +60,26 @@ resumes instead of doubling the fleet. A writer gets its own git worktree at
 `--no-skills --no-mcp` and a tool allowlist that matches their role: `read,bash`
 for staff work, `read,bash,edit,write` for writers.
 
+A minion may name a pane to run in, and `up` uses it when herdr still has it:
+`- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pane the
+operator picked is where their attention already is, so the pin is honoured and
+recorded as a hint in the state. If the pane is gone, `up` splits a fresh one
+and the note says so. `f` in the view jumps straight to the selected unit's
+lane: a live agent is focused exactly, and with no live agent the recorded
+pane's tab is focused instead. That is the shortcut for a `blocked` row.
+
 `land` merges the `done` units into `<encounter>/integration` in declaration
 order, aborts on the first conflict, then re-runs each merged unit's accept
 against the merged result. It never touches the base branch and never pushes.
 `down` closes the lanes and the encounter tab, refuses to stop a working lane
-unless you pass `--force`, and leaves the plan, state, briefs and reports.
+unless you pass `--force`, and leaves the plan, state, briefs and reports. A
+pinned pane belongs to the operator, so `down` interrupts its agent and leaves
+the shell instead of closing the pane, then re-reads the fleet to check that
+the lane really stopped.
 
+`f` jumps to the selected unit's lane. A blocked row, a reviewer's verdict and a
+lane asking for approval are all one keypress away, and the pane it lands on is
+the one `up` recorded or the one the plan pinned.
 `d` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,
 `.dungeon/briefs/<unit>.md` and `.dungeon/reports/<unit>.md`; anything else comes

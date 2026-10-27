@@ -55,6 +55,21 @@ type refreshedMsg struct {
 	err   error
 }
 
+type focusMsg struct{ err error }
+
+// focusCmd jumps the operator to the selected unit's lane. A live agent is
+// exact; with none, the pane hint recorded at spawn is used.
+func (m viewModel) focusCmd() tea.Cmd {
+	u, ok := m.selected()
+	if !ok {
+		return nil
+	}
+	minion, hint := u.Minion, m.state.Minions[u.Minion].Pane
+	return func() tea.Msg {
+		return focusMsg{err: newHerdrClient().focus(context.Background(), minion, hint)}
+	}
+}
+
 type viewModel struct {
 	planPath  string
 	statePath string
@@ -69,6 +84,7 @@ type viewModel struct {
 	hideSettled bool
 	help        bool
 
+	notice      string // the last thing that went wrong, shown in the footer until the next key
 	overlay     string // "", "detail" or "reader"
 	artIdx      int
 	reader      string
@@ -142,7 +158,14 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildOrder(keep)
 		return m, nil
 
+	case focusMsg:
+		if msg.err != nil {
+			m.notice = "cannot focus: " + msg.err.Error()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
+		m.notice = ""
 		key := msg.String()
 		if m.overlay != "" && m.handleOverlayKey(key) {
 			return m, nil
@@ -150,6 +173,8 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "q", "esc", "ctrl+c":
 			return m, tea.Quit
+		case "f":
+			return m, m.focusCmd()
 		case "r":
 			return m, m.refresh()
 		case "t":
@@ -308,6 +333,7 @@ func (m viewModel) helpView() string {
 	keys := []string{
 		"j / k      move",
 		"g / G      first and last",
+		"f          jump to the selected unit's pane",
 		"space      fold the selected branch",
 		"c / e      collapse and expand every branch",
 		"t / s      tree and sections layouts",
@@ -574,9 +600,12 @@ func (m viewModel) detailBox(width, height int) string {
 }
 
 func (m viewModel) footerView() string {
-	keys := "j/k · d detail · space fold · h hide done · t/s layout · ? help · q quit"
+	keys := "j/k · f focus · d detail · space fold · h hide done · t/s · ? help · q quit"
 	if m.state.UpdatedAt == "" {
 		keys = "no state yet · " + keys
+	}
+	if m.notice != "" {
+		keys = m.notice
 	}
 	return ruleStyle.Render(strings.Repeat("─", max(0, m.width))) + "\n" + dimStyle.Render(keys)
 }

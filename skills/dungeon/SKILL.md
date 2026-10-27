@@ -87,7 +87,7 @@ Good units, in the order that matters:
 dungeon up            # spawn a lane per minion, then one round of next
 dungeon next          # settle what landed, dispatch what is ready, wait
 dungeon status        # who is working, who is not, which pane
-dungeon view          # the live graph. t/s layouts, space fold, d detail, ? help
+dungeon view          # the live graph. f jumps to a lane, d detail, ? help
 ```
 
 Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
@@ -95,6 +95,14 @@ loop, and there is no daemon to keep alive.
 
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
+
+`f` jumps to the selected unit's lane. Use it on a `blocked` row: the lane is
+asking the operator something, and the answer needs their eyes on that pane.
+
+You may pin a minion to a pane the operator is already watching:
+`- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pin is a request.
+`up` checks that the pane still exists and splits a fresh one if it does not,
+so a stale plan never blocks a run.
 
 ## Read the state before you act
 

@@ -24,6 +24,7 @@ type Minion struct {
 	Role     string `yaml:"role"`
 	Worktree string `yaml:"worktree"`
 	Of       string `yaml:"of"`
+	Pane     string `yaml:"pane"` // optional: run this minion in a pane the operator already has
 }
 
 type Unit struct {

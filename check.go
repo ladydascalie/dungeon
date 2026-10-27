@@ -17,6 +17,7 @@ const (
 	EUnknownMinion Code = "E_UNKNOWN_MINION"
 	EUnknownRole   Code = "E_UNKNOWN_ROLE"
 	EDuplicateID   Code = "E_DUPLICATE_ID"
+	EDuplicatePane Code = "E_DUPLICATE_PANE"
 	EBadMinionID   Code = "E_BAD_MINION_ID"
 	ENoID          Code = "E_NO_ID"
 	ENoWorktree    Code = "E_NO_WORKTREE"
@@ -56,8 +57,10 @@ func Validate(p Plan) []Finding {
 	case p.Encounter == "":
 		f = append(f, Finding{ENoEncounter, "encounter", "name the encounter"})
 	case !encounterID.MatchString(p.Encounter):
-		f = append(f, Finding{EBadEncounter, "encounter",
-			fmt.Sprintf("encounter %q must match [a-z0-9][a-z0-9-]{0,40}: it becomes a branch prefix", p.Encounter)})
+		f = append(f, Finding{
+			EBadEncounter, "encounter",
+			fmt.Sprintf("encounter %q must match [a-z0-9][a-z0-9-]{0,40}: it becomes a branch prefix", p.Encounter),
+		})
 	}
 	if len(p.Minions) == 0 {
 		f = append(f, Finding{ENoMinion, "minions", "a plan with no minions dispatches nothing"})
@@ -71,8 +74,10 @@ func Validate(p Plan) []Finding {
 		case m.ID == "":
 			f = append(f, Finding{ENoID, at + ".id", "minion needs an id"})
 		case !minionID.MatchString(m.ID):
-			f = append(f, Finding{EBadMinionID, at + ".id",
-				fmt.Sprintf("minion id %q must match [a-z][a-z0-9_-]{0,31}", m.ID)})
+			f = append(f, Finding{
+				EBadMinionID, at + ".id",
+				fmt.Sprintf("minion id %q must match [a-z][a-z0-9_-]{0,31}", m.ID),
+			})
 		}
 		if minionIDs[m.ID] {
 			f = append(f, Finding{EDuplicateID, at + ".id", fmt.Sprintf("minion id %q is already used", m.ID)})
@@ -80,12 +85,16 @@ func Validate(p Plan) []Finding {
 		minionIDs[m.ID] = true
 
 		if !roles[m.Role] {
-			f = append(f, Finding{EUnknownRole, at + ".role",
-				fmt.Sprintf("role %q is not one of scout, worker, reviewer, integrator", m.Role)})
+			f = append(f, Finding{
+				EUnknownRole, at + ".role",
+				fmt.Sprintf("role %q is not one of scout, worker, reviewer, integrator", m.Role),
+			})
 		}
 		if writes(m.Role) && m.Worktree == "" {
-			f = append(f, Finding{ENoWorktree, at + ".worktree",
-				fmt.Sprintf("role %q writes, so minion %q needs its own worktree", m.Role, m.ID)})
+			f = append(f, Finding{
+				ENoWorktree, at + ".worktree",
+				fmt.Sprintf("role %q writes, so minion %q needs its own worktree", m.Role, m.ID),
+			})
 		}
 		roleOf[m.ID] = m.Role
 	}
@@ -124,21 +133,27 @@ func Validate(p Plan) []Finding {
 		role := ""
 		if u.Split != nil {
 			if u.Minion != "" {
-				f = append(f, Finding{ESplitInvalid, at + ".minion",
-					"a split unit binds its children at dispatch time, so it names no minion"})
+				f = append(f, Finding{
+					ESplitInvalid, at + ".minion",
+					"a split unit binds its children at dispatch time, so it names no minion",
+				})
 			}
 			if u.Split.Role != RoleWorker {
-				f = append(f, Finding{ESplitInvalid, at + ".split.role",
-					fmt.Sprintf("split role %q must be worker: a split creates worker units", u.Split.Role)})
+				f = append(f, Finding{
+					ESplitInvalid, at + ".split.role",
+					fmt.Sprintf("split role %q must be worker: a split creates worker units", u.Split.Role),
+				})
 			}
 			if u.Split.Count < 1 {
 				f = append(f, Finding{ESplitInvalid, at + ".split.count", "split needs a count of at least 1"})
 			}
 			if u.Split.Role == RoleWorker {
 				if n := countRole(p.Minions, u.Split.Role); n < u.Split.Count {
-					f = append(f, Finding{ESplitNoMinion, at + ".split.count",
+					f = append(f, Finding{
+						ESplitNoMinion, at + ".split.count",
 						fmt.Sprintf("split needs %d %s minions, the plan declares %d",
-							u.Split.Count, u.Split.Role, n)})
+							u.Split.Count, u.Split.Role, n),
+					})
 				}
 			}
 		} else {
@@ -148,18 +163,24 @@ func Validate(p Plan) []Finding {
 			default:
 				r, ok := roleOf[u.Minion]
 				if !ok {
-					f = append(f, Finding{EUnknownMinion, at + ".minion",
-						fmt.Sprintf("minion %q is not declared", u.Minion)})
+					f = append(f, Finding{
+						EUnknownMinion, at + ".minion",
+						fmt.Sprintf("minion %q is not declared", u.Minion),
+					})
 				}
 				role = r
 			}
 			if len(u.Paths) > 0 && role != "" && !writes(role) {
-				f = append(f, Finding{EDMPlaysMinion, at + ".paths",
-					fmt.Sprintf("the DM does not play a minion: role %q may not declare paths", role)})
+				f = append(f, Finding{
+					EDMPlaysMinion, at + ".paths",
+					fmt.Sprintf("the DM does not play a minion: role %q may not declare paths", role),
+				})
 			}
 			if needsPaths(role) && len(u.Paths) == 0 {
-				f = append(f, Finding{ENoPaths, at + ".paths",
-					fmt.Sprintf("worker unit %q must declare the paths it owns", u.ID)})
+				f = append(f, Finding{
+					ENoPaths, at + ".paths",
+					fmt.Sprintf("worker unit %q must declare the paths it owns", u.ID),
+				})
 			}
 		}
 
@@ -170,12 +191,15 @@ func Validate(p Plan) []Finding {
 				continue
 			}
 			if !unitIDs[d] {
-				f = append(f, Finding{EMissingDep, where,
-					fmt.Sprintf("dep %q is not a declared unit", d)})
+				f = append(f, Finding{
+					EMissingDep, where,
+					fmt.Sprintf("dep %q is not a declared unit", d),
+				})
 			}
 		}
 	}
 
+	f = append(f, duplicatePanes(p.Minions)...)
 	return append(f, cycles(p.Units, rep)...)
 }
 
@@ -222,8 +246,10 @@ func cycles(units []Unit, byID map[string]Unit) []Finding {
 				loop := loopFrom(stack, d)
 				if key := loopKey(loop); !seen[key] {
 					seen[key] = true
-					out = append(out, Finding{ECycle, "units." + id + ".deps",
-						"cycle: " + strings.Join(append(loop, d), " -> ")})
+					out = append(out, Finding{
+						ECycle, "units." + id + ".deps",
+						"cycle: " + strings.Join(append(loop, d), " -> "),
+					})
 				}
 			}
 		}

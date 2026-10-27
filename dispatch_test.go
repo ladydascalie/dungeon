@@ -36,10 +36,20 @@ case "$1 $2" in
   "tab create") echo '{"result":{"root_pane":{"pane_id":"w9:p1"}}}' ;;
   "tab list") echo '{"result":{"tabs":[{"tab_id":"w9:t1","label":"enc"}]}}' ;;
   "tab close") echo '{"result":{"type":"ok"}}' ;;
-  "pane close") echo '{"result":{"type":"ok"}}' ;;
+  "pane get")
+    case "$3" in gone*) echo '{"error":{"code":"pane_not_found"}}' >&2; exit 1 ;; esac
+    echo '{"result":{"pane":{"pane_id":"'"$3"'","tab_id":"w9:t1"}}}' ;;
+  "agent focus")
+    if grep -q "^$3:" "$FAKE_STARTED"; then echo '{"result":{"type":"ok"}}'
+    else echo '{"error":{"code":"agent_not_found"}}' >&2; exit 1; fi ;;
+  "tab focus") echo '{"result":{"type":"ok"}}' ;;
+    "pane close") : > "$FAKE_STARTED"; echo '{"result":{"type":"ok"}}' ;;  # closing the pane kills the agent in it
   "pane split") echo '{"result":{"pane":{"pane_id":"w9:p2"}}}' ;;
   "agent start") echo "$3:${FAKE_STATUS:-idle}" >> "$FAKE_STARTED"
                  echo '{"result":{"type":"ok"}}' ;;
+  "agent send-keys")
+    if [ "$4" = "ctrl+c" ]; then grep -v "^$3:" "$FAKE_STARTED" > "$FAKE_STARTED.tmp"; mv "$FAKE_STARTED.tmp" "$FAKE_STARTED"; fi
+    echo '{"result":{"type":"ok"}}' ;;
   "agent prompt")
     if [ "$FAKE_REPORT" = "1" ]; then
       mkdir -p "$FAKE_ENCOUNTER/reports"
