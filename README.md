@@ -114,7 +114,12 @@ the card shows the url, and `o` opens it in the browser. `--clear` forgets it.
 `view` is the same snapshot as `status`, rendered with charmbracelet. Rows carry
 a right-aligned status column (`working w5M:p8`, `waits TOK4`, `needs you`), and
 a boxed strip under the list holds everything about the selected unit: goal,
-deps, note, and where its lane is. Two layouts, `t` and `s`:
+deps, note, and where its lane is.
+
+The rows and the card take at most two thirds of the frame. A row that spans a
+280 column terminal puts the status at the far edge and stretches the goal into
+a line nobody reads; two thirds keeps the status next to the text it belongs to
+and leaves the rest of the screen quiet. Two layouts, `t` and `s`:
 
 - **tree** (default): dependencies as nesting, drawn with box-drawing
   connectors. Each unit hangs under its deepest dependency, ties going to the

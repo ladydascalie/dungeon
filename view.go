@@ -380,19 +380,28 @@ func (m viewModel) headerView() string {
 		ruleStyle.Render(strings.Repeat("─", max(0, m.width)))
 }
 
+// contentWidth caps the list and the card at two thirds of the frame. A row that
+// spans a 280 column terminal puts the status column at the far edge and
+// stretches the goal into an unreadable line; two thirds keeps the status near
+// the text it belongs to and leaves the rest of the screen quiet.
+func (m viewModel) contentWidth() int {
+	return min(m.width, max(60, m.width*2/3))
+}
+
 func (m viewModel) bodyView() string {
 	detailH := 0
 	if m.height >= 22 {
 		detailH = 7
 	}
 	rows := max(3, m.height-5-detailH)
-	lines, cursorLine := m.listLines(m.width)
+	width := m.contentWidth()
+	lines, cursorLine := m.listLines(width)
 	lines = window(lines, cursorLine, rows)
 	body := strings.Join(lines, "\n")
 	if detailH == 0 {
 		return body
 	}
-	return lipgloss.NewStyle().Height(rows).Render(body) + "\n" + m.detailBox(m.width, detailH)
+	return lipgloss.NewStyle().Height(rows).Render(body) + "\n" + m.detailBox(width, detailH)
 }
 
 // listLines renders the left column and returns the line the cursor is on, so
@@ -560,7 +569,10 @@ func (m viewModel) detailBox(width, height int) string {
 	head := titleStyle.Render(u.ID) + "  " + statusStyles[u.Status].Render(u.Status)
 	tail := u.Role + " " + u.Minion
 	if u.Pane != "" {
-		tail += " " + u.Pane + " (" + u.Agent + ")"
+		tail += " " + u.Pane
+		if u.Agent != "" {
+			tail += " (" + u.Agent + ")"
+		}
 	}
 	head += dimStyle.Render(truncate("  "+tail, max(0, inner-runeLen(u.ID)-runeLen(u.Status)-4)))
 	lines = append(lines, head)

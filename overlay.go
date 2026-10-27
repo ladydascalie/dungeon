@@ -87,7 +87,10 @@ func (m viewModel) detailOverlay() string {
 		deps += " · waits " + strings.Join(u.WaitsOn, " ")
 	}
 	if u.Pane != "" {
-		deps += fmt.Sprintf(" · pane %s (%s)", u.Pane, u.Agent)
+		deps += " · pane " + u.Pane
+		if u.Agent != "" {
+			deps += " (" + u.Agent + ")"
+		}
 	}
 	b.WriteString(dimStyle.Render(truncate(deps, inner)) + "\n")
 	if u.Note != "" {
