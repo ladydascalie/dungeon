@@ -89,8 +89,10 @@ the one `up` recorded or the one the plan pinned.
 `d` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,
 `.dungeon/briefs/<unit>.md` and `.dungeon/reports/<unit>.md`; anything else comes
-from `dungeon attach`. `tab` picks a file, `enter` reads it in place with `j`/`k`
-scrolling, `esc` goes back. A missing brief is shown as missing, not hidden.
+from `dungeon attach`. `tab` picks a file, `enter` reads it in place with `j`/`k`,
+scrolling, `esc` goes back. A `.md` brief or report is rendered as markdown, so
+the headings, lists and code blocks a lane wrote survive the trip. Anything else
+is shown as plain text. A missing brief is shown as missing, not hidden.
 
 `view` is the same snapshot as `status`, rendered with charmbracelet. Rows carry
 a right-aligned status column (`working w5M:p8`, `waits TOK4`, `needs you`), and

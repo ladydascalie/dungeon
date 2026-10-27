@@ -145,6 +145,9 @@ func (m viewModel) readerView() string {
 	inner := max(20, m.width-6)
 	rows := max(3, m.height-8)
 	lines := m.readerLines
+	if isMarkdown(m.reader) {
+		lines = renderMarkdown(strings.Join(m.readerLines, "\n"), max(20, inner-2))
+	}
 	body := ""
 	if len(lines) == 0 {
 		body = dimStyle.Render("empty file")
