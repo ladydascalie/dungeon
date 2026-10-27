@@ -12,6 +12,7 @@ type Code string
 const (
 	EParse         Code = "E_PARSE"
 	ENoEncounter   Code = "E_NO_ENCOUNTER"
+	EBadEncounter  Code = "E_BAD_ENCOUNTER"
 	ENoMinion      Code = "E_NO_MINION"
 	EUnknownMinion Code = "E_UNKNOWN_MINION"
 	EUnknownRole   Code = "E_UNKNOWN_ROLE"
@@ -43,12 +44,20 @@ func (f Finding) String() string {
 // A minion id becomes a herdr agent name, so it obeys that alphabet.
 var minionID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
+// An encounter becomes a branch prefix, a tab label and a directory name, so it
+// is restricted to what all three accept.
+var encounterID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
+
 // Validate returns every violation in the plan, in declaration order.
 func Validate(p Plan) []Finding {
 	var f []Finding
 
-	if p.Encounter == "" {
+	switch {
+	case p.Encounter == "":
 		f = append(f, Finding{ENoEncounter, "encounter", "name the encounter"})
+	case !encounterID.MatchString(p.Encounter):
+		f = append(f, Finding{EBadEncounter, "encounter",
+			fmt.Sprintf("encounter %q must match [a-z0-9][a-z0-9-]{0,40}: it becomes a branch prefix", p.Encounter)})
 	}
 	if len(p.Minions) == 0 {
 		f = append(f, Finding{ENoMinion, "minions", "a plan with no minions dispatches nothing"})

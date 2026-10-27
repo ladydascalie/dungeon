@@ -9,7 +9,7 @@ that owns a worktree. Anything else fails validation.
 
 ## Status
 
-`check`, `status`, `set`, `view`, `attach`, `up` and `next` are built. `land`
+`init`, `check`, `status`, `set`, `view`, `attach`, `up` and `next` are built. `land`
 and `down` are not.
 
 The loop: `dungeon up` spawns one pi lane per minion, `dungeon next` dispatches
@@ -19,6 +19,7 @@ happens. Nothing else drives it: no daemon, no watcher.
 ## Use
 
 ```sh
+dungeon init                       # write a starter .dungeon/plan.yaml
 dungeon check                      # reads .dungeon/plan.yaml
 dungeon check --json path/plan.yaml
 

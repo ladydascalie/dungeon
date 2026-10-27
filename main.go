@@ -36,6 +36,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return viewCmd(ctx, args[1:], stdout, stderr)
 	case "attach":
 		return attachCmd(args[1:], stdout, stderr)
+	case "init":
+		return initCmd(args[1:], stdout, stderr)
 	case "up":
 		return upCmd(ctx, args[1:], stdout, stderr)
 	case "next":
@@ -52,6 +54,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 func usage(w io.Writer) {
 	fmt.Fprint(w, `dungeon — a plan that dispatches
+
+  dungeon init   [--dir path] [--encounter name] [--base branch] [--force]
+      Write a starter .dungeon/plan.yaml, and a .dungeon/.gitignore that keeps
+      the run out of git while the plan stays in it.
 
   dungeon check  [--json] [--plan path] [path]
       Validate a plan. Exit 0 clean, 1 findings, 2 unreadable.

@@ -310,3 +310,8 @@ func sorted(in []string) []string {
 	sort.Strings(out)
 	return out
 }
+
+func TestEncounterMustBeBranchSafe(t *testing.T) {
+	p := decodeOK(t, strings.Replace(goodPlan, "encounter: fix-auth-timeouts", "encounter: Fix Auth", 1))
+	wantCodes(t, Validate(p), EBadEncounter)
+}
