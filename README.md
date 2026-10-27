@@ -9,8 +9,12 @@ that owns a worktree. Anything else fails validation.
 
 ## Status
 
-`dungeon check`, `dungeon status`, `dungeon set` and `dungeon view` are built.
-`up`, `next`, `land` and `down` are not.
+`check`, `status`, `set`, `view`, `attach`, `up` and `next` are built. `land`
+and `down` are not.
+
+The loop: `dungeon up` spawns one pi lane per minion, `dungeon next` dispatches
+what is ready and settles what landed, `dungeon view` shows the graph while it
+happens. Nothing else drives it: no daemon, no watcher.
 
 ## Use
 
@@ -29,7 +33,28 @@ dungeon view --once --width 120    # one frame, for a screenshot or a pipe
 dungeon view --detail MOL1         # open the detail pane on one unit
 
 dungeon attach MOL1 /tmp/brief-mol1.md
+
+dungeon up                         # spawn the lanes, then one round of next
+dungeon up --no-dispatch           # spawn only
+dungeon next --dry-run             # say what would go out
+dungeon next --timeout 10m
 ```
+
+A dispatch is five steps and only the last one can mark a unit `done`:
+
+1. write `.dungeon/briefs/<unit>.md`: goal, owned paths, worktree, accept
+   command, and what the lane may not touch;
+2. submit it with `herdr agent prompt`;
+3. wait for the lane to settle;
+4. read `.dungeon/reports/<unit>.md`. No report means `blocked`, never `done`;
+5. run the unit's `accept` command in the lane's worktree. Exit 0 is `done`,
+   anything else is `rejected`, and no command at all is `unproven`.
+
+`up` is idempotent: a minion whose agent is live is left alone, so a second `up`
+resumes instead of doubling the fleet. A writer gets its own git worktree at
+`<repo>/../<encounter>-<minion>` on branch `<encounter>/<minion>`. Lanes run with
+`--no-skills --no-mcp` and a tool allowlist that matches their role: `read,bash`
+for staff work, `read,bash,edit,write` for writers.
 
 `d` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,

@@ -92,16 +92,6 @@ func TestUsage(t *testing.T) {
 	}
 }
 
-func fakeHerdr(t *testing.T, payload string) {
-	t.Helper()
-	dir := t.TempDir()
-	script := "#!/bin/sh\ncat <<'JSON'\n" + payload + "\nJSON\n"
-	if err := os.WriteFile(filepath.Join(dir, "herdr"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
 func TestSetWritesStateAndStatusReadsIt(t *testing.T) {
 	path := writePlan(t, goodPlan)
 	state := filepath.Join(t.TempDir(), "state.json")
@@ -144,7 +134,7 @@ func TestSetRefusesUnknownIDsAndStatuses(t *testing.T) {
 func TestSetWarnsWhenNoAgentIsInThePane(t *testing.T) {
 	path := writePlan(t, goodPlan)
 	state := filepath.Join(t.TempDir(), "state.json")
-	fakeHerdr(t, `{"result":{"agents":[]}}`)
+	fakeHerdr(t, "")
 
 	code, _, stderr := runCLI("set", "unit", "api-timeout", "working", "--plan", path, "--state", state)
 	if code != 0 {
@@ -158,7 +148,7 @@ func TestSetWarnsWhenNoAgentIsInThePane(t *testing.T) {
 func TestStatusJSONShowsPanes(t *testing.T) {
 	path := writePlan(t, goodPlan)
 	state := filepath.Join(t.TempDir(), "state.json")
-	fakeHerdr(t, `{"result":{"agents":[{"name":"w1","pane_id":"w9:p4","agent_status":"working","cwd":"/x"}]}}`)
+	fakeHerdr(t, "w1:working\n")
 	if code, _, stderr := runCLI("set", "unit", "api-timeout", "working", "--plan", path, "--state", state); code != 0 {
 		t.Fatalf("set: %s", stderr)
 	}
@@ -177,7 +167,7 @@ func TestStatusJSONShowsPanes(t *testing.T) {
 			found = u
 		}
 	}
-	if found.Pane != "w9:p4" || found.Agent != "working" {
+	if found.Pane != "w9:p2" || found.Agent != "working" {
 		t.Fatalf("row %+v", found)
 	}
 }

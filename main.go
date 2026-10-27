@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const defaultPlanPath = ".dungeon/plan.yaml"
@@ -35,6 +36,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return viewCmd(ctx, args[1:], stdout, stderr)
 	case "attach":
 		return attachCmd(args[1:], stdout, stderr)
+	case "up":
+		return upCmd(ctx, args[1:], stdout, stderr)
+	case "next":
+		return nextCmd(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -64,13 +69,22 @@ func usage(w io.Writer) {
       Keep a file with a unit: a brief, a report, a handoff note. It shows up
       in the detail pane of dungeon view.
 
+  dungeon up     [--no-dispatch] [--plan path] [--state path]
+      Spawn a pane and a pi lane per minion, in one tab. A writer gets its own
+      git worktree on <encounter>/<minion>. Idempotent: a live minion is left
+      alone. Then it runs one round of next.
+
+  dungeon next   [--timeout 30m] [--accept-timeout 10m] [--poll 2s] [--dry-run]
+      Settle the lanes that stopped, dispatch the units whose deps landed, and
+      wait. The only path to done is the unit's accept command exiting 0.
+
   dungeon view   [--once] [--interval 2s] [--plan path] [--state path]
       The live table. j/k move, g/G ends, r refresh, q quit.
       Piped output and --once print one frame instead.
 
 The plan defaults to `+defaultPlanPath+`. State lives beside it in state.json.
 
-up, next, land and down are not built yet.
+land and down are not built yet.
 `)
 }
 
@@ -303,6 +317,113 @@ func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
 		return Plan{}, 1
 	}
 	return p, 0
+}
+
+func dispatchFlags(fs *flag.FlagSet, statePath *string) (*dispatchOpts, *string) {
+	o := &dispatchOpts{}
+	plan := fs.String("plan", defaultPlanPath, "path to the plan")
+	fs.StringVar(statePath, "state", "", "path to state.json (default: beside the plan)")
+	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "how long next may wait for lanes")
+	fs.DurationVar(&o.acceptTimeout, "accept-timeout", 10*time.Minute, "how long one accept command may run")
+	fs.DurationVar(&o.poll, "poll", 2*time.Second, "how often to look at the lanes")
+	return o, plan
+}
+
+func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("up", stderr)
+	var statePath string
+	o, planPath := dispatchFlags(fs, &statePath)
+	noDispatch := fs.Bool("no-dispatch", false, "spawn the minions and stop")
+	rest, err := parseMixed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(rest) > 0 {
+		*planPath = rest[0]
+	}
+	p, code := loadValidPlan(*planPath, stderr)
+	if code != 0 {
+		return code
+	}
+	if statePath == "" {
+		statePath = StatePath(*planPath)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if st.Encounter == "" {
+		st.Encounter = p.Encounter
+	}
+	if st.Encounter != p.Encounter {
+		fmt.Fprintf(stderr, "dungeon: %s holds encounter %q, the plan is %q\n",
+			statePath, st.Encounter, p.Encounter)
+		return 2
+	}
+
+	res, err := spawnMinions(ctx, *planPath, p, &st, stdout)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if err := SaveState(statePath, st); err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	fmt.Fprintln(stdout, res)
+	if *noDispatch || len(res.Failed) > 0 {
+		return 0
+	}
+
+	o.planPath, o.statePath, o.out = *planPath, statePath, stdout
+	d, err := next(ctx, *o, p, &st)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	fmt.Fprint(stdout, d)
+	return 0
+}
+
+func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("next", stderr)
+	var statePath string
+	o, planPath := dispatchFlags(fs, &statePath)
+	dryRun := fs.Bool("dry-run", false, "say what would be dispatched")
+	rest, err := parseMixed(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(rest) > 0 {
+		*planPath = rest[0]
+	}
+	p, code := loadValidPlan(*planPath, stderr)
+	if code != 0 {
+		return code
+	}
+	if statePath == "" {
+		statePath = StatePath(*planPath)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if st.Encounter != "" && st.Encounter != p.Encounter {
+		fmt.Fprintf(stderr, "dungeon: %s holds encounter %q, the plan is %q\n",
+			statePath, st.Encounter, p.Encounter)
+		return 2
+	}
+	o.planPath, o.statePath, o.out, o.dryRun = *planPath, statePath, stdout, *dryRun
+
+	d, err := next(ctx, *o, p, &st)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	fmt.Fprint(stdout, d)
+	return 0
 }
 
 func attachCmd(args []string, stdout, stderr io.Writer) int {
