@@ -213,7 +213,8 @@ func TestSnapshotLoopRow(t *testing.T) {
 	}
 }
 
-// The state is the loop's current action, most urgent first.
+// The state follows a fixed precedence, so a recovered loop shows done and a
+// superseded failure does not dominate.
 func TestLoopStatePrecedence(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -248,11 +249,11 @@ func TestLoopStatePrecedence(t *testing.T) {
 			want: "failed", wantRnd: 1, started: true,
 		},
 		{
-			name: "a failed review still leads past an unproven fix",
+			name: "an earlier failed review does not dominate a later ready review",
 			set: map[string]string{
 				"A": "done", "polish-review-1": "failed", "polish-fix-1": "unproven",
 			},
-			want: "failed", wantRnd: 2, started: true,
+			want: "ready", wantRnd: 2, started: true,
 		},
 		{
 			name: "a passed review ends the loop",
@@ -269,6 +270,23 @@ func TestLoopStatePrecedence(t *testing.T) {
 				"A": "done", "polish-review-1": "blocked",
 			},
 			want: "waiting", wantRnd: 1, started: true,
+		},
+		{
+			name: "a mid-loop round reports the working review",
+			set: map[string]string{
+				"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+				"polish-review-2": "working",
+			},
+			want: "working", wantRnd: 2, started: true, passed: true,
+		},
+		{
+			name: "a cap that ends on a failed final review is failed",
+			set: map[string]string{
+				"A": "done", "polish-review-1": "failed", "polish-fix-1": "unproven",
+				"polish-review-2": "failed", "polish-fix-2": "unproven",
+				"polish-review-3": "failed",
+			},
+			want: "failed", wantRnd: 2, started: true,
 		},
 		{
 			name: "the final review clamps to the cap",
@@ -297,6 +315,58 @@ func TestLoopStatePrecedence(t *testing.T) {
 					l.Started, l.Passed, tc.started, tc.passed)
 			}
 		})
+	}
+}
+
+const loopOneRoundPlan = `encounter: ls
+minions:
+  - {id: w1, role: worker, worktree: w1}
+  - {id: r1, role: reviewer, of: w1}
+units:
+  - id: A
+    minion: w1
+    paths: [a/**]
+    goal: Do A.
+    accept: "true"
+loops:
+  - id: copy
+    reviewer: r1
+    fixer: w1
+    rounds: 1
+    focus: tone and copy
+    pass: "Merge verdict: PASS"
+    paths: [a/**]
+    deps: [A]
+`
+
+// The copy case: review 1 failed, then the fix passed review 2. The summary
+// must say done, not waiting or failed.
+func TestLoopStateRecoveredRound(t *testing.T) {
+	p := decodeOK(t, loopOneRoundPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	p, f := ExpandLoops(p)
+	if len(f) > 0 {
+		t.Fatalf("expand: %v", f)
+	}
+	st, _ := LoadState(t.TempDir() + "/missing.json")
+	for id, status := range map[string]string{
+		"A": "done", "copy-review-1": "failed", "copy-fix-1": "done",
+		"copy-review-2": "done",
+	} {
+		if err := st.SetUnit(id, status, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := buildSnapshot(p, "plan.yaml", st, nil)
+	if len(s.Loops) != 1 {
+		t.Fatalf("got %d loop rows, want 1", len(s.Loops))
+	}
+	l := s.Loops[0]
+	if l.State != "done" || !l.Started || !l.Passed {
+		t.Fatalf("recovered loop state %q started %v passed %v, want done true true",
+			l.State, l.Started, l.Passed)
 	}
 }
 

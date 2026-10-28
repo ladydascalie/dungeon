@@ -232,56 +232,74 @@ func loopRound(p Plan, st *State, units []string, cap int) int {
 	return round
 }
 
-// loopState is the loop's current action, most urgent first: working, failed,
-// ready, done, waiting. A failed review is called out even when its fix is
-// already ready, because the failure is what the operator needs to see.
+// loopState is the loop's current action, in precedence order: working,
+// final review done, final review failed, last live unit failed, ready,
+// waiting, done. A failed round that a later round superseded must not
+// dominate the summary.
 func loopState(p Plan, st *State, units []string) string {
 	if len(units) == 0 {
 		return "waiting"
 	}
-	working, ready, settled := false, false, true
+	ready, waiting := false, false
 	for _, id := range units {
-		switch st.UnitStatus(id) {
-		case "working":
-			working = true
-			settled = false
+		status := st.UnitStatus(id)
+		if status == "working" {
+			return "working"
+		}
+		switch status {
+		case "done", "canceled", "failed":
 		case "planned":
-			settled = false
 			if u, ok := findUnit(p, id); ok && unitReady(p, st, u) {
 				ready = true
+			} else {
+				waiting = true
 			}
-		case "done", "canceled":
 		default:
-			settled = false
+			// blocked, unproven and rejected are live but unsettled.
+			waiting = true
 		}
 	}
-	switch {
-	case working:
-		return "working"
-	case lastReviewFailed(p, st, units):
-		return "failed"
-	case ready:
-		return "ready"
-	case settled:
+	switch finalReviewStatus(p, st, units) {
+	case "done":
 		return "done"
-	default:
+	case "failed":
+		return "failed"
+	}
+	if lastLiveFailed(st, units) {
+		return "failed"
+	}
+	if ready {
+		return "ready"
+	}
+	if waiting {
 		return "waiting"
 	}
+	return "done"
 }
 
-// lastReviewFailed reads the newest review that has an outcome. An unstarted
-// or canceled review says nothing about the loop.
-func lastReviewFailed(p Plan, st *State, units []string) bool {
+// finalReviewStatus is the status of the newest review unit. A planned or
+// canceled final review had no verdict, so it decides nothing here.
+func finalReviewStatus(p Plan, st *State, units []string) string {
 	for i := len(units) - 1; i >= 0; i-- {
 		u, ok := findUnit(p, units[i])
 		if !ok || u.Kind != "review" {
 			continue
 		}
-		switch st.UnitStatus(u.ID) {
-		case "planned", "canceled":
+		return st.UnitStatus(u.ID)
+	}
+	return ""
+}
+
+// lastLiveFailed reports whether the newest unit with an outcome failed. A
+// planned or canceled unit says nothing. Stopping at the first live unit is
+// what lets a later done round supersede an earlier failed review.
+func lastLiveFailed(st *State, units []string) bool {
+	for i := len(units) - 1; i >= 0; i-- {
+		status := st.UnitStatus(units[i])
+		if status == "planned" || status == "canceled" {
 			continue
 		}
-		return st.UnitStatus(u.ID) == "failed"
+		return status == "failed"
 	}
 	return false
 }
