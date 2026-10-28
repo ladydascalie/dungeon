@@ -41,9 +41,9 @@ func TestMultilineGoalRendersOneLine(t *testing.T) {
 	if u.ID != "A" {
 		t.Fatal("no row A")
 	}
-	c := m.rowParts(u, "", "", "")
+	c := m.rowParts(unitRow(u), "", "", "")
 	mt := m.metricsOf([]rowCells{c}, max(10, m.width-1))
-	line := m.rowLine(u, m.width, "", "", "", mt)
+	line := m.rowLine(unitRow(u), m.width, "", "", "", mt)
 
 	if strings.Contains(line, "\n") {
 		t.Fatalf("a multi-line goal broke the row:\n%s", line)

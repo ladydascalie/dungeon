@@ -5,6 +5,17 @@ import (
 	"strings"
 )
 
+// displayRow is the text a row shows, which is not always the unit's own text.
+// A loop summary row names the loop and its round progress, and a generated
+// child hides the long goal and the loop id prefix. The card still reads the
+// unit, so nothing is lost.
+type displayRow struct {
+	u    UnitRow
+	id   string // display id
+	goal string // display goal
+	lane string // lane column; empty leaves it out
+}
+
 // rowCells splits a row where the eye styles it: the head (connectors and fold
 // mark), the id, the lane (minion and pane), the goal, and the status. The lane
 // and goal travel together in rest so the layout can truncate one string.
@@ -23,36 +34,58 @@ func collapseSpace(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// rowParts splits a row into the columns' worth of text. The id and the lane are
-// identifiers, so the painter keeps them bold; the goal is the hint.
-func (m viewModel) rowParts(u UnitRow, prefix, suffix, fold string) rowCells {
-	join := ""
-	if len(u.Inputs) > 1 {
-		join = fmt.Sprintf(" ∧%d", len(u.Inputs))
-	}
+// laneText is the minion and its live pane, or the pane hint with no agent.
+func laneText(u UnitRow) string {
 	where := u.Minion
 	if u.Pane != "" {
 		where += " " + u.Pane
 	}
-	head := prefix + fold
-	lead := ""
-	if head != "" {
-		lead = " " // air between the fold mark and the id
+	return where
+}
+
+// unitRow is a display row for a snapshot unit.
+func unitRow(u UnitRow) displayRow {
+	return displayRow{u: u, id: u.ID, goal: u.Goal, lane: laneText(u)}
+}
+
+// rowParts splits a row into the columns' worth of text. The id and the lane are
+// identifiers, so the painter keeps them bold; the goal is the hint.
+func (m viewModel) rowParts(d displayRow, prefix, suffix, fold string) rowCells {
+	u := d.u
+	join := ""
+	if len(u.Inputs) > 1 {
+		join = fmt.Sprintf("∧%d", len(u.Inputs))
 	}
-	lane := strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap)), " ")
-	laneWidth := 0
+	lane := d.lane
 	if lane != "" {
-		laneWidth = runeLen(lane) + 1
+		lane = pad(truncate(lane, 22), whereWidth(m.snap))
 	}
-	rest := strings.TrimLeft(lane+" "+collapseSpace(u.Goal), " ")
+	mark := []string{}
+	for _, p := range []string{join, lane} {
+		if p != "" {
+			mark = append(mark, p)
+		}
+	}
+	pieces := append(mark, collapseSpace(d.goal))
+	laneWidth := 0
+	if len(mark) > 0 {
+		laneWidth = runeLen(strings.Join(mark, " ")) + 1
+	}
 	return rowCells{
-		head:  head,
-		lead:  lead,
-		id:    pad(u.ID, idWidth(m.snap)),
-		rest:  rest,
+		head:  prefix + fold,
+		lead:  leadFor(prefix + fold),
+		id:    pad(d.id, idWidth(m.snap)),
+		rest:  strings.Join(pieces, " "),
 		right: linkMark(u) + m.statusText(u) + suffix,
 		lane:  laneWidth,
 	}
+}
+
+func leadFor(head string) string {
+	if head != "" {
+		return " " // air between the fold mark and the id
+	}
+	return ""
 }
 
 // metricsOf sizes the two columns for the rows that are about to be drawn: the
@@ -71,13 +104,13 @@ func (m viewModel) metricsOf(rows []rowCells, avail int) rowMetrics {
 
 // rowLine draws one row against those columns: the left text padded to the
 // column, the gap, then the status right aligned inside its own column.
-func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string, mt rowMetrics) string {
-	c := m.rowParts(u, prefix, suffix, fold)
+func (m viewModel) rowLine(d displayRow, width int, prefix, suffix, fold string, mt rowMetrics) string {
+	c := m.rowParts(d, prefix, suffix, fold)
 
 	fixed := runeLen(c.head) + runeLen(c.lead) + runeLen(c.id) + 1
 	if mt.left < fixed {
 		plain := truncate(c.head+c.lead+c.id, max(4, mt.left))
-		return m.paintRow(u, plain, "", "", "", 0)
+		return m.paintRow(d.u, plain, "", "", "", 0)
 	}
 	// The padding belongs to the rest of the row, not to the line: paintRow
 	// rebuilds the row from its parts, so spaces added to the assembled string
@@ -90,8 +123,8 @@ func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string, mt
 	if mt.right > runeLen(right) {
 		right = strings.Repeat(" ", mt.right-runeLen(right)) + right
 	}
-	return m.paintRow(u, plain, c.head+c.lead, c.id, rest, min(c.lane, runeLen(rest))) +
-		strings.Repeat(" ", mt.pad) + m.paintRight(u, right)
+	return m.paintRow(d.u, plain, c.head+c.lead, c.id, rest, min(c.lane, runeLen(rest))) +
+		strings.Repeat(" ", mt.pad) + m.paintRight(d.u, right)
 }
 
 // paintRow styles the left side. The selected row is plain text inside reverse
