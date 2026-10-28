@@ -98,6 +98,30 @@ func landable(p Plan, st *State) []Unit {
 	return out
 }
 
+// landGroup is every done unit a minion produced. One minion is one branch, so
+// it merges once however many units it finished.
+type landGroup struct {
+	Minion string
+	Units  []Unit
+}
+
+// groupByMinion keeps the declaration order of each minion's first done unit,
+// so the merge order matches the plan rather than the map.
+func groupByMinion(units []Unit) []landGroup {
+	var groups []landGroup
+	at := map[string]int{}
+	for _, u := range units {
+		i, ok := at[u.Minion]
+		if !ok {
+			i = len(groups)
+			at[u.Minion] = i
+			groups = append(groups, landGroup{Minion: u.Minion})
+		}
+		groups[i].Units = append(groups[i].Units, u)
+	}
+	return groups
+}
+
 func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, error) {
 	var res landResult
 	units := landable(p, st)
@@ -110,15 +134,21 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 		return res, err
 	}
 
-	for _, u := range units {
-		branch := p.Encounter + "/" + u.Minion
+	for _, g := range groupByMinion(units) {
+		branch := p.Encounter + "/" + g.Minion
+		ids := make([]string, 0, len(g.Units))
+		for _, u := range g.Units {
+			ids = append(ids, u.ID)
+		}
 		if _, err := gitRun(res.Worktree, "merge", "--no-ff", branch, "-m",
-			fmt.Sprintf("land %s: %s", u.ID, firstLine(u.Goal))); err != nil {
-			res.Conflict, res.Reason = u.ID, lastLine(err.Error())
+			fmt.Sprintf("land %s: %s", strings.Join(ids, " "), firstLine(g.Units[0].Goal))); err != nil {
+			res.Conflict, res.Reason = g.Units[0].ID, lastLine(err.Error())
 			gitRun(res.Worktree, "merge", "--abort")
 			return res, nil
 		}
-		res.Merged = append(res.Merged, u.ID)
+		for _, u := range g.Units {
+			res.Merged = append(res.Merged, u.ID)
+		}
 	}
 
 	// The gate is each unit's own acceptance command, run against the merged
