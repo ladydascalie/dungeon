@@ -103,20 +103,46 @@ func reportPath(planPath, unit string) string {
 	return filepath.Join(encounterDir(planPath), "reports", unit+".md")
 }
 
+// minionDir is where a minion reads and runs its accept command. A writer
+// works in its own worktree. A staff minion paired with a writer reads the
+// writer's worktree, so a reviewer sees the branch it reviews. Staff with no
+// pair reads the base checkout.
 func minionDir(p Plan, m Minion) string {
 	if writes(m.Role) {
 		return worktreePath(p.Repo, p.Encounter, m.ID)
 	}
+	if m.Of != "" {
+		return worktreePath(p.Repo, p.Encounter, m.Of)
+	}
 	return p.Repo
 }
 
+// depReport is one dep's report, named by unit so the lane knows which report
+// answers which dependency.
+type depReport struct {
+	ID   string
+	Path string
+}
+
+// briefData is everything a brief says. It is grouped so the callers pass one
+// value instead of a row of positions.
+type briefData struct {
+	minion     Minion
+	unit       Unit
+	dir        string
+	report     string
+	depReports []depReport
+	parentPane string
+}
+
 // briefText is the whole contract the lane gets. It names what to do, what it
-// owns, what it may not touch, where to leave the report, and how to ping the
-// parent.
-func briefText(p Plan, m Minion, u Unit, dir, report, parentPane string) string {
+// owns, what it may not touch, where to leave the report, where the deps left
+// theirs, and how to ping the parent.
+func briefText(d briefData) string {
+	m, u := d.minion, d.unit
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n%s\n\n", u.ID, u.Goal)
-	fmt.Fprintf(&b, "minion: %s (%s)\nworktree: %s\n", m.ID, m.Role, dir)
+	fmt.Fprintf(&b, "minion: %s (%s)\nworktree: %s\n", m.ID, m.Role, d.dir)
 	if len(u.Paths) > 0 {
 		b.WriteString("paths you own:\n")
 		for _, path := range u.Paths {
@@ -126,17 +152,23 @@ func briefText(p Plan, m Minion, u Unit, dir, report, parentPane string) string 
 	if len(u.Deps) > 0 {
 		fmt.Fprintf(&b, "deps that landed: %s\n", strings.Join(u.Deps, " "))
 	}
+	if len(d.depReports) > 0 {
+		b.WriteString("\n## reports from deps\n\n")
+		for _, r := range d.depReports {
+			fmt.Fprintf(&b, "- %s: %s\n", r.ID, r.Path)
+		}
+	}
 	if u.Accept != "" {
 		fmt.Fprintf(&b, "accept: %s\n", u.Accept)
 	} else {
 		b.WriteString("accept: none. This unit cannot be marked done, so say plainly what you did.\n")
 	}
-	fmt.Fprintf(&b, "\nreport: %s\n", report)
-	if parentPane != "" {
+	fmt.Fprintf(&b, "\nreport: %s\n", d.report)
+	if d.parentPane != "" {
 		fmt.Fprintf(&b, "\n## Ping the parent when you finish\n\n")
 		b.WriteString("Write the report first, then wake the parent agent:\n\n")
-		fmt.Fprintf(&b, "    herdr pane run %s %q\n\n", parentPane,
-			fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, report))
+		fmt.Fprintf(&b, "    herdr pane run %s %q\n\n", d.parentPane,
+			fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, d.report))
 		b.WriteString("That pane runs the agent that dispatched you. Do not wait for a reply.\n")
 	}
 	b.WriteString(`
@@ -165,7 +197,22 @@ func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	text := briefText(p, m, u, minionDir(p, m), absReport, o.parentPane)
+	depReports := make([]depReport, 0, len(u.Deps))
+	for _, dep := range u.Deps {
+		abs, err := filepath.Abs(reportPath(o.planPath, dep))
+		if err != nil {
+			return "", err
+		}
+		depReports = append(depReports, depReport{ID: dep, Path: abs})
+	}
+	text := briefText(briefData{
+		minion:     m,
+		unit:       u,
+		dir:        minionDir(p, m),
+		report:     absReport,
+		depReports: depReports,
+		parentPane: o.parentPane,
+	})
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return "", err
 	}

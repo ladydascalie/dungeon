@@ -35,6 +35,7 @@ const (
 	ELoopRounds    Code = "E_LOOP_ROUNDS"
 	ELoopPass      Code = "E_LOOP_PASS"
 	ELoopFocus     Code = "E_LOOP_FOCUS"
+	EOfNotWriter   Code = "E_OF_NOT_WRITER"
 )
 
 type Finding struct {
@@ -133,6 +134,11 @@ func Validate(p Plan) []Finding {
 		}
 		if m.Of == m.ID {
 			f = append(f, Finding{ECycle, at, "a minion cannot be its own pair"})
+		} else if role, ok := roleOf[m.Of]; ok && roles[role] && !writes(role) {
+			f = append(f, Finding{
+				EOfNotWriter, at,
+				fmt.Sprintf("minion %q has role %q, which does not write, so it has no worktree to read", m.Of, role),
+			})
 		}
 	}
 

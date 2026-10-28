@@ -317,11 +317,77 @@ func TestNextRespectsConcurrency(t *testing.T) {
 }
 
 func TestBriefHasNoPingWithoutAParentPane(t *testing.T) {
-	p := Plan{Encounter: "enc", Repo: "/repo"}
 	m := Minion{ID: "w1", Role: RoleWorker}
 	u := Unit{ID: "A", Goal: "Do it.", Paths: []string{"src/**"}}
-	text := briefText(p, m, u, "/repo", "/enc/reports/A.md", "")
+	text := briefText(briefData{minion: m, unit: u, dir: "/repo", report: "/enc/reports/A.md"})
 	if strings.Contains(text, "Ping the parent") {
 		t.Fatalf("no parent pane means no ping:\n%s", text)
 	}
+}
+
+// A reviewer must read the branch it reviews: its cwd is its writer's worktree,
+// not the base checkout. A staff minion with no pair keeps the base checkout.
+func TestMinionDirReadsThePairedWorktree(t *testing.T) {
+	p := decodeOK(t, goodPlan)
+	w1, _ := findMinion(p, "w1")
+	r1, _ := findMinion(p, "r1")
+	scout, _ := findMinion(p, "scout")
+	writerDir := worktreePath(p.Repo, p.Encounter, "w1")
+
+	if got := minionDir(p, w1); got != writerDir {
+		t.Fatalf("a writer works in its own worktree, got %q", got)
+	}
+	if got := minionDir(p, r1); got != writerDir {
+		t.Fatalf("a reviewer of w1 must read w1's worktree, got %q", got)
+	}
+	if got := minionDir(p, scout); got != p.Repo {
+		t.Fatalf("a scout with no pair keeps the base checkout, got %q", got)
+	}
+}
+
+func TestBriefNamesThePairedWorktreeAndDepReports(t *testing.T) {
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, ".dungeon", "plan.yaml")
+	p := decodeOK(t, goodPlan)
+	m, _ := findMinion(p, "r1")
+	var u Unit
+	for _, x := range p.Units {
+		if x.ID == "review-api" {
+			u = x
+		}
+	}
+
+	path, err := writeBrief(dispatchOpts{planPath: planPath}, p, m, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+
+	if want := "worktree: " + worktreePath(p.Repo, p.Encounter, "w1"); !strings.Contains(text, want) {
+		t.Fatalf("brief missing %q:\n%s", want, text)
+	}
+	depReport, err := filepath.Abs(reportPath(planPath, "api-timeout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "## reports from deps") {
+		t.Fatalf("brief has no dep reports section:\n%s", text)
+	}
+	if want := "- api-timeout: " + depReport; !strings.Contains(text, want) {
+		t.Fatalf("brief missing %q:\n%s", want, text)
+	}
+}
+
+func TestOfMustNameAWriter(t *testing.T) {
+	plan := strings.Replace(goodPlan, "{id: r1, role: reviewer, of: w1}",
+		"{id: r1, role: reviewer, of: scout}", 1)
+	wantCodes(t, Validate(decodeOK(t, plan)), EOfNotWriter)
+
+	plan = strings.Replace(goodPlan, "{id: r1, role: reviewer, of: w1}",
+		"{id: r1, role: reviewer, of: nope}", 1)
+	wantCodes(t, Validate(decodeOK(t, plan)), EUnknownMinion)
 }
