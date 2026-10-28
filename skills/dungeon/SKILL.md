@@ -348,17 +348,12 @@ parent's only edit in that whole run is the plan.
 Use a pane for one second opinion, one fresh-context review, or one recon. If
 the work splits into units, it is an encounter, not a pane.
 
-Run this only inside herdr:
+Gate on herdr: `test "${HERDR_ENV:-}" = 1`. Outside herdr, say so and stop.
 
-```bash
-test "${HERDR_ENV:-}" = 1
-```
-
-Write the handoff to `.pi/handoffs/<slug>/handoff.md` before any pane exists.
-State the objective, the repo and cwd, what the child may change, the
-acceptance criteria, the report path, and the stop conditions. The child prompt
-only points at that file. `.pi/` is gitignored, so the handoff never lands in a
-commit.
+Write the handoff to `${TMPDIR:-/tmp}/herdr-handoffs/<slug>/handoff.md` before
+any pane exists, outside the checkout. It states the objective, repo and cwd,
+what the child may change, the acceptance criteria, and the stop conditions. The
+child prompt only points at that file.
 
 Split one pane in your own cwd, and read the pane id from the JSON. Never derive
 it from an example:
@@ -368,32 +363,35 @@ herdr pane split --current --direction right --cwd "$PWD" --no-focus
 # pane = .result.pane.pane_id
 ```
 
-Start the child with an explicit tool allowlist. A read-only child gets no
-`edit` and no general `write`; it reports through `write_report`:
+Start the child with an explicit tool allowlist. A read-only child gets
+`read,bash`, no `edit` and no writer, so its findings go in its final reply. A
+writer child may keep a report under `${TMPDIR:-/tmp}/herdr-handoffs/<slug>/`,
+outside the checkout:
 
 ```bash
-herdr agent start review-auth --kind pi --pane <id> -- --tools read,bash,grep,find,ls,write_report --no-mcp
+herdr agent start review-auth --kind pi --pane <id> -- --tools read,bash --no-mcp
 ```
 
-Prompt it to read the handoff and write a report, then wait with a timeout:
+Prompt it to read the handoff and do it, then wait with a timeout:
 
 ```bash
 herdr agent prompt review-auth \
-  "Read <abs>/handoff.md and do it. Write your report to <abs>/report.md, then reply with the path only." \
+  "Read <abs>/handoff.md and do it." \
   --wait --timeout 900000
 ```
 
 A timeout means the task is async, not that it failed. Check it again later.
 
-Read the report file, not the terminal. Fall back to pane read only when there
-is no report:
+Read the child's final reply, not the terminal. A writer child's report file
+comes first; fall back to the pane only when there is no report:
 
 ```bash
 herdr agent read review-auth --source recent-unwrapped --lines 120
 ```
 
-Close only the pane you opened. Never commit, push or merge from a child, and
-keep one writer per checkout.
+Close only the pane you opened: `herdr pane close <pane-id>`.
+
+Never commit, push or merge from a child, and keep one writer per checkout.
 
 When the child is `blocked`, it is asking a question. Answer with raw pane input,
 not another prompt, then wait again:
