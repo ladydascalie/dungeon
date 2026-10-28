@@ -56,12 +56,13 @@ func (m viewModel) focusCmd() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	minion, hint := u.Minion, m.state.Minions[u.Minion].Pane
+	// The derived name is what herdr knows the lane by; the plan keeps the id.
+	agent, hint := m.state.AgentName(u.Minion), m.state.Minions[u.Minion].Pane
 	if u.Pane != "" {
 		hint = u.Pane
 	}
 	return func() tea.Msg {
-		return focusMsg{err: newHerdrClient().focus(context.Background(), minion, hint)}
+		return focusMsg{err: newHerdrClient().focus(context.Background(), agent, hint)}
 	}
 }
 

@@ -26,7 +26,9 @@ func TestPinnedPaneIsUsedWhenItExists(t *testing.T) {
 	if strings.Contains(string(calls), "pane split") {
 		t.Fatalf("a live pin should not split a pane:\n%s", calls)
 	}
-	if !strings.Contains(string(calls), "agent start w1 --kind pi --pane w1P:p9") {
+	// The agent name carries the run's token, so only the prefix is exact.
+	if !strings.Contains(string(calls), "agent start w1-") ||
+		!strings.Contains(string(calls), "--kind pi --pane w1P:p9") {
 		t.Fatalf("the agent should start in the pinned pane:\n%s", calls)
 	}
 	st, _ := LoadState(statePath)
@@ -284,9 +286,9 @@ func TestLaneToolsOverrideAndFallBack(t *testing.T) {
 	var scout, worker string
 	for _, line := range strings.Split(string(calls), "\n") {
 		switch {
-		case strings.HasPrefix(line, "agent start s1 "):
+		case strings.HasPrefix(line, "agent start s1-"):
 			scout = line
-		case strings.HasPrefix(line, "agent start w1 "):
+		case strings.HasPrefix(line, "agent start w1-"):
 			worker = line
 		}
 	}
@@ -381,5 +383,26 @@ units:
 				t.Fatalf("the reviewer pane should open in w1's worktree (%q):\n%s", want, calls)
 			}
 		})
+	}
+}
+
+// verifyDown checks the fleet by the derived name. A live tokenized lane is
+// still running; another run's bare lane is not this run's lane at all.
+func TestVerifyDownUsesTheDerivedName(t *testing.T) {
+	fakeHerdr(t, "w1-7f:idle\n")
+	st := &State{Token: "7f", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	done, refused := verifyDown(t.Context(), newHerdrClient(), st, []string{"w1"}, nil)
+	if len(done) != 0 || len(refused) != 1 {
+		t.Fatalf("done %v refused %v, want the live tokenized lane refused", done, refused)
+	}
+	if got := st.Minions["w1"].Note; !strings.Contains(got, "interrupt") {
+		t.Fatalf("note %q, want it to say the lane ignored the interrupt", got)
+	}
+
+	fakeHerdr(t, "w1:idle\n")
+	st = &State{Token: "7f", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	done, refused = verifyDown(t.Context(), newHerdrClient(), st, []string{"w1"}, nil)
+	if len(done) != 1 || len(refused) != 0 {
+		t.Fatalf("done %v refused %v, want another run's bare lane ignored", done, refused)
 	}
 }

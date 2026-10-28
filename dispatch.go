@@ -240,7 +240,7 @@ func dispatchUnit(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st
 		fmt.Fprintf(o.out, "would dispatch %s to %s\n", u.ID, m.ID)
 		return nil
 	}
-	if err := h.prompt(ctx, m.ID, text); err != nil {
+	if err := h.prompt(ctx, st.AgentName(m.ID), text); err != nil {
 		return err
 	}
 	if err := st.SetUnit(u.ID, "working", "brief "+brief); err != nil {
@@ -333,7 +333,7 @@ func reconcile(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st *S
 		if !ok {
 			continue
 		}
-		a, live := agents[m.ID]
+		a, live := agents[st.AgentName(m.ID)]
 		if !live {
 			st.SetUnit(u.ID, "blocked", "minion "+m.ID+" has no live agent")
 			d.Blocked = append(d.Blocked, u.ID)
@@ -448,7 +448,7 @@ func next(ctx context.Context, o dispatchOpts, p Plan, st *State) (digest, error
 			if !ok || busy[m.ID] {
 				continue
 			}
-			if _, live := agents[m.ID]; !live {
+			if _, live := agents[st.AgentName(m.ID)]; !live {
 				if !contains(d.NoLane, u.ID) {
 					d.NoLane = append(d.NoLane, u.ID)
 				}

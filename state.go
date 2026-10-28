@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 type State struct {
 	Encounter string                 `json:"encounter"`
 	PlanHash  string                 `json:"plan_hash,omitempty"`
+	Token     string                 `json:"token,omitempty"` // per-run suffix, so two runs never share a herdr name
 	UpdatedAt string                 `json:"updated_at"`
 	Units     map[string]UnitState   `json:"units"`
 	Minions   map[string]MinionState `json:"minions"`
@@ -61,6 +63,77 @@ func toSet(in []string) map[string]bool {
 		m[v] = true
 	}
 	return m
+}
+
+// A herdr agent name is global. Two encounters that both declare w1 would
+// otherwise share one agent, so a run carries a two-character token and every
+// agent it starts is named <minion>-<token>.
+const (
+	tokenLen      = 2
+	agentNameMax  = 32 // herdr's limit
+	agentIDMax    = agentNameMax - 1 - tokenLen
+	tokenTries    = 64
+	tokenAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+)
+
+// newToken is injectable so a test can make the re-roll deterministic.
+var newToken = randomToken
+
+func randomToken() string {
+	var b [tokenLen]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		for i := range b {
+			b[i] = tokenAlphabet[int(b[i])%len(tokenAlphabet)]
+		}
+		return string(b[:])
+	}
+	// A clock is a poor source but the token is a label, not a secret.
+	n := time.Now().UnixNano()
+	for i := range b {
+		b[i] = tokenAlphabet[n%int64(len(tokenAlphabet))]
+		n /= int64(len(tokenAlphabet))
+	}
+	return string(b[:])
+}
+
+// AgentName is the herdr agent name for one minion: the minion id truncated to
+// fit, a hyphen, then the token. Without a token it is the bare id, so a run
+// that started before tokens keeps the agent it already has.
+func AgentName(token, minion string) string {
+	if token == "" {
+		return minion
+	}
+	if len(minion) > agentIDMax {
+		minion = minion[:agentIDMax]
+	}
+	return minion + "-" + token
+}
+
+func (s State) AgentName(minion string) string { return AgentName(s.Token, minion) }
+
+// pickToken draws whole tokens until none of the derived names is live. A
+// token that collides anywhere is abandoned, so a live collision is impossible
+// rather than merely unlikely.
+func pickToken(agents map[string]Agent, minions []Minion, gen func() string) (string, error) {
+	last := ""
+	for i := 0; i < tokenTries; i++ {
+		token := gen()
+		clash := ""
+		for _, m := range minions {
+			name := AgentName(token, m.ID)
+			if _, live := agents[name]; live {
+				clash = name
+				break
+			}
+		}
+		if clash == "" {
+			return token, nil
+		}
+		last = clash
+	}
+	return "", fmt.Errorf("no free herdr agent name after %d tokens: %s is already live; "+
+		"stop the other run with dungeon down, or close that agent, then run dungeon up again",
+		tokenTries, last)
 }
 
 // StatePath sits next to the plan, so one encounter is one directory.

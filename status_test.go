@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -409,5 +410,79 @@ func TestStatusJSONCarriesLoops(t *testing.T) {
 	}
 	if len(l.Units) != 5 || l.Units[0] != "polish-review-1" {
 		t.Fatalf("loop units %v", l.Units)
+	}
+}
+
+// The state carries the run's token, so a status row finds the agent under the
+// derived name and ignores a bare agent from another run.
+func TestSnapshotUsesTheDerivedAgentName(t *testing.T) {
+	p := decodeOK(t, statusPlan)
+	st, _ := LoadState(t.TempDir() + "/missing.json")
+	st.Token = "7f"
+
+	agents := map[string]Agent{"w1-7f": {Name: "w1-7f", Pane: "w9:p2", Status: "working"}}
+	s := buildSnapshot(p, "plan.yaml", st, agents)
+	if s.Units[0].Pane != "w9:p2" || s.Units[0].Agent != "working" {
+		t.Fatalf("A row %+v, want the tokenized lane", s.Units[0])
+	}
+
+	agents = map[string]Agent{"w1": {Name: "w1", Pane: "w9:p9", Status: "working"}}
+	s = buildSnapshot(p, "plan.yaml", st, agents)
+	if s.Units[0].Pane != "" || s.Units[0].Agent != "" {
+		t.Fatalf("a bare agent belongs to another run, got %+v", s.Units[0])
+	}
+}
+
+// A dispatch prompts the lane by its derived name, never by the plan's id.
+func TestPromptUsesTheDerivedAgentName(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Token == "" {
+		t.Fatal("the first up must give the run a token")
+	}
+	if code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "2s", "--plan", planPath); code != 0 {
+		t.Fatalf("next exit %d: %s\n%s", code, stderr, stdout)
+	}
+
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "agent prompt w1-"+st.Token+" ") {
+		t.Fatalf("the prompt must use the derived name:\n%s", calls)
+	}
+	if strings.Contains(string(calls), "agent prompt w1 ") {
+		t.Fatalf("the prompt must not use the bare minion id:\n%s", calls)
+	}
+}
+
+// down holds only the plan and the state, so the tokenized lane must still be
+// found under its derived name.
+func TestDownFindsTheDerivedAgentName(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "w1-7f:idle\n")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	st := State{
+		Encounter: "enc",
+		Token:     "7f",
+		Units:     map[string]UnitState{},
+		Minions:   map[string]MinionState{},
+	}
+	if err := SaveState(statePath, st); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("down", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("down exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "stopped 1 minions") {
+		t.Fatalf("down did not stop the tokenized lane:\n%s", stdout)
 	}
 }

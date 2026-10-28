@@ -50,7 +50,9 @@ func down(ctx context.Context, p Plan, st *State, force bool, out io.Writer) (st
 	agents := h.agents(ctx)
 
 	for _, m := range p.Minions {
-		a, live := agents[m.ID]
+		// herdr knows the lane by the run's derived name, never the bare id.
+		agent := st.AgentName(m.ID)
+		a, live := agents[agent]
 		if !live {
 			st.SetMinion(m.ID, "absent", "")
 			continue
@@ -60,7 +62,7 @@ func down(ctx context.Context, p Plan, st *State, force bool, out io.Writer) (st
 			fmt.Fprintf(out, "%s is working in %s; not closing it. pass --force to stop it anyway\n", m.ID, a.Pane)
 			continue
 		}
-		if err := h.stopLane(ctx, m.ID, a.Pane, m.Pane != "" && m.Pane == a.Pane); err != nil {
+		if err := h.stopLane(ctx, agent, a.Pane, m.Pane != "" && m.Pane == a.Pane); err != nil {
 			fmt.Fprintf(out, "%s: %v\n", m.ID, err)
 			continue
 		}

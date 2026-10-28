@@ -283,7 +283,7 @@ func TestNextRefusesToDispatchWithNoLane(t *testing.T) {
 
 func TestNextRespectsConcurrency(t *testing.T) {
 	repo := gitRepo(t)
-	fakeHerdr(t, "w1:working\nw2:idle\n")
+	fakeHerdr(t, "w1-aa:working\nw2-aa:idle\n")
 	plan := strings.Replace(planFor(repo), "concurrency: 1", "concurrency: 1", 1)
 	plan = strings.Replace(plan, `  - {id: w1, role: worker, worktree: w1}`, `  - {id: w1, role: worker, worktree: w1}
   - {id: w2, role: worker, worktree: w2}`, 1)
@@ -302,6 +302,12 @@ func TestNextRespectsConcurrency(t *testing.T) {
     goal: Two.
     accept: true`, 1)
 	planPath, statePath, _ := encounter(t, repo, plan)
+	// The live lanes belong to this run: the state's token names them, so up
+	// does not mistake another run's bare w1 for its own.
+	own := State{Encounter: "enc", Token: "aa", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := SaveState(statePath, own); err != nil {
+		t.Fatal(err)
+	}
 
 	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
 		t.Fatalf("up: %s", stderr)

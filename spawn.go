@@ -81,9 +81,51 @@ func worktreePath(repo, encounter, minion string) string {
 	return filepath.Join(filepath.Dir(repo), encounter+"-"+minion)
 }
 
+// ensureToken gives the run its own herdr names on the first up. The state is
+// saved by the caller, so the token survives the spawn and every later command
+// reuses it.
+func ensureToken(ctx context.Context, h herdrClient, st *State, minions []Minion, gen func() string) error {
+	if st.Token != "" {
+		return nil
+	}
+	agents := h.agents(ctx)
+	// A tokenless state is an in-flight legacy run only when this state records
+	// the pane its bare agent is in. A bare name live anywhere else belongs to
+	// another run, so adopting it would put two encounters on one agent.
+	if legacyRunLive(st, agents, minions) {
+		return nil
+	}
+	token, err := pickToken(agents, minions, gen)
+	if err != nil {
+		return err
+	}
+	st.Token = token
+	return nil
+}
+
+// legacyRunLive reports whether a state with no token still owns the bare
+// agents it sees. The pane record is the proof: a live bare agent at the pane
+// this state recorded is this run's lane. Any other live bare agent is another
+// run's.
+func legacyRunLive(st *State, agents map[string]Agent, minions []Minion) bool {
+	for _, m := range minions {
+		pane := st.Minions[m.ID].Pane
+		if pane == "" {
+			continue
+		}
+		if a, live := agents[m.ID]; live && a.Pane == pane {
+			return true
+		}
+	}
+	return false
+}
+
 func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, splitOverride string, out io.Writer) (spawnResult, error) {
 	var res spawnResult
 	h := newHerdrClient()
+	if err := ensureToken(ctx, h, st, p.Minions, newToken); err != nil {
+		return res, err
+	}
 	agents := h.agents(ctx)
 
 	if _, err := os.Stat(p.Repo); err != nil {
@@ -132,7 +174,8 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 	}
 
 	for _, m := range p.Minions {
-		if a, live := agents[m.ID]; live {
+		name := st.AgentName(m.ID)
+		if a, live := agents[name]; live {
 			st.SetMinion(m.ID, "spawned", "already live")
 			st.PinPane(m.ID, a.Pane)
 			res.Already = append(res.Already, m.ID)
@@ -180,7 +223,7 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 			return res, err
 		}
-		if err := h.startAgent(ctx, m.ID, pane, laneArgs(m.Role, m.Tools, sessionDir)); err != nil {
+		if err := h.startAgent(ctx, name, pane, laneArgs(m.Role, m.Tools, sessionDir)); err != nil {
 			res.Failed = append(res.Failed, m.ID)
 			fmt.Fprintf(out, "%s: %v\n", m.ID, err)
 			continue

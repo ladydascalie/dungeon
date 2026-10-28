@@ -10,32 +10,33 @@ import (
 type Code string
 
 const (
-	EParse         Code = "E_PARSE"
-	ENoEncounter   Code = "E_NO_ENCOUNTER"
-	EBadEncounter  Code = "E_BAD_ENCOUNTER"
-	ENoMinion      Code = "E_NO_MINION"
-	EUnknownMinion Code = "E_UNKNOWN_MINION"
-	EUnknownRole   Code = "E_UNKNOWN_ROLE"
-	EDuplicateID   Code = "E_DUPLICATE_ID"
-	EDuplicatePane Code = "E_DUPLICATE_PANE"
-	EBadMinionID   Code = "E_BAD_MINION_ID"
-	ENoID          Code = "E_NO_ID"
-	ENoWorktree    Code = "E_NO_WORKTREE"
-	EDMPlaysMinion Code = "E_DM_PLAYS_MINION"
-	ENoPaths       Code = "E_NO_PATHS"
-	EMissingDep    Code = "E_MISSING_DEP"
-	ECycle         Code = "E_CYCLE"
-	ESplitInvalid  Code = "E_SPLIT_INVALID"
-	ESplitNoMinion Code = "E_SPLIT_NO_MINION"
-	EUnknownSplit  Code = "E_UNKNOWN_SPLIT"
-	EBadTools      Code = "E_BAD_TOOLS"
-	EVerdictRole   Code = "E_VERDICT_ROLE"
-	EVerdictAccept Code = "E_VERDICT_ACCEPT"
-	ELoopRole      Code = "E_LOOP_ROLE"
-	ELoopRounds    Code = "E_LOOP_ROUNDS"
-	ELoopPass      Code = "E_LOOP_PASS"
-	ELoopFocus     Code = "E_LOOP_FOCUS"
-	EOfNotWriter   Code = "E_OF_NOT_WRITER"
+	EParse          Code = "E_PARSE"
+	ENoEncounter    Code = "E_NO_ENCOUNTER"
+	EBadEncounter   Code = "E_BAD_ENCOUNTER"
+	ENoMinion       Code = "E_NO_MINION"
+	EUnknownMinion  Code = "E_UNKNOWN_MINION"
+	EUnknownRole    Code = "E_UNKNOWN_ROLE"
+	EDuplicateID    Code = "E_DUPLICATE_ID"
+	EDuplicatePane  Code = "E_DUPLICATE_PANE"
+	EDuplicateAgent Code = "E_DUPLICATE_AGENT"
+	EBadMinionID    Code = "E_BAD_MINION_ID"
+	ENoID           Code = "E_NO_ID"
+	ENoWorktree     Code = "E_NO_WORKTREE"
+	EDMPlaysMinion  Code = "E_DM_PLAYS_MINION"
+	ENoPaths        Code = "E_NO_PATHS"
+	EMissingDep     Code = "E_MISSING_DEP"
+	ECycle          Code = "E_CYCLE"
+	ESplitInvalid   Code = "E_SPLIT_INVALID"
+	ESplitNoMinion  Code = "E_SPLIT_NO_MINION"
+	EUnknownSplit   Code = "E_UNKNOWN_SPLIT"
+	EBadTools       Code = "E_BAD_TOOLS"
+	EVerdictRole    Code = "E_VERDICT_ROLE"
+	EVerdictAccept  Code = "E_VERDICT_ACCEPT"
+	ELoopRole       Code = "E_LOOP_ROLE"
+	ELoopRounds     Code = "E_LOOP_ROUNDS"
+	ELoopPass       Code = "E_LOOP_PASS"
+	ELoopFocus      Code = "E_LOOP_FOCUS"
+	EOfNotWriter    Code = "E_OF_NOT_WRITER"
 )
 
 type Finding struct {
@@ -246,7 +247,32 @@ func Validate(p Plan) []Finding {
 
 	f = append(f, checkLoops(p.Loops, roleOf, unitIDs)...)
 	f = append(f, duplicatePanes(p.Minions)...)
+	f = append(f, duplicateAgentNames(p.Minions)...)
 	return append(f, cycles(p.Units, rep)...)
+}
+
+// duplicateAgentNames reports minion ids whose derived agent names collide
+// after truncation. The token is the same for every minion in one run, so only
+// a truncated id can make two names equal.
+func duplicateAgentNames(minions []Minion) []Finding {
+	var f []Finding
+	first := map[string]string{}
+	for i, m := range minions {
+		if m.ID == "" {
+			continue
+		}
+		name := AgentName("00", m.ID)
+		if other, ok := first[name]; ok {
+			f = append(f, Finding{
+				EDuplicateAgent, fmt.Sprintf("minions[%d].id", i),
+				fmt.Sprintf("minions %q and %q both derive the herdr agent name %q: shorten one id",
+					other, m.ID, name),
+			})
+			continue
+		}
+		first[name] = m.ID
+	}
+	return f
 }
 
 // checkTools validates a minion's tool allowlist: names, no empties, no

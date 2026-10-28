@@ -64,9 +64,10 @@ func (h herdrClient) agents(ctx context.Context) map[string]Agent {
 	}
 	byName := make(map[string]Agent, len(payload.Result.Agents))
 	for _, a := range payload.Result.Agents {
-		if a.Name != "" {
-			byName[a.Name] = a
+		if a.Name == "" {
+			continue
 		}
+		byName[a.Name] = a
 	}
 	return byName
 }
@@ -123,15 +124,16 @@ func (h herdrClient) splitPane(ctx context.Context, target, direction, cwd strin
 }
 
 // startAgent launches pi in a prepared pane and waits for it to be ready.
+// name is the derived agent name, not the plan's minion id.
 func (h herdrClient) startAgent(ctx context.Context, name, pane string, args []string) error {
 	full := append([]string{"agent", "start", name, "--kind", "pi", "--pane", pane, "--"}, args...)
 	_, err := h.run(ctx, full...)
 	return err
 }
 
-// prompt submits text to a lane and returns as soon as it is submitted. The
-// caller decides when to look again; a blocking wait would make the scheduler
-// single file.
+// prompt submits text to a lane by its derived name and returns as soon as it
+// is submitted. The caller decides when to look again; a blocking wait would
+// make the scheduler single file.
 func (h herdrClient) prompt(ctx context.Context, name, text string) error {
 	_, err := h.run(ctx, "agent", "prompt", name, text)
 	return err
