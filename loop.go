@@ -11,8 +11,10 @@ import (
 // turns it into ordinary units, so every command sees the same unit list and
 // the scheduler needs no special case for rounds.
 //
-// A review unit is proven by its verdict line. A fix unit is proven by exiting
-// 0 once the fixer has committed; the next review is the real judge of the fix.
+// A review unit is proven by its verdict line. A fix unit accepts on true: a
+// finished fix proves only that the fixer stopped, so the review after it is the
+// judge. The last fix is judged too, so rounds N produce N fixes and N+1 reviews
+// in all: one triage pass, then one judgment after each fix.
 func ExpandLoops(p Plan) (Plan, []Finding) {
 	var f []Finding
 	byID := map[string]Unit{}
@@ -41,6 +43,8 @@ func ExpandLoops(p Plan) (Plan, []Finding) {
 			add(li, loopReview(l, round))
 			add(li, loopFix(l, round))
 		}
+		// No writer's output goes unjudged: the last fix gets a review too.
+		add(li, loopReview(l, l.Rounds+1))
 	}
 	p.Units = units
 	return p, f
@@ -82,9 +86,9 @@ func loopFix(l Loop, round int) Unit {
 	}
 }
 
-// StopLoopAfter cancels the planned units of the same loop in a later round,
-// because a passing review satisfied the loop. It acts only on a review unit: a
-// fixer finishing proves nothing about satisfaction.
+// StopLoopAfter cancels the planned units of the same loop that a passing
+// review made pointless: its own round's fix, and every later round. It acts
+// only on a review unit: a fixer finishing proves nothing about satisfaction.
 func StopLoopAfter(p Plan, st *State, unitID string) {
 	loopID, reviewRound, kind, ok := parseLoopUnit(p, unitID)
 	if !ok || kind != "review" {
@@ -92,8 +96,11 @@ func StopLoopAfter(p Plan, st *State, unitID string) {
 	}
 	note := fmt.Sprintf("loop %s satisfied at round %d", loopID, reviewRound)
 	for _, u := range p.Units {
-		loop, round, _, ok := parseLoopUnit(p, u.ID)
-		if !ok || loop != loopID || round <= reviewRound {
+		loop, round, kind, ok := parseLoopUnit(p, u.ID)
+		if !ok || loop != loopID {
+			continue
+		}
+		if round < reviewRound || (round == reviewRound && kind != "fix") {
 			continue
 		}
 		if st.UnitStatus(u.ID) == "planned" {
@@ -113,7 +120,11 @@ func parseLoopUnit(p Plan, unitID string) (string, int, string, bool) {
 				continue
 			}
 			round, err := strconv.Atoi(strings.TrimPrefix(unitID, prefix))
-			if err == nil && round >= 1 && round <= l.Rounds {
+			limit := l.Rounds
+			if kind == "review" {
+				limit++ // the review that judges the last fix
+			}
+			if err == nil && round >= 1 && round <= limit {
 				return l.ID, round, kind, true
 			}
 		}

@@ -302,3 +302,35 @@ func TestLaneToolsOverrideAndFallBack(t *testing.T) {
 		t.Fatalf("a worker with no tools must get the role default, got %q", worker)
 	}
 }
+
+// A reviewer's tab opens in the worktree it reads, not the base checkout. Its
+// accept already runs there; the process now starts there too.
+func TestReviewerTabOpensInThePairedWorktree(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	plan := `encounter: enc
+repo: ` + repo + `
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+  - {id: r1, role: reviewer, of: w1}
+units:
+  - id: A
+    minion: w1
+    paths: [a.txt]
+    goal: Do A.
+    accept: "true"
+`
+	planPath, _, _ := encounter(t, repo, plan)
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--label reviewer --cwd " + worktreePath(repo, "enc", "w1")
+	if !strings.Contains(string(calls), want) {
+		t.Fatalf("the reviewer tab should open in w1's worktree (%q):\n%s", want, calls)
+	}
+}

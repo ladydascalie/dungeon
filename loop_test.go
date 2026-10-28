@@ -51,7 +51,7 @@ func TestExpandLoops(t *testing.T) {
 	for _, u := range p.Units {
 		ids = append(ids, u.ID)
 	}
-	want := []string{"A", "polish-review-1", "polish-fix-1", "polish-review-2", "polish-fix-2"}
+	want := []string{"A", "polish-review-1", "polish-fix-1", "polish-review-2", "polish-fix-2", "polish-review-3"}
 	if strings.Join(ids, " ") != strings.Join(want, " ") {
 		t.Fatalf("units %v, want %v", ids, want)
 	}
@@ -85,6 +85,11 @@ func TestExpandLoops(t *testing.T) {
 	fix2, _ := unitByID(p, "polish-fix-2")
 	if len(fix2.Deps) != 1 || fix2.Deps[0] != "polish-review-2" {
 		t.Fatalf("fix-2 deps %v, want [polish-review-2]", fix2.Deps)
+	}
+	// The last fix must be judged, so rounds N produce a final review.
+	review3, _ := unitByID(p, "polish-review-3")
+	if len(review3.Deps) != 1 || review3.Deps[0] != "polish-fix-2" {
+		t.Fatalf("review-3 deps %v, want [polish-fix-2]", review3.Deps)
 	}
 }
 
@@ -144,8 +149,10 @@ func TestLoadPlanExpandsLoops(t *testing.T) {
 	if err != nil || len(f) > 0 {
 		t.Fatalf("loadPlan: %v %v", f, err)
 	}
-	if _, ok := unitByID(p, "polish-fix-2"); !ok {
-		t.Fatalf("loadPlan did not expand the loop: %d units", len(p.Units))
+	for _, id := range []string{"polish-fix-2", "polish-review-3"} {
+		if _, ok := unitByID(p, id); !ok {
+			t.Fatalf("loadPlan did not expand %s: %d units", id, len(p.Units))
+		}
 	}
 }
 
@@ -162,14 +169,14 @@ func TestStopLoopAfterCancelsLaterRounds(t *testing.T) {
 	for _, u := range p.Units {
 		got := st.UnitStatus(u.ID)
 		switch u.ID {
-		case "polish-review-2", "polish-fix-2":
+		case "polish-fix-1", "polish-review-2", "polish-fix-2", "polish-review-3":
 			if got != "canceled" {
 				t.Fatalf("%s is %q, want canceled", u.ID, got)
 			}
 			if want := "loop polish satisfied at round 1"; st.Units[u.ID].Note != want {
 				t.Fatalf("%s note %q, want %q", u.ID, st.Units[u.ID].Note, want)
 			}
-		case "polish-fix-1", "A":
+		case "A":
 			if got != "planned" {
 				t.Fatalf("%s is %q, want planned", u.ID, got)
 			}
@@ -185,7 +192,7 @@ func TestStopLoopAfterIgnoresNonReviewUnits(t *testing.T) {
 	}
 	StopLoopAfter(p, st, "polish-fix-1")
 	StopLoopAfter(p, st, "A")
-	for _, id := range []string{"polish-review-2", "polish-fix-2"} {
+	for _, id := range []string{"polish-review-2", "polish-fix-2", "polish-review-3"} {
 		if got := st.UnitStatus(id); got != "planned" {
 			t.Fatalf("%s is %q, a non-review unit must cancel nothing", id, got)
 		}
@@ -227,11 +234,10 @@ func TestRejectedReviewLeavesLaterRoundsPlanned(t *testing.T) {
 			if got := st.UnitStatus("polish-review-1"); got != "done" && got != "rejected" {
 				t.Fatalf("review-1 is %q, want done or rejected: %s", got, st.Units["polish-review-1"].Note)
 			}
-			if got := st.UnitStatus("polish-review-2"); got != tc.want {
-				t.Fatalf("review-2 is %q, want %q", got, tc.want)
-			}
-			if got := st.UnitStatus("polish-fix-2"); got != tc.want {
-				t.Fatalf("fix-2 is %q, want %q", got, tc.want)
+			for _, id := range []string{"polish-fix-1", "polish-review-2", "polish-fix-2", "polish-review-3"} {
+				if got := st.UnitStatus(id); got != tc.want {
+					t.Fatalf("%s is %q, want %q", id, got, tc.want)
+				}
 			}
 		})
 	}
@@ -247,7 +253,7 @@ func TestCheckSeesExpandedUnits(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
 	}
-	if !strings.Contains(stdout, "5 units") {
+	if !strings.Contains(stdout, "6 units") {
 		t.Fatalf("check should count the expanded units: %q", stdout)
 	}
 }

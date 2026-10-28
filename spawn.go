@@ -105,21 +105,23 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 	tabs := map[string]*tabFor{}
 
 	// tab returns the tab a role runs in, creating the workspace and the tab on
-	// first use. A resumed encounter reuses the workspace it finds.
-	tab := func(m Minion) (*tabFor, error) {
+	// first use. The root pane takes the first minion's cwd, so a reviewer's tab
+	// opens where the reviewer must read. A resumed encounter reuses the
+	// workspace it finds.
+	tab := func(m Minion, cwd string) (*tabFor, error) {
 		if t, ok := tabs[m.Role]; ok {
 			return t, nil
 		}
 		label := roleLabel(m.Role, counts[m.Role])
 		t := &tabFor{total: counts[m.Role]}
 		if ws == "" {
-			id, tabID, root, err := h.openWorkspace(ctx, p.Encounter, label, p.Repo)
+			id, tabID, root, err := h.openWorkspace(ctx, p.Encounter, label, cwd)
 			if err != nil {
 				return nil, err
 			}
 			ws, t.tab, t.root = id, tabID, root
 		} else {
-			tabID, root, err := h.openTab(ctx, ws, label, p.Repo)
+			tabID, root, err := h.openTab(ctx, ws, label, cwd)
 			if err != nil {
 				return nil, err
 			}
@@ -137,9 +139,10 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 			continue
 		}
 
-		cwd := p.Repo
+		// A reviewer reads its writer's worktree, so it starts there, not in
+		// the base checkout. The accept command already runs in the same place.
+		cwd := minionDir(p, m)
 		if writes(m.Role) {
-			cwd = worktreePath(p.Repo, p.Encounter, m.ID)
 			if err := ensureWorktree(p.Repo, p.Base, p.Encounter, m.ID, cwd); err != nil {
 				res.Failed = append(res.Failed, m.ID)
 				fmt.Fprintf(out, "%s: %v\n", m.ID, err)
@@ -151,7 +154,7 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 		if m.Pane != "" && h.paneExists(ctx, m.Pane) {
 			pane = m.Pane // the operator's pane wins over the layout
 		} else {
-			t, err := tab(m)
+			t, err := tab(m, cwd)
 			if err != nil {
 				return res, err
 			}
