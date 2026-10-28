@@ -161,6 +161,10 @@ A generated fix is provisional. It has no accept command, so it settles
 that review judges the fix before it. A provisional unproven unit releases its
 dependants. An ordinary unproven unit does not.
 
+A passing review promotes the fix before it from `unproven` to `done`, with the
+note `proved by <review>`, so `land` carries that fix's branch. A failed review
+promotes nothing.
+
 ## The loop
 
 ```bash
@@ -216,7 +220,7 @@ so a stale plan never blocks a run.
 | `working` | a lane is on it | nothing. Do not help |
 | `blocked` | needs a human, or the plan is wrong | read the note, then act |
 | `done` | proved: accept exited 0, or the verdict line was found | nothing |
-| `unproven` | finished, with no accept or verdict; a provisional fix lands here on purpose | nothing for a provisional fix. Otherwise add an `accept` or a `verdict` |
+| `unproven` | settled, with no accept or verdict; a provisional fix lands here on purpose | nothing for a provisional fix. Otherwise add an `accept` or a `verdict` |
 | `rejected` | the accept command failed | send it back, see below |
 | `failed` | a review report lacked its pass line | nothing in a loop. The next fix releases |
 | `canceled` | withdrawn | nothing |

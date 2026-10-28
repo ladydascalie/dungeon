@@ -70,10 +70,10 @@ one absolute path per dep. The lane does not have to guess where the upstream
 report lives.
 
 Every brief also names the dispatching pane, read from `$HERDR_PANE_ID`, and
-tells the lane to write its report and then run
-`herdr pane run <pane> "<unit> finished. Report: <path>"`. The ping wakes the
-parent agent so it can settle the unit. It carries no state: the report and the
-accept command still decide what `done` means.
+tells the lane to write its report and then ping that pane with
+`herdr pane run <pane>`. The ping wakes the parent agent so it can settle the
+unit. It carries no state: the report plus the unit's accept command or verdict
+line decide what `done` means.
 
 `up` is idempotent: a minion whose agent is live is left alone, so a second `up`
 resumes instead of doubling the fleet. A writer gets its own worktree at
@@ -198,10 +198,10 @@ instead of opening a TUI.
 brief, a report, a screenshot, a handoff note. It stores an absolute path, so
 the file stays readable wherever the plan is opened from.
 
-Unit statuses: `planned`, `working`, `finished`, `done`, `unproven`,
-`rejected`, `failed`, `blocked`, `canceled`. **`done` means the unit was
-proved.** A unit with an `accept` command is done when that command exits 0 in
-its minion's worktree. A unit with a `verdict` line is done when its report
+Unit statuses: `blocked`, `failed`, `working`, `planned`, `unproven`,
+`rejected`, `done`, `canceled`. **`done` means the unit was proved.** A unit
+with an `accept` command is done when that command exits 0 in its minion's
+worktree. A unit with a `verdict` line is done when its report
 carries that line; a report without it is `failed`. No accept and no verdict, no
 done: the unit goes `unproven` and its dependents stay blocked, unless the unit
 is provisional.
@@ -258,6 +258,10 @@ A generated fix is provisional. It has no accept command, so it settles
 `unproven`. That unproven state is not proof: it carries the next review, and
 that review is the proof for the fix before it. A provisional unproven unit
 releases its dependants; an ordinary unproven unit does not.
+
+A passing review promotes the fix before it from `unproven` to `done`, with the
+note `proved by <review>`, so `land` carries that fix's branch. A failed review
+promotes nothing.
 
 ## Tested against a real dagr run
 
