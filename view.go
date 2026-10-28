@@ -692,13 +692,6 @@ func (m viewModel) headerView() string {
 		ruleStyle.Render(strings.Repeat("─", max(0, m.width)))
 }
 
-// contentWidth caps the text on the left of a row at two thirds of the frame.
-// The status column stays right aligned at the frame edge, so on a wide terminal
-// the goal stops early and the gap between them is what keeps the row readable.
-func (m viewModel) contentWidth() int {
-	return min(m.width, max(40, m.width*2/3))
-}
-
 func (m viewModel) bodyView() string {
 	detailH := 0
 	if m.height >= 22 {
@@ -862,10 +855,8 @@ func (m viewModel) statusText(u UnitRow) string {
 }
 
 // rowMetrics sizes the two columns for the rows that are about to be drawn: the
-// left column as wide as its longest line, the right column as wide as its
-// longest status, and a small fixed gap between them. The pair then sits at the
-// left of the frame with nothing stretched to reach the far edge, which is what
-// makes a wide terminal readable.
+// right column as wide as its longest status, a small fixed gap, and the left
+// column taking the rest of the frame.
 type rowMetrics struct {
 	left  int
 	right int

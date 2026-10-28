@@ -88,29 +88,36 @@ func leadFor(head string) string {
 	return ""
 }
 
-// metricsOf sizes the two columns for the rows that are about to be drawn: the
-// left column as wide as its longest line, the right column as wide as its
-// longest status, and a small fixed gap between them.
+// metricsOf sizes the two columns for the rows that are about to be drawn. The
+// status column keeps its own width and the small gap; the left column takes
+// the rest of the frame, so the table reaches the edge at every terminal width.
 func (m viewModel) metricsOf(rows []rowCells, avail int) rowMetrics {
 	const pad = 2
-	left, right := 0, 0
+	right := 0
 	for _, c := range rows {
-		left = max(left, runeLen(c.head+c.lead+c.id+" "+c.rest))
 		right = max(right, runeLen(c.right))
 	}
-	left = min(left, max(20, avail-right-pad))
+	left := max(1, avail-right-pad)
 	return rowMetrics{left: left, right: right, pad: pad}
 }
 
 // rowLine draws one row against those columns: the left text padded to the
-// column, the gap, then the status right aligned inside its own column.
+// column, the gap, then the status right aligned inside its own column. The
+// status is drawn even when the left column is too narrow for the id, so a
+// narrow terminal truncates the goal harder and never the status.
 func (m viewModel) rowLine(d displayRow, width int, prefix, suffix, fold string, mt rowMetrics) string {
 	c := m.rowParts(d, prefix, suffix, fold)
 
+	right := truncate(c.right, mt.right)
+	if mt.right > runeLen(right) {
+		right = strings.Repeat(" ", mt.right-runeLen(right)) + right
+	}
+	tail := strings.Repeat(" ", mt.pad) + m.paintRight(d.u, right)
+
 	fixed := runeLen(c.head) + runeLen(c.lead) + runeLen(c.id) + 1
 	if mt.left < fixed {
-		plain := truncate(c.head+c.lead+c.id, max(4, mt.left))
-		return m.paintRow(d.u, plain, "", "", "", 0)
+		plain := pad(truncate(c.head+c.lead+c.id, mt.left), mt.left)
+		return m.paintRow(d.u, plain, "", "", "", 0) + tail
 	}
 	// The padding belongs to the rest of the row, not to the line: paintRow
 	// rebuilds the row from its parts, so spaces added to the assembled string
@@ -119,12 +126,7 @@ func (m viewModel) rowLine(d displayRow, width int, prefix, suffix, fold string,
 	rest += strings.Repeat(" ", max(0, mt.left-fixed-runeLen(rest)))
 	plain := c.head + c.lead + c.id + " " + rest
 
-	right := truncate(c.right, mt.right)
-	if mt.right > runeLen(right) {
-		right = strings.Repeat(" ", mt.right-runeLen(right)) + right
-	}
-	return m.paintRow(d.u, plain, c.head+c.lead, c.id, rest, min(c.lane, runeLen(rest))) +
-		strings.Repeat(" ", mt.pad) + m.paintRight(d.u, right)
+	return m.paintRow(d.u, plain, c.head+c.lead, c.id, rest, min(c.lane, runeLen(rest))) + tail
 }
 
 // paintRow styles the left side. The selected row is plain text inside reverse

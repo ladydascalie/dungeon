@@ -515,21 +515,28 @@ func TestCardCollapsesMultilineGoalAndNote(t *testing.T) {
 	}
 }
 
-func TestColumnsAreContentSizedWithASmallGap(t *testing.T) {
+// The list is a full-width table: the status column ends one column inside the
+// frame at every width, and the left column absorbs the slack.
+func TestRowsFillTheFrameAndPinTheStatus(t *testing.T) {
 	short := writePlan(t, statusPlan)
 	long := writePlan(t, strings.Replace(statusPlan,
 		"goal: first", "goal: "+strings.Repeat("a long goal ", 30), 1))
+	loop := writePlan(t, loopForestPlan)
 
 	for _, tc := range []struct {
 		name  string
 		plan  string
 		width int
-		// narrow is true when the content should not reach the frame edge.
-		narrow bool
 	}{
-		{"short goals, wide frame", short, 284, true},
-		{"long goals, wide frame", long, 284, false},
-		{"long goals, narrow frame", long, 120, false},
+		{"short goals at 80", short, 80},
+		{"short goals at 120", short, 120},
+		{"short goals at 200", short, 200},
+		{"long goals at 80", long, 80},
+		{"long goals at 120", long, 120},
+		{"long goals at 200", long, 200},
+		{"loop plan at 80", loop, 80},
+		{"loop plan at 120", loop, 120},
+		{"loop plan at 200", loop, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			state := filepath.Join(t.TempDir(), "state.json")
@@ -537,37 +544,48 @@ func TestColumnsAreContentSizedWithASmallGap(t *testing.T) {
 			m.width, m.height = tc.width, 40
 
 			lines, _ := m.listLines(tc.width)
-			var widths []int
-			for _, line := range lines {
-				if strings.Contains(line, "ready") || strings.Contains(line, "waits") {
-					widths = append(widths, runeLen(strings.TrimRight(line, " ")))
-				}
-			}
-			if len(widths) == 0 {
+			if len(lines) == 0 {
 				t.Fatal("no rows")
 			}
-			// Every status ends at the same column: the two columns are a table.
-			for _, w := range widths {
-				if w != widths[0] {
-					t.Fatalf("statuses are not aligned: %v", widths)
+			for i, line := range lines {
+				if strings.TrimSpace(line) == "" {
+					continue
+				}
+				if got := runeLen(strings.TrimRight(line, " ")); got != tc.width-1 {
+					t.Fatalf("row %d ends at %d, want %d: %q",
+						i, got, tc.width-1, line)
 				}
 			}
-			if widths[0] > tc.width {
-				t.Fatalf("block is %d wide, frame is %d", widths[0], tc.width)
-			}
-			if tc.narrow && widths[0] >= tc.width-1 {
-				t.Fatalf("short content should not reach the edge: %d of %d", widths[0], tc.width)
-			}
-			if !tc.narrow && widths[0] != tc.width-1 {
-				t.Fatalf("long content should fill to the edge: %d of %d", widths[0], tc.width)
-			}
-			// The gap between the two columns is the pad, so the row's text ends
-			// two columns before the status column begins. Short rows get more
-			// whitespace than that; the column is sized by the longest row.
-			if !tc.narrow && widths[0] != tc.width-1 {
-				t.Fatalf("long content should fill to the edge")
-			}
 		})
+	}
+}
+
+// A goal wider than the left column is ellipsised there; it never moves or
+// truncates the status at the right edge.
+func TestLongGoalTruncatesInsteadOfPushingTheStatus(t *testing.T) {
+	const goal = "a long goal "
+	plan := writePlan(t, strings.Replace(statusPlan, "goal: first", "goal: "+strings.Repeat(goal, 30), 1))
+	state := filepath.Join(t.TempDir(), "state.json")
+	m := newTestView(t, plan, state)
+	m.width, m.height = 80, 40
+
+	lines, _ := m.listLines(80)
+	var found bool
+	for _, line := range lines {
+		trimmed := strings.TrimRight(line, " ")
+		if !strings.HasSuffix(trimmed, "ready") {
+			continue
+		}
+		found = true
+		if !strings.Contains(line, "…") {
+			t.Fatalf("the long goal should be ellipsised: %q", line)
+		}
+		if strings.Contains(line, strings.Repeat(goal, 30)) {
+			t.Fatalf("the goal pushed the status out: %q", line)
+		}
+	}
+	if !found {
+		t.Fatalf("no row ends with the intact status:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
