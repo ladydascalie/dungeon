@@ -440,11 +440,11 @@ func TestVerdictPassMarksDone(t *testing.T) {
 	}
 }
 
-func TestVerdictFailRejectsAndNamesWhatItSaw(t *testing.T) {
+func TestVerdictFailIsFailedAndNamesWhatItSaw(t *testing.T) {
 	o, p, st, u, m := verdictCase(t, "Merge verdict: PASS",
 		"Merge verdict: FAIL\nthen some detail\n")
-	if got := settle(t.Context(), o, p, st, u, m); got != "rejected" {
-		t.Fatalf("settle %q, want rejected", got)
+	if got := settle(t.Context(), o, p, st, u, m); got != "failed" {
+		t.Fatalf("settle %q, want failed", got)
 	}
 	note := st.Units[u.ID].Note
 	for _, want := range []string{"Merge verdict: PASS", "Merge verdict: FAIL"} {
@@ -456,8 +456,8 @@ func TestVerdictFailRejectsAndNamesWhatItSaw(t *testing.T) {
 
 func TestVerdictFailWithNoVerdictLineSaysNone(t *testing.T) {
 	o, p, st, u, m := verdictCase(t, "Merge verdict: PASS", "# Report\n\nNothing shipped.\n")
-	if got := settle(t.Context(), o, p, st, u, m); got != "rejected" {
-		t.Fatalf("settle %q, want rejected", got)
+	if got := settle(t.Context(), o, p, st, u, m); got != "failed" {
+		t.Fatalf("settle %q, want failed", got)
 	}
 	note := st.Units[u.ID].Note
 	if !strings.Contains(note, "Merge verdict: PASS") || !strings.Contains(note, "none") {

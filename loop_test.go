@@ -77,6 +77,10 @@ func TestExpandLoops(t *testing.T) {
 	if !strings.Contains(fix1.Goal, "polish-review-1") {
 		t.Fatalf("fix-1 goal should name the review report: %q", fix1.Goal)
 	}
+	// A fix is judged by the next review, not by an accept command.
+	if !fix1.Provisional || fix1.Accept != "" {
+		t.Fatalf("fix-1 should be provisional with no accept: %+v", fix1)
+	}
 
 	review2, _ := unitByID(p, "polish-review-2")
 	if len(review2.Deps) != 1 || review2.Deps[0] != "polish-fix-1" {
@@ -199,16 +203,16 @@ func TestStopLoopAfterIgnoresNonReviewUnits(t *testing.T) {
 	}
 }
 
-// A rejected review cancels nothing: the fixer gets its turn and the next
-// round stays planned.
-func TestRejectedReviewLeavesLaterRoundsPlanned(t *testing.T) {
+// A passing review cancels the fix and the later rounds. A failing review is
+// failed, cancels nothing, and releases the fixer.
+func TestReviewOutcomeDrivesTheLoop(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		report string
 		want   string
 	}{
-		{name: "passing review cancels", report: "Merge verdict: PASS\n", want: "canceled"},
-		{name: "rejected review leaves planned", report: "Merge verdict: FAIL\n", want: "planned"},
+		{name: "a passing review stops the loop", report: "Merge verdict: PASS\n", want: "canceled"},
+		{name: "a failing review advances the loop", report: "Merge verdict: FAIL\n", want: "planned"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fakeHerdr(t, "r1:idle\n")
@@ -231,15 +235,58 @@ func TestRejectedReviewLeavesLaterRoundsPlanned(t *testing.T) {
 			o := dispatchOpts{planPath: planPath, statePath: filepath.Join(dir, "state.json")}
 			reconcile(t.Context(), newHerdrClient(), o, p, st, &digest{})
 
-			if got := st.UnitStatus("polish-review-1"); got != "done" && got != "rejected" {
-				t.Fatalf("review-1 is %q, want done or rejected: %s", got, st.Units["polish-review-1"].Note)
+			if got := st.UnitStatus("polish-review-1"); got != "done" && got != "failed" {
+				t.Fatalf("review-1 is %q, want done or failed: %s", got, st.Units["polish-review-1"].Note)
 			}
 			for _, id := range []string{"polish-fix-1", "polish-review-2", "polish-fix-2", "polish-review-3"} {
 				if got := st.UnitStatus(id); got != tc.want {
 					t.Fatalf("%s is %q, want %q", id, got, tc.want)
 				}
 			}
+			// A failed review must reach the fixer: fix-1 is ready.
+			ready := map[string]bool{}
+			for _, u := range readyUnits(p, st) {
+				ready[u.ID] = true
+			}
+			if tc.want == "planned" && !ready["polish-fix-1"] {
+				t.Fatalf("a failed review must release its fixer, ready: %v", ready)
+			}
+			if tc.want == "canceled" && ready["polish-fix-1"] {
+				t.Fatalf("a passing review must cancel its fixer before dispatch, ready: %v", ready)
+			}
 		})
+	}
+}
+
+// A provisional fix settles unproven and still releases the review after it. A
+// plain unproven dep does not.
+func TestProvisionalReadiness(t *testing.T) {
+	p := expanded(t)
+	st := &State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	for _, u := range p.Units {
+		st.SetUnit(u.ID, "planned", "")
+	}
+	st.SetUnit("polish-review-1", "failed", "review concluded FAIL")
+	st.SetUnit("polish-fix-1", "unproven", "provisional")
+
+	ready := map[string]bool{}
+	for _, u := range readyUnits(p, st) {
+		ready[u.ID] = true
+	}
+	if !ready["polish-review-2"] {
+		t.Fatalf("a provisional unproven dep must release the next review: %v", ready)
+	}
+
+	// The same unproven dep without the flag does not release anything.
+	for i, u := range p.Units {
+		if u.ID == "polish-fix-1" {
+			p.Units[i].Provisional = false
+		}
+	}
+	for _, u := range readyUnits(p, st) {
+		if u.ID == "polish-review-2" {
+			t.Fatalf("an unproven dep that is not provisional must not release a unit")
+		}
 	}
 }
 

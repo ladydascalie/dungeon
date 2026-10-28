@@ -44,14 +44,15 @@ type Minion struct {
 }
 
 type Unit struct {
-	ID      string   `yaml:"id"`
-	Minion  string   `yaml:"minion"`
-	Paths   []string `yaml:"paths"`
-	Deps    []string `yaml:"deps"`
-	Goal    string   `yaml:"goal"`
-	Accept  string   `yaml:"accept"`
-	Verdict string   `yaml:"verdict"` // optional: the report line that proves this reviewer unit
-	Split   *Split   `yaml:"split"`
+	ID          string   `yaml:"id"`
+	Minion      string   `yaml:"minion"`
+	Paths       []string `yaml:"paths"`
+	Deps        []string `yaml:"deps"`
+	Goal        string   `yaml:"goal"`
+	Accept      string   `yaml:"accept"`
+	Verdict     string   `yaml:"verdict"`     // optional: the report line that proves this reviewer unit
+	Provisional bool     `yaml:"provisional"` // optional: an unproven unit whose dep still counts as satisfied
+	Split       *Split   `yaml:"split"`
 }
 
 // Loop is a review and fix cycle between two minions. The scheduler expands it

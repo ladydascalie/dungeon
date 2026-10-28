@@ -11,10 +11,17 @@ import (
 // turns it into ordinary units, so every command sees the same unit list and
 // the scheduler needs no special case for rounds.
 //
-// A review unit is proven by its verdict line. A fix unit accepts on true: a
-// finished fix proves only that the fixer stopped, so the review after it is the
-// judge. The last fix is judged too, so rounds N produce N fixes and N+1 reviews
-// in all: one triage pass, then one judgment after each fix.
+// The shape: rounds N produce N fixes and N+1 reviews. Review 1 triages, then
+// each fix is judged by the review after it, so the last fix is judged too.
+//
+// A review unit is proven by its verdict line: the pass line is done, anything
+// else is failed. A failed review advances the loop, because a failed dep
+// satisfies the next unit. A done review stops the loop: StopLoopAfter cancels
+// that round's fix and every later round.
+//
+// A fix unit is provisional and carries no accept command. It settles unproven,
+// which proves only that the fixer stopped, and a provisional unproven dep
+// releases the next review. The review is the judge, not a shell command.
 func ExpandLoops(p Plan) (Plan, []Finding) {
 	var f []Finding
 	byID := map[string]Unit{}
@@ -77,12 +84,12 @@ func loopFix(l Loop, round int) Unit {
 		goal = fmt.Sprintf("Fix what review %s found. Read its report: it is listed under \"reports from deps\".", reviewID)
 	}
 	return Unit{
-		ID:     fmt.Sprintf("%s-fix-%d", l.ID, round),
-		Minion: l.Fixer,
-		Paths:  append([]string(nil), l.Paths...),
-		Deps:   []string{reviewID},
-		Goal:   goal,
-		Accept: "true",
+		ID:          fmt.Sprintf("%s-fix-%d", l.ID, round),
+		Minion:      l.Fixer,
+		Paths:       append([]string(nil), l.Paths...),
+		Deps:        []string{reviewID},
+		Goal:        goal,
+		Provisional: true,
 	}
 }
 

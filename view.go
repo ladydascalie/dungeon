@@ -27,6 +27,7 @@ var (
 
 	statusStyles = map[string]lipgloss.Style{
 		"blocked":  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203")),
+		"failed":   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")),
 		"working":  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42")),
 		"ready":    lipgloss.NewStyle().Foreground(lipgloss.Color("220")),
 		"waiting":  lipgloss.NewStyle().Faint(true),

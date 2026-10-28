@@ -66,6 +66,7 @@ func shortHash(h string) string {
 type digest struct {
 	Dispatched []string
 	Done       []string
+	Failed     []string
 	Rejected   []string
 	Unproven   []string
 	Blocked    []string
@@ -73,7 +74,7 @@ type digest struct {
 }
 
 func (d digest) empty() bool {
-	return len(d.Dispatched)+len(d.Done)+len(d.Rejected)+len(d.Unproven)+len(d.Blocked)+len(d.NoLane) == 0
+	return len(d.Dispatched)+len(d.Done)+len(d.Failed)+len(d.Rejected)+len(d.Unproven)+len(d.Blocked)+len(d.NoLane) == 0
 }
 
 func (d digest) String() string {
@@ -85,6 +86,7 @@ func (d digest) String() string {
 	}
 	line("dispatched", d.Dispatched)
 	line("done", d.Done)
+	line("failed", d.Failed)
 	line("rejected", d.Rejected)
 	line("unproven", d.Unproven)
 	line("blocked", d.Blocked)
@@ -303,9 +305,9 @@ func settleVerdict(st *State, u Unit, report string) string {
 			return "done"
 		}
 	}
-	st.SetUnit(u.ID, "rejected",
+	st.SetUnit(u.ID, "failed",
 		fmt.Sprintf("wanted verdict %q, last Merge verdict: %s", u.Verdict, seen))
-	return "rejected"
+	return "failed"
 }
 
 func lastLine(s string) string {
@@ -348,6 +350,8 @@ func reconcile(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st *S
 			case "done":
 				StopLoopAfter(p, st, u.ID)
 				d.Done = append(d.Done, u.ID)
+			case "failed":
+				d.Failed = append(d.Failed, u.ID)
 			case "rejected":
 				d.Rejected = append(d.Rejected, u.ID)
 			case "unproven":
@@ -364,7 +368,9 @@ func reconcile(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st *S
 	return progressed
 }
 
-// readyUnits returns the planned units whose deps have all landed.
+// readyUnits returns the planned units whose deps have all landed. A failed
+// dep counts: it may be the review that tells the fixer what to do. So does an
+// unproven dep when the dep is provisional, because the next review judges it.
 func readyUnits(p Plan, st *State) []Unit {
 	var out []Unit
 	for _, u := range p.Units {
@@ -373,7 +379,7 @@ func readyUnits(p Plan, st *State) []Unit {
 		}
 		ready := true
 		for _, d := range u.Deps {
-			if st.UnitStatus(d) != "done" {
+			if !depSatisfied(p, st, d) {
 				ready = false
 				break
 			}
@@ -383,6 +389,22 @@ func readyUnits(p Plan, st *State) []Unit {
 		}
 	}
 	return out
+}
+
+// depSatisfied answers whether a dep releases its dependants. A provisional
+// unit is unproven on purpose: the review after it is the judge.
+func depSatisfied(p Plan, st *State, dep string) bool {
+	switch st.UnitStatus(dep) {
+	case "done", "failed":
+		return true
+	case "unproven":
+		for _, u := range p.Units {
+			if u.ID == dep {
+				return u.Provisional
+			}
+		}
+	}
+	return false
 }
 
 func workingCount(p Plan, st *State) int {
