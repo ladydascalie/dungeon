@@ -888,7 +888,28 @@ func (m viewModel) detailBox(width, height int) string {
 	}
 	inner := width - 4
 	var lines []string
+	if l := m.snapLoop(u.ID); l != nil {
+		lines = m.loopDetailLines(*l, inner)
+	} else {
+		lines = m.unitDetailLines(u, inner)
+	}
 
+	for len(lines) < height-2 {
+		lines = append(lines, "")
+	}
+	lines = lines[:max(0, height-2)]
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		Width(max(10, inner+2)). // lipgloss counts padding inside Width; +2 keeps the box at the frame width
+		Render(strings.Join(lines, "\n"))
+}
+
+// unitDetailLines is the bottom strip for a unit: what it is, what it waits
+// for, and its latest note or change.
+func (m viewModel) unitDetailLines(u UnitRow, inner int) []string {
+	var lines []string
 	head := titleStyle.Render(u.ID) + "  " + statusStyles[u.Status].Render(u.Status)
 	tail := u.Role + " " + u.Minion
 	if u.Pane != "" {
@@ -928,16 +949,30 @@ func (m viewModel) detailBox(width, height int) string {
 	if u.Link != "" {
 		lines = append(lines, dimStyle.Render(truncate("link: "+u.Link, inner)))
 	}
-	for len(lines) < height-2 {
-		lines = append(lines, "")
-	}
-	lines = lines[:max(0, height-2)]
+	return lines
+}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1).
-		Width(max(10, inner+2)). // lipgloss counts padding inside Width; +2 keeps the box at the frame width
-		Render(strings.Join(lines, "\n"))
+// loopDetailLines is the bottom strip for a loop summary row. The row carries
+// the loop, not a unit, so the strip names the round the loop is on and the
+// unit that round is working.
+func (m viewModel) loopDetailLines(l LoopRow, inner int) []string {
+	head := titleStyle.Render(l.ID) + "  " + statusStyles[l.State].Render(l.State) + dimStyle.Render("  loop")
+	lines := []string{head}
+	lines = append(lines, truncate("focus: "+collapseSpace(l.Focus), inner))
+
+	rows := m.loopRounds(l)
+	if len(rows) == 0 {
+		lines = append(lines, dimStyle.Render(truncate(fmt.Sprintf("cap: %d", l.Rounds), inner)))
+	} else {
+		lines = append(lines, dimStyle.Render(truncate(fmt.Sprintf("round %d/%d", l.Round, l.Rounds), inner)))
+		if u, ok := m.roundPick(rows[m.currentRoundIndex(l)]); ok {
+			kind, round, _ := loopChildKind(l.ID, u.ID)
+			now := fmt.Sprintf("%s, round %d", kind, round)
+			lines = append(lines, truncate("now: "+now+" · "+collapseSpace(u.Goal), inner))
+		}
+	}
+	lines = append(lines, dimStyle.Render(truncate("d opens the round timeline", inner)))
+	return lines
 }
 
 func (m viewModel) footerView() string {
@@ -966,10 +1001,14 @@ func idWidth(s Snapshot) int {
 }
 
 // displayUnitID drops the loop prefix a generated unit's parent already names.
+// A declared unit keeps its full id even when it starts with a loop id, because
+// only a generated unit is listed under its loop.
 func displayUnitID(s Snapshot, id string) string {
 	for _, l := range s.Loops {
-		if strings.HasPrefix(id, l.ID+"-") {
-			return strings.TrimPrefix(id, l.ID+"-")
+		for _, generated := range l.Units {
+			if generated == id {
+				return strings.TrimPrefix(id, l.ID+"-")
+			}
 		}
 	}
 	return id

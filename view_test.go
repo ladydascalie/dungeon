@@ -1064,3 +1064,106 @@ func TestViewDetailFlagOpensTheLoopTimeline(t *testing.T) {
 		}
 	}
 }
+
+// The always-visible strip shows the loop when the cursor is on its summary
+// row, not a blank unit card.
+func TestDetailBoxShowsTheLoop(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	selectID(t, &m, "polish")
+
+	box := m.detailBox(120, 7)
+	if n := len(strings.Split(box, "\n")); n != 7 {
+		t.Fatalf("loop detail box is %d lines, want 7:\n%s", n, box)
+	}
+	for _, want := range []string{
+		"polish", "working", "focus: correctness", "round 1/2",
+		"now: review, round 1", "Review round 1 of loop polish",
+		"d opens the round timeline",
+	} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("missing %q in the loop detail box:\n%s", want, box)
+		}
+	}
+
+	// The same strip is what the first frame draws under the tree.
+	if out := m.View(); !strings.Contains(out, "d opens the round timeline") {
+		t.Fatalf("the first frame should show the loop strip:\n%s", out)
+	}
+}
+
+// An unexpanded loop has no round to name, so the strip shows its focus and
+// cap only.
+func TestDetailBoxForAnUnexpandedLoop(t *testing.T) {
+	p := decodeOK(t, loopForestPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	st := emptyLoopState()
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = p, st
+	m.snap = buildSnapshot(p, "plan.yaml", st, nil)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+	selectID(t, &m, "polish")
+
+	box := m.detailBox(120, 7)
+	for _, want := range []string{"focus: correctness", "cap: 2", "d opens the round timeline"} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("missing %q in the loop detail box:\n%s", want, box)
+		}
+	}
+	for _, unwanted := range []string{"round 1/2", "now:"} {
+		if strings.Contains(box, unwanted) {
+			t.Fatalf("an unexpanded loop should not show %q:\n%s", unwanted, box)
+		}
+	}
+}
+
+const authCheckPlan = `encounter: ap
+minions:
+  - {id: w1, role: worker, worktree: wt1}
+  - {id: r1, role: reviewer, of: w1}
+units:
+  - {id: auth-check, minion: w1, paths: [a/**], goal: holds the check}
+  - {id: B, minion: w1, paths: [b/**], deps: [auth-check], goal: waits}
+loops:
+  - {id: auth, reviewer: r1, fixer: w1, rounds: 1, focus: correctness,
+     pass: "Merge verdict: PASS", paths: [a/**]}
+`
+
+// Only a generated unit loses its loop prefix. A declared unit that starts
+// with a loop id keeps its full id, including in a waits label.
+func TestDisplayUnitIDOnlyStripsGeneratedIDs(t *testing.T) {
+	p := decodeOK(t, authCheckPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	e, f := ExpandLoops(p)
+	if len(f) > 0 {
+		t.Fatalf("expand: %v", f)
+	}
+	st := emptyLoopState()
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = e, st
+	m.snap = buildSnapshot(e, "plan.yaml", st, nil)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+
+	if got := displayUnitID(m.snap, "auth-check"); got != "auth-check" {
+		t.Fatalf("a declared unit became %q, want auth-check", got)
+	}
+	if got := displayUnitID(m.snap, "auth-review-1"); got != "review-1" {
+		t.Fatalf("a generated unit became %q, want review-1", got)
+	}
+
+	lines := strings.Join(mustTreeLines(t, m), "\n")
+	if !strings.Contains(lines, "waits auth-check") {
+		t.Fatalf("a declared dep should keep its full id:\n%s", lines)
+	}
+	if strings.Contains(lines, "waits check") {
+		t.Fatalf("a declared dep lost its loop prefix:\n%s", lines)
+	}
+	if strings.Contains(lines, "auth-review-1") {
+		t.Fatalf("a generated unit should show its stripped id:\n%s", lines)
+	}
+}
