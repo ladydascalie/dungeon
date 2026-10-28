@@ -31,6 +31,7 @@ type Plan struct {
 	Split       string   `yaml:"split"` // right (default) or down/left/up: how a role's panes grow
 	Minions     []Minion `yaml:"minions"`
 	Units       []Unit   `yaml:"units"`
+	Loops       []Loop   `yaml:"loops"`
 }
 
 type Minion struct {
@@ -38,17 +39,34 @@ type Minion struct {
 	Role     string `yaml:"role"`
 	Worktree string `yaml:"worktree"`
 	Of       string `yaml:"of"`
-	Pane     string `yaml:"pane"` // optional: run this minion in a pane the operator already has
+	Pane     string `yaml:"pane"`  // optional: run this minion in a pane the operator already has
+	Tools    string `yaml:"tools"` // optional: comma separated allowlist that replaces the role default
 }
 
 type Unit struct {
-	ID     string   `yaml:"id"`
-	Minion string   `yaml:"minion"`
-	Paths  []string `yaml:"paths"`
-	Deps   []string `yaml:"deps"`
-	Goal   string   `yaml:"goal"`
-	Accept string   `yaml:"accept"`
-	Split  *Split   `yaml:"split"`
+	ID          string   `yaml:"id"`
+	Minion      string   `yaml:"minion"`
+	Paths       []string `yaml:"paths"`
+	Deps        []string `yaml:"deps"`
+	Goal        string   `yaml:"goal"`
+	Accept      string   `yaml:"accept"`
+	Verdict     string   `yaml:"verdict"` // optional: the report line that proves this reviewer unit
+	Provisional bool     `yaml:"-"`       // generated only: an unproven loop fix whose dep still counts as satisfied
+	Split       *Split   `yaml:"split"`
+}
+
+// Loop is a review and fix cycle between two minions. The scheduler expands it
+// into units; validation only checks that it could be expanded.
+type Loop struct {
+	ID         string   `yaml:"id"`
+	Reviewer   string   `yaml:"reviewer"`
+	Fixer      string   `yaml:"fixer"`
+	Rounds     int      `yaml:"rounds"`
+	Focus      string   `yaml:"focus"`
+	Pass       string   `yaml:"pass"`
+	Paths      []string `yaml:"paths"`
+	ReviewGoal string   `yaml:"review_goal"`
+	FixGoal    string   `yaml:"fix_goal"`
 }
 
 type Split struct {

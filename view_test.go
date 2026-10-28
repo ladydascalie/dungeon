@@ -558,3 +558,18 @@ func TestEnterOpensTheDetailPane(t *testing.T) {
 		t.Fatalf("enter must not fold, folded=%v", m.folded)
 	}
 }
+
+func TestFailedHasAStyle(t *testing.T) {
+	if _, ok := statusStyles["failed"]; !ok {
+		t.Fatal("the view needs a colour for a failed unit")
+	}
+	var found bool
+	for _, sec := range sections {
+		if sec.status == "failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the view draws sections from status.go, which must list failed")
+	}
+}

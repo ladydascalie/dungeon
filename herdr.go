@@ -138,11 +138,14 @@ func (h herdrClient) prompt(ctx context.Context, name, text string) error {
 }
 
 // laneArgs is the pi command line for a role: no skills, no MCP, a session
-// directory inside the encounter, and a tool allowlist that matches the role.
-func laneArgs(role, sessionDir string) []string {
-	tools := "read,bash,edit,write"
-	if !writes(role) {
-		tools = "read,bash"
+// directory inside the encounter, and a tool allowlist. A minion's own tools
+// list replaces the role default; an empty one keeps the default.
+func laneArgs(role, tools, sessionDir string) []string {
+	if tools == "" {
+		tools = "read,bash,edit,write"
+		if !writes(role) {
+			tools = "read,bash"
+		}
 	}
 	return []string{
 		"--no-skills", "--no-mcp",

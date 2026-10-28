@@ -46,7 +46,7 @@ type Change struct {
 // Unit statuses, most urgent first. `dungeon status` prints sections in this
 // order, so the top of the screen is the work that needs a human.
 var unitStatuses = []string{
-	"blocked", "working", "planned", "unproven", "rejected", "done", "canceled",
+	"blocked", "failed", "working", "planned", "unproven", "rejected", "done", "canceled",
 }
 
 var unitStatusSet = toSet(unitStatuses)

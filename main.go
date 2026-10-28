@@ -73,7 +73,7 @@ func usage(w io.Writer) {
 
   dungeon set unit   <id> <status> [--note text]
   dungeon set minion <id> <status> [--note text]
-      Record a change. Unit statuses: blocked, working, planned,
+      Record a change. Unit statuses: blocked, failed, working, planned,
       unproven, rejected, done, canceled.
       Minion statuses: spawned, busy, waiting, lost, absent.
 
@@ -181,13 +181,10 @@ func check(args []string, stdout, stderr io.Writer) int {
 	if code := resolvePlan(fs, plan, stderr); code != 0 {
 		return code
 	}
-	p, findings, err := DecodeFile(*plan)
+	p, findings, err := loadPlan(*plan)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
-	}
-	if findings == nil {
-		findings = Validate(p)
 	}
 	if findings == nil {
 		findings = []Finding{}
@@ -380,13 +377,10 @@ func loadPlanFor(fs *flag.FlagSet, planPath *string, stderr io.Writer) (Plan, in
 // loadValidPlan refuses to work on a plan that does not validate: a status
 // table over a broken plan is a lie with columns.
 func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
-	p, findings, err := DecodeFile(path)
+	p, findings, err := loadPlan(path)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return Plan{}, 2
-	}
-	if findings == nil {
-		findings = Validate(p)
 	}
 	if len(findings) > 0 {
 		for _, f := range findings {

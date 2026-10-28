@@ -12,6 +12,7 @@ import (
 // Section order: the top of the screen is the work that needs a human.
 var sections = []struct{ status, label string }{
 	{"blocked", "BLOCKED"},
+	{"failed", "FAILED"},
 	{"working", "WORKING"},
 	{"ready", "READY"},
 	{"waiting", "WAITING"},
@@ -93,7 +94,7 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 		row.Inputs = u.Deps
 		for _, d := range u.Deps {
 			row.DepsTotal++
-			if st.UnitStatus(d) == "done" {
+			if depSatisfied(plan, &st, d) {
 				row.DepsDone++
 			} else {
 				row.WaitsOn = append(row.WaitsOn, d)
@@ -201,11 +202,11 @@ func renderText(w io.Writer, s Snapshot) {
 				detail += ", waits on " + strings.Join(u.WaitsOn, " ")
 			}
 			if u.Note != "" {
-				detail = u.Note
+				detail = collapseLine(u.Note)
 			}
 			fmt.Fprintf(w, "  %s  %s  %s  %s  %s\n",
 				pad(u.ID, idW), where, pad(u.Pane, paneW), pad(u.Status, stW),
-				truncate(detail+": "+u.Goal, 80))
+				truncate(detail+": "+collapseLine(u.Goal), 80))
 		}
 	}
 
@@ -232,6 +233,12 @@ func renderText(w io.Writer, s Snapshot) {
 		fmt.Fprintf(w, "\nnothing recorded yet. start with:\n  dungeon set unit %s working --note \"brief written\"\n",
 			s.Units[0].ID)
 	}
+}
+
+// collapseLine flattens every whitespace run, newlines included, to one space.
+// A goal or note may come from a YAML block scalar, and a table row is one line.
+func collapseLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 func age(at string) string {

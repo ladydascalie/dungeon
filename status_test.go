@@ -111,3 +111,37 @@ func TestRenderText(t *testing.T) {
 		t.Fatalf("empty sections should not print:\n%s", out)
 	}
 }
+
+func TestStatusRowsCollapseWhitespace(t *testing.T) {
+	src := strings.Replace(statusPlan, "    goal: first",
+		"    goal: |\n      first line\n      second line", 1)
+	p := decodeOK(t, src)
+	st, _ := LoadState(t.TempDir() + "/missing.json")
+	st.SetUnit("A", "working", "note one\nnote two")
+
+	var buf bytes.Buffer
+	renderText(&buf, buildSnapshot(p, "plan.yaml", st, nil))
+	out := buf.String()
+
+	if !strings.Contains(out, "note one note two: first line second line") {
+		t.Fatalf("a multi-line goal and note should render on one row:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "second line" || strings.TrimSpace(line) == "note two" {
+			t.Fatalf("a block scalar leaked a line of its own:\n%s", out)
+		}
+	}
+}
+
+func TestStatusShowsFailed(t *testing.T) {
+	p := decodeOK(t, statusPlan)
+	st, _ := LoadState(t.TempDir() + "/missing.json")
+	st.SetUnit("A", "failed", "review concluded FAIL")
+
+	var buf bytes.Buffer
+	renderText(&buf, buildSnapshot(p, "plan.yaml", st, nil))
+	out := buf.String()
+	if !strings.Contains(out, "FAILED (1)") || !strings.Contains(out, "review concluded FAIL") {
+		t.Fatalf("a failed unit needs its own section:\n%s", out)
+	}
+}

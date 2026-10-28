@@ -315,3 +315,197 @@ func TestEncounterMustBeBranchSafe(t *testing.T) {
 	p := decodeOK(t, strings.Replace(goodPlan, "encounter: fix-auth-timeouts", "encounter: Fix Auth", 1))
 	wantCodes(t, Validate(p), EBadEncounter)
 }
+
+// aLoop is a valid loop statement, parked after the last unit of goodPlan.
+const aLoop = `loops:
+  - {id: polish, reviewer: r1, fixer: w1, rounds: 2, focus: error handling, pass: all tests pass, paths: [lib/**]}
+`
+
+func withLoop(t *testing.T, loop string) Plan {
+	t.Helper()
+	return edit(t, "    accept: mise run gate\n", "    accept: mise run gate\n"+loop)
+}
+
+func TestGoodLoopIsClean(t *testing.T) {
+	p := withLoop(t, aLoop)
+	if f := Validate(p); len(f) != 0 {
+		t.Fatalf("unexpected findings: %v", f)
+	}
+}
+
+func TestLoopFindings(t *testing.T) {
+	cases := []struct {
+		name string
+		plan Plan
+		want []Code
+	}{
+		{
+			name: "loop id collides with a unit",
+			plan: withLoop(t, strings.Replace(aLoop, "id: polish", "id: api-timeout", 1)),
+			want: []Code{EDuplicateID},
+		},
+		{
+			name: "loop id is empty",
+			plan: withLoop(t, strings.Replace(aLoop, "id: polish", `id: ""`, 1)),
+			want: []Code{ENoID},
+		},
+		{
+			name: "two loops share an id",
+			plan: withLoop(t, aLoop+strings.Replace(aLoop, "loops:\n", "", 1)),
+			want: []Code{EDuplicateID},
+		},
+		{
+			name: "loop reviewer is not declared",
+			plan: withLoop(t, strings.Replace(aLoop, "reviewer: r1", "reviewer: nope", 1)),
+			want: []Code{EUnknownMinion},
+		},
+		{
+			name: "loop reviewer does not review",
+			plan: withLoop(t, strings.Replace(aLoop, "reviewer: r1", "reviewer: w1", 1)),
+			want: []Code{ELoopRole},
+		},
+		{
+			name: "loop reviewer is empty",
+			plan: withLoop(t, strings.Replace(aLoop, "reviewer: r1", `reviewer: ""`, 1)),
+			want: []Code{ENoMinion},
+		},
+		{
+			name: "loop fixer cannot write",
+			plan: withLoop(t, strings.Replace(aLoop, "fixer: w1", "fixer: r1", 1)),
+			want: []Code{ELoopRole},
+		},
+		{
+			name: "loop fixer is not declared",
+			plan: withLoop(t, strings.Replace(aLoop, "fixer: w1", "fixer: nope", 1)),
+			want: []Code{EUnknownMinion},
+		},
+		{
+			name: "loop rounds below one",
+			plan: withLoop(t, strings.Replace(aLoop, "rounds: 2", "rounds: 0", 1)),
+			want: []Code{ELoopRounds},
+		},
+		{
+			name: "loop rounds above nine",
+			plan: withLoop(t, strings.Replace(aLoop, "rounds: 2", "rounds: 10", 1)),
+			want: []Code{ELoopRounds},
+		},
+		{
+			name: "loop has no pass",
+			plan: withLoop(t, strings.Replace(aLoop, "pass: all tests pass", `pass: ""`, 1)),
+			want: []Code{ELoopPass},
+		},
+		{
+			name: "loop has no focus",
+			plan: withLoop(t, strings.Replace(aLoop, "focus: error handling", `focus: ""`, 1)),
+			want: []Code{ELoopFocus},
+		},
+		{
+			name: "loop has no paths",
+			plan: withLoop(t, strings.Replace(aLoop, ", paths: [lib/**]", "", 1)),
+			want: []Code{ENoPaths},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wantCodes(t, Validate(c.plan), c.want...)
+		})
+	}
+}
+
+func TestLoopFindingsAreAtTheLoop(t *testing.T) {
+	p := withLoop(t, strings.Replace(aLoop, "rounds: 2", "rounds: 0", 1))
+	f := Validate(p)
+	if len(f) != 1 || !strings.HasPrefix(f[0].Path, "loops[0]") {
+		t.Fatalf("loop finding should be at loops[0]: %v", f)
+	}
+}
+
+func TestLoopReviewGoalIsOptional(t *testing.T) {
+	p := withLoop(t, strings.Replace(aLoop, "pass: all tests pass",
+		"pass: all tests pass, review_goal: find one real bug, fix_goal: fix it", 1))
+	if f := Validate(p); len(f) != 0 {
+		t.Fatalf("goals are optional, got %v", f)
+	}
+}
+
+func TestDecodeRejectsUnknownLoopField(t *testing.T) {
+	_, f := Decode([]byte(strings.Replace(goodPlan, "    accept: mise run gate\n",
+		"    accept: mise run gate\n"+strings.Replace(aLoop, "rounds: 2", "round: 2", 1), 1)))
+	wantCodes(t, f, EParse)
+	if !strings.Contains(f[0].Message, "round") {
+		t.Fatalf("parse error should name the key: %q", f[0].Message)
+	}
+}
+
+func TestToolsReplaceTheRoleDefault(t *testing.T) {
+	p := edit(t, "{id: w1, role: worker, worktree: fix-auth-w1}",
+		"{id: w1, role: worker, worktree: fix-auth-w1, tools: \"read, bash, edit, write\"}")
+	if f := Validate(p); len(f) != 0 {
+		t.Fatalf("unexpected findings: %v", f)
+	}
+}
+
+func TestToolsFindings(t *testing.T) {
+	cases := []struct {
+		name  string
+		tools string
+		want  []Code
+	}{
+		{name: "a name that is not a tool name", tools: "read,Bash", want: []Code{EBadTools}},
+		{name: "an empty item", tools: "read,,bash", want: []Code{EBadTools}},
+		{name: "a trailing comma", tools: "read,", want: []Code{EBadTools}},
+		{name: "a duplicate", tools: "read,read", want: []Code{EBadTools}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := edit(t, "{id: w1, role: worker, worktree: fix-auth-w1}",
+				"{id: w1, role: worker, worktree: fix-auth-w1, tools: \""+c.tools+"\"}")
+			wantCodes(t, Validate(p), c.want...)
+		})
+	}
+}
+
+func TestReviewerVerdictIsClean(t *testing.T) {
+	p := edit(t, "{id: review-api, minion: r1, deps: [api-timeout]}",
+		`{id: review-api, minion: r1, deps: [api-timeout], verdict: "Verdict: shipped"}`)
+	if f := Validate(p); len(f) != 0 {
+		t.Fatalf("unexpected findings: %v", f)
+	}
+}
+
+func TestVerdictFindings(t *testing.T) {
+	cases := []struct {
+		name string
+		plan Plan
+		want []Code
+	}{
+		{
+			name: "a worker cannot give a verdict",
+			plan: edit(t, "    goal: Where is the read timeout set? Cite file:line.",
+				"    goal: Where is the read timeout set? Cite file:line.\n    verdict: done"),
+			want: []Code{EVerdictRole},
+		},
+		{
+			name: "a verdict unit cannot also accept",
+			plan: edit(t, "{id: review-api, minion: r1, deps: [api-timeout]}",
+				`{id: review-api, minion: r1, deps: [api-timeout], verdict: "Verdict: shipped", accept: go test ./apps/api/...}`),
+			want: []Code{EVerdictAccept},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wantCodes(t, Validate(c.plan), c.want...)
+		})
+	}
+}
+
+func TestProvisionalIsGeneratedOnly(t *testing.T) {
+	src := strings.Replace(goodPlan, "    accept: go test ./apps/api/...",
+		"    accept: go test ./apps/api/...\n    provisional: true", 1)
+	_, f := Decode([]byte(src))
+	wantCodes(t, f, EParse)
+	if !strings.Contains(f[0].Message, "provisional") {
+		t.Fatalf("the decode error should name the key: %q", f[0].Message)
+	}
+}
