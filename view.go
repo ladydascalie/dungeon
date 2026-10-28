@@ -741,7 +741,7 @@ func (m viewModel) detailBox(width, height int) string {
 	head += dimStyle.Render(truncate("  "+tail, max(0, inner-runeLen(u.ID)-runeLen(u.Status)-4)))
 	lines = append(lines, head)
 
-	lines = append(lines, truncate(u.Goal, inner))
+	lines = append(lines, truncate(collapseSpace(u.Goal), inner))
 
 	deps := fmt.Sprintf("deps %d/%d", u.DepsDone, u.DepsTotal)
 	if len(u.WaitsOn) > 0 {
@@ -752,7 +752,7 @@ func (m viewModel) detailBox(width, height int) string {
 	lines = append(lines, dimStyle.Render(truncate(deps, inner)))
 
 	if u.Note != "" {
-		lines = append(lines, truncate("note: "+u.Note, inner))
+		lines = append(lines, truncate("note: "+collapseSpace(u.Note), inner))
 	} else if us, ok := m.state.Units[u.ID]; ok && len(us.History) > 0 {
 		last := us.History[len(us.History)-1]
 		when := last.At
@@ -761,7 +761,7 @@ func (m viewModel) detailBox(width, height int) string {
 		}
 		line := fmt.Sprintf("%s %s → %s", when, orDash(last.From), last.To)
 		if last.Note != "" {
-			line += "  " + last.Note
+			line += "  " + collapseSpace(last.Note)
 		}
 		lines = append(lines, dimStyle.Render(truncate(line, inner)))
 	}

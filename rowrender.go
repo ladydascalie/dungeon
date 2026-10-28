@@ -17,6 +17,12 @@ type rowCells struct {
 	lane  int // rune length of the lane prefix inside rest, separator included
 }
 
+// collapseSpace flattens every whitespace run, newlines included, to a single
+// space. A goal may come from a YAML block scalar, and the row is one line.
+func collapseSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // rowParts splits a row into the columns' worth of text. The id and the lane are
 // identifiers, so the painter keeps them bold; the goal is the hint.
 func (m viewModel) rowParts(u UnitRow, prefix, suffix, fold string) rowCells {
@@ -38,7 +44,7 @@ func (m viewModel) rowParts(u UnitRow, prefix, suffix, fold string) rowCells {
 	if lane != "" {
 		laneWidth = runeLen(lane) + 1
 	}
-	rest := strings.TrimLeft(lane+" "+u.Goal, " ")
+	rest := strings.TrimLeft(lane+" "+collapseSpace(u.Goal), " ")
 	return rowCells{
 		head:  head,
 		lead:  lead,

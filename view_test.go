@@ -488,6 +488,33 @@ func TestCardIsOneLinePerField(t *testing.T) {
 	}
 }
 
+func TestCardCollapsesMultilineGoalAndNote(t *testing.T) {
+	plan := writePlan(t, strings.Replace(statusPlan, "    goal: first\n",
+		"    goal: |\n      first line\n        second line\n", 1))
+	state := filepath.Join(t.TempDir(), "state.json")
+	st, _ := LoadState(state)
+	if err := st.SetUnit("A", "blocked", "needs you\n\n  pick a name"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(state, st); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestView(t, plan, state)
+	m.cursor = 0
+	m.rebuildOrder("")
+
+	box := m.detailBox(100, 8)
+	if n := len(strings.Split(box, "\n")); n != 8 {
+		t.Fatalf("card is %d lines, want exactly 8:\n%s", n, box)
+	}
+	if !strings.Contains(box, "first line second line") {
+		t.Fatalf("a multi-line goal should collapse to one line:\n%s", box)
+	}
+	if !strings.Contains(box, "note: needs you pick a name") {
+		t.Fatalf("a multi-line note should collapse to one line:\n%s", box)
+	}
+}
+
 func TestColumnsAreContentSizedWithASmallGap(t *testing.T) {
 	short := writePlan(t, statusPlan)
 	long := writePlan(t, strings.Replace(statusPlan,
