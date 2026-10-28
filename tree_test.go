@@ -220,8 +220,9 @@ func TestForestPlacesLoopByItsFirstUnitWhenItHasNoEntryDeps(t *testing.T) {
 	}
 }
 
-// Rounds read as a list even when a later round is the urgent one.
-func TestForestKeepsLoopChildrenInRoundOrder(t *testing.T) {
+// A round is a pair: the review hangs under the loop in round order, and its
+// fix hangs under that review.
+func TestForestNestsFixesUnderTheirReviews(t *testing.T) {
 	roots := loopForestOf(t, loopForestPlan, map[string]string{
 		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
 		"polish-review-2": "working",
@@ -234,12 +235,22 @@ func TestForestKeepsLoopChildrenInRoundOrder(t *testing.T) {
 	for _, c := range loop.Children {
 		got = append(got, c.ID)
 	}
-	want := []string{
-		"polish-review-1", "polish-fix-1", "polish-review-2",
-		"polish-fix-2", "polish-review-3",
-	}
+	want := []string{"polish-review-1", "polish-review-2", "polish-review-3"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("children %v, want round order %v", got, want)
+		t.Fatalf("reviews %v, want round order %v", got, want)
+	}
+	for _, tc := range []struct{ review, fix string }{
+		{"polish-review-1", "polish-fix-1"},
+		{"polish-review-2", "polish-fix-2"},
+	} {
+		r := nodeByID(roots, tc.review)
+		if r == nil || len(r.Children) != 1 || r.Children[0].ID != tc.fix {
+			t.Fatalf("%s should hold %s, got %+v", tc.review, tc.fix, r)
+		}
+	}
+	final := nodeByID(roots, "polish-review-3")
+	if final == nil || len(final.Children) != 0 {
+		t.Fatalf("the final review holds no fix, got %+v", final)
 	}
 }
 
@@ -250,10 +261,16 @@ func TestForestStripsTheLoopPrefixFromGeneratedIDs(t *testing.T) {
 	if loop == nil {
 		t.Fatal("no loop node")
 	}
-	want := []string{"review-1", "fix-1", "review-2", "fix-2", "review-3"}
+	want := []string{"review-1", "review-2", "review-3"}
 	for i, c := range loop.Children {
 		if c.Label != want[i] {
-			t.Fatalf("child %d label %q, want %q", i, c.Label, want[i])
+			t.Fatalf("review %d label %q, want %q", i, c.Label, want[i])
+		}
+	}
+	for i, fix := range []string{"fix-1", "fix-2"} {
+		c := loop.Children[i]
+		if len(c.Children) != 1 || c.Children[0].Label != fix {
+			t.Fatalf("review %d should hold a child labelled %q, got %+v", i, fix, c.Children)
 		}
 	}
 }

@@ -278,10 +278,11 @@ promotes nothing.
 
 The tree draws a loop as one summary row, marked `⛧`. The row shows the loop id,
 then `⟳ N/cap` and the focus in the goal column, then the loop state in the
-status column. A working loop also shows its live pane. The generated units hang
-under the summary row in round order. A child row shows `review-1` or `fix-1`,
-with the loop id prefix stripped, and `review, round N` or `fix, round N` in the
-goal column. The full generated goal stays in the unit card.
+status column. A working loop also shows its live pane. Each review hangs under
+the summary row in round order, and its fix hangs under the review. The final
+review has no fix. A child row shows `review-1` or `fix-1`, with the loop id
+prefix stripped, and `review, round N` or `fix, round N` in the goal column.
+The full generated goal stays in the unit card.
 
 An unstarted loop is folded to its summary row. A started loop unfolds. An
 explicit `space space` fold or unfold wins and survives a refresh, so a loop

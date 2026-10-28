@@ -170,10 +170,11 @@ note `proved by <review>`, so `land` carries that fix's branch. A failed review
 promotes nothing.
 
 In the view, a loop is one summary row marked `⛧`: the loop id, `⟳ N/cap` and
-the focus, then the loop state and live pane. Its generated units hang under it
-in round order. A child row shows `review-1` or `fix-1`, and `review, round N` or
-`fix, round N` as its goal. An unstarted loop is folded. A started loop unfolds.
-An explicit fold or unfold wins and survives a refresh.
+the focus, then the loop state and live pane. Each review hangs under it in
+round order, and its fix hangs under the review. The final review has no fix. A
+child row shows `review-1` or `fix-1`, and `review, round N` or `fix, round N`
+as its goal. An unstarted loop is folded. A started loop unfolds. An explicit
+fold or unfold wins and survives a refresh.
 
 `d` or `enter` on a loop summary row opens the round timeline: loop, focus, cap,
 current round, pass line, and one row per round with the review and fix state. A

@@ -140,12 +140,38 @@ func buildForest(s Snapshot) []*forestNode {
 		}
 		children[parent[id]] = append(children[parent[id]], id)
 	}
-	// A loop's children are its rounds, in round order, not urgency order.
+	// A loop's children are its reviews, in round order, not urgency order.
+	// Each fix hangs under the review that produced it, so a round reads as one
+	// pair and the review can fold its own fix.
 	for _, l := range s.Loops {
 		if _, ok := nodes[l.ID]; !ok {
 			continue
 		}
-		children[l.ID] = append([]string(nil), loopKids[l.ID]...)
+		var reviews []string
+		fixes := map[int]string{}
+		for _, id := range loopKids[l.ID] {
+			kind, round, ok := loopChildKind(l.ID, id)
+			if !ok {
+				reviews = append(reviews, id)
+				continue
+			}
+			switch kind {
+			case "review":
+				reviews = append(reviews, id)
+			case "fix":
+				fixes[round] = id
+			}
+		}
+		children[l.ID] = reviews
+		for _, id := range reviews {
+			_, round, ok := loopChildKind(l.ID, id)
+			if !ok {
+				continue
+			}
+			if fix, ok := fixes[round]; ok {
+				children[id] = append(children[id], fix)
+			}
+		}
 	}
 
 	byUrgency := func(ids []string) {
