@@ -54,12 +54,14 @@ A dispatch is five steps, and only proof can mark a unit `done`:
 2. submit it with `herdr agent prompt`;
 3. wait for the lane to settle;
 4. read `.dungeon/reports/<unit>.md`. No report means `blocked`, never `done`;
-5. run the unit's `accept` command in the lane's worktree. Exit 0 is `done`,
-   anything else is `rejected`, and no command at all is `unproven`.
+5. prove the unit. Run the unit's `accept` command in the lane's worktree:
+   exit 0 is `done`, anything else is `rejected`, and no command at all is
+   `unproven`. A unit with a `verdict` line skips the command and reads its
+   report instead.
 
 A reviewer unit may carry a `verdict` line instead of an `accept` command. Any
 report line whose trimmed text equals that verdict marks the unit `done`. A
-report without the line marks it `rejected` and names the last merge verdict it
+report without the line marks it `failed` and names the last merge verdict it
 saw. A missing report marks it `blocked`. A verdict unit cannot also set
 `accept`.
 
@@ -85,9 +87,10 @@ comma separated allowlist. An empty value keeps the role default. Names are
 lowercase tool names; an empty item, a duplicate or an unknown shape fails
 validation.
 
-A reviewer paired with `of: w1` reads `w1`'s worktree, so it reviews the branch
-that was written. A staff minion with no pair reads the base checkout. `of` is
-the writer whose worktree the reviewer reads.
+A reviewer paired with `of: w1` reads `w1`'s worktree, and its pane starts
+there, so it reviews the branch that was written from the checkout that holds
+it. A staff minion with no pair reads the base checkout. `of` is the writer
+whose worktree the reviewer reads.
 
 Worktrunk cuts the worktree when `wt` is on PATH, so its hooks and
 ignored-file copies run. dungeon pins the path through the `worktree-path`
@@ -196,11 +199,12 @@ brief, a report, a screenshot, a handoff note. It stores an absolute path, so
 the file stays readable wherever the plan is opened from.
 
 Unit statuses: `planned`, `working`, `finished`, `done`, `unproven`,
-`rejected`, `blocked`, `canceled`. **`done` means the unit was proved.** A unit
-with an `accept` command is done when that command exits 0 in its minion's
-worktree. A unit with a `verdict` line is done when its report carries that
-line. No accept and no verdict, no done: the unit goes `unproven` and its
-dependents stay blocked.
+`rejected`, `failed`, `blocked`, `canceled`. **`done` means the unit was
+proved.** A unit with an `accept` command is done when that command exits 0 in
+its minion's worktree. A unit with a `verdict` line is done when its report
+carries that line; a report without it is `failed`. No accept and no verdict, no
+done: the unit goes `unproven` and its dependents stay blocked, unless the unit
+is provisional.
 
 One encounter is one directory: `.dungeon/` holds `plan.yaml`, `state.json`,
 `briefs/` and `reports/`. Nothing goes to `$XDG_STATE_HOME`, so a brief survives
@@ -217,7 +221,8 @@ verdicts; `worker` and `integrator` own a worktree and write.
 ## Loops
 
 A loop declares a review and fix cycle once. `dungeon` expands it into ordinary
-units, one review and one fix per round:
+units. N rounds expand to 2N+1 units: review-1, fix-1, ..., review-N, fix-N,
+review-N+1. Every fixer pass is judged, including the last.
 
 ```yaml
 loops:
@@ -232,21 +237,27 @@ loops:
     fix_goal: Fix what the review found. Read its report.
 ```
 
-That block expands to four units: `auth-review-1`, `auth-fix-1`,
-`auth-review-2` and `auth-fix-2`. The first review has no deps. Each fix depends
-on its review. Each later review depends on the fix before it.
+That block expands to five units: `auth-review-1`, `auth-fix-1`,
+`auth-review-2`, `auth-fix-2` and `auth-review-3`. The first review has no deps.
+Each fix depends on its review. Each review after the first depends on the fix
+before it.
 
 `rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
 a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
 `review_goal` and `fix_goal` are optional; without them the generated goals name
 the round, the focus and the report to read.
 
-A fix unit accepts on `true`, so a finished fix proves only that the fixer
-stopped. The next review is the real judge.
+A review is proved by its verdict. The pass line marks it `done`. A report
+without that line, including a FAIL verdict, marks it `failed`. That failure
+releases the next fix.
 
-A passing review cancels every later planned unit in the same loop. The state
-note says `loop <id> satisfied at round <n>`. A failing review rejects and the
-next fix is dispatched. A fix that finishes proves nothing and cancels nothing.
+A passed review cancels its own round's fix and every later planned unit of
+that loop. The state note says `loop <id> satisfied at round <n>`.
+
+A generated fix is provisional. It has no accept command, so it settles
+`unproven`. That unproven state is not proof: it carries the next review, and
+that review is the proof for the fix before it. A provisional unproven unit
+releases its dependants; an ordinary unproven unit does not.
 
 ## Tested against a real dagr run
 

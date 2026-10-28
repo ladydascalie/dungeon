@@ -91,14 +91,15 @@ for staff and `read,bash,edit,write` for writers. Leave the field out to keep
 the default. List lowercase tool names, comma separated, with no empty items
 and no duplicates.
 
-A reviewer with `of: w1` reads `w1`'s worktree, so it reviews the branch that
-was written. A staff minion with no pair reads the base checkout. `of` names
-the writer whose worktree the reviewer reads.
+A reviewer with `of: w1` reads `w1`'s worktree, and its pane starts there, so
+it reviews the branch that was written from the checkout that holds it. A staff
+minion with no pair reads the base checkout. `of` names the writer whose
+worktree the reviewer reads and where its pane starts.
 
 A `verdict` line proves a reviewer unit without an accept command. Any report
 line whose trimmed text equals the verdict marks the unit `done`. A report
-without that line marks it `rejected`. A missing report marks it `blocked`. A
-verdict unit cannot also set `accept`.
+without that line, including a FAIL verdict, marks it `failed`. A missing report
+marks it `blocked`. A verdict unit cannot also set `accept`.
 
 Good units, in the order that matters:
 
@@ -136,18 +137,29 @@ loops:
     fix_goal: Fix what the review found. Read its report.
 ```
 
-That loop expands to `auth-review-1`, `auth-fix-1`, `auth-review-2` and
-`auth-fix-2`. The first review has no deps. Each fix depends on its review. Each
-later review depends on the fix before it.
+N rounds expand to 2N+1 units: review-1, fix-1, ..., review-N, fix-N,
+review-N+1. Every fixer pass is judged, including the last.
+
+That example expands to `auth-review-1`, `auth-fix-1`, `auth-review-2`,
+`auth-fix-2` and `auth-review-3`. The first review has no deps. Each fix
+depends on its review. Each review after the first depends on the fix before it.
 
 `rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
 a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
 `review_goal` and `fix_goal` are optional. Without them the generated goals name
 the round, the focus and the report to read.
 
-A passing review cancels every later planned unit in the same loop. The state
-note says `loop <id> satisfied at round <n>`. A failing review rejects and the
-next fix is dispatched. A fix that finishes proves nothing and cancels nothing.
+A review is proved by its verdict. The pass line marks it `done`. A report
+without that line, including a FAIL verdict, marks it `failed`. That failure
+releases the next fix.
+
+A passed review cancels its own round's fix and every later planned unit of
+that loop. The state note says `loop <id> satisfied at round <n>`.
+
+A generated fix is provisional. It has no accept command, so it settles
+`unproven`. That unproven state is not proof: it carries the next review, and
+that review judges the fix before it. A provisional unproven unit releases its
+dependants. An ordinary unproven unit does not.
 
 ## The loop
 
@@ -204,11 +216,13 @@ so a stale plan never blocks a run.
 | `working` | a lane is on it | nothing. Do not help |
 | `blocked` | needs a human, or the plan is wrong | read the note, then act |
 | `done` | proved: accept exited 0, or the verdict line was found | nothing |
-| `unproven` | finished, and there is no accept command or verdict | add an `accept` or a `verdict`, re-plan the unit |
-| `rejected` | the accept command failed, or the verdict line was absent | send it back, see below |
+| `unproven` | finished, with no accept or verdict; a provisional fix lands here on purpose | nothing for a provisional fix. Otherwise add an `accept` or a `verdict` |
+| `rejected` | the accept command failed | send it back, see below |
+| `failed` | a review report lacked its pass line | nothing in a loop. The next fix releases |
 | `canceled` | withdrawn | nothing |
 
-Only `done` releases dependents. Nothing upgrades a claim to a pass.
+`done`, `failed` and a provisional `unproven` release dependents. Nothing
+upgrades a claim to a pass.
 
 ## When a unit is rejected or blocked
 
