@@ -68,8 +68,15 @@ func loopReview(l Loop, round int) Unit {
 		Minion:  l.Reviewer,
 		Goal:    goal,
 		Verdict: l.Pass,
+		Loop:    l.ID,
+		Round:   round,
+		Kind:    "review",
 	}
-	if round > 1 {
+	if round == 1 {
+		// The first review may wait on declared work, so the loop does not
+		// review a unit that has not landed yet.
+		u.Deps = append([]string(nil), l.Deps...)
+	} else {
 		u.Deps = []string{fmt.Sprintf("%s-fix-%d", l.ID, round-1)}
 	}
 	return u
@@ -90,6 +97,9 @@ func loopFix(l Loop, round int) Unit {
 		Deps:        []string{reviewID},
 		Goal:        goal,
 		Provisional: true,
+		Loop:        l.ID,
+		Round:       round,
+		Kind:        "fix",
 	}
 }
 
