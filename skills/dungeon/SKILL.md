@@ -1,6 +1,6 @@
 ---
 name: dungeon
-description: Default mode for any task that needs decomposition: if it cannot be fixed inline in one pass, it becomes an encounter. A tracked plan of units, one minion per unit, a graph you watch. Orchestrate and delegate with dungeon, the plan-and-dispatch tool. The parent lane writes the plan, spawns minions, reads the graph and lands the result, and never does the work itself. Use when asked to plan, dispatch, monitor or land work with dungeon, when a .dungeon/plan.yaml exists, or when a task should be split across parallel lanes with a mechanical definition of done.
+description: 'Default mode for any task that needs decomposition: if it cannot be fixed inline in one pass, it becomes an encounter. A tracked plan of units, one minion per unit, a graph you watch. Orchestrate and delegate with dungeon, the plan-and-dispatch tool. The parent lane writes the plan, spawns minions, reads the graph and lands the result, and never does the work itself. Use when asked to plan, dispatch, monitor or land work with dungeon, when a .dungeon/plan.yaml exists, or when a task should be split across parallel lanes with a mechanical definition of done.'
 ---
 
 # dungeon: the parent orchestrates
