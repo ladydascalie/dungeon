@@ -46,27 +46,51 @@ dungeon land                       # merge done units, re-run their accepts
 dungeon down                       # close the lanes, keep the run
 ```
 
-A dispatch is five steps and only the last one can mark a unit `done`:
+A dispatch is five steps, and only proof can mark a unit `done`:
 
-1. write `.dungeon/briefs/<unit>.md`: goal, owned paths, worktree, accept
-   command, and what the lane may not touch;
+1. write `.dungeon/briefs/<unit>.md`: goal, owned paths, worktree, a verdict
+   line or an accept command, the reports from its deps, and what the lane may
+   not touch;
 2. submit it with `herdr agent prompt`;
 3. wait for the lane to settle;
 4. read `.dungeon/reports/<unit>.md`. No report means `blocked`, never `done`;
-5. run the unit's `accept` command in the lane's worktree. Exit 0 is `done`,
-   anything else is `rejected`, and no command at all is `unproven`.
+5. prove the unit. Run the unit's `accept` command in the lane's worktree:
+   exit 0 is `done`, anything else is `rejected`, and no command at all is
+   `unproven`. A unit with a `verdict` line skips the command and reads its
+   report instead.
+
+A reviewer unit may carry a `verdict` line instead of an `accept` command. Any
+report line whose trimmed text equals that verdict marks the unit `done`. A
+report without the line marks it `failed` and names the last merge verdict it
+saw. A missing report marks it `blocked`. A verdict unit cannot also set
+`accept`.
+
+Every brief lists the reports from the unit's deps under `reports from deps`,
+one absolute path per dep. The lane does not have to guess where the upstream
+report lives.
 
 Every brief also names the dispatching pane, read from `$HERDR_PANE_ID`, and
-tells the lane to write its report and then run
-`herdr pane run <pane> "<unit> finished. Report: <path>"`. The ping wakes the
-parent agent so it can settle the unit. It carries no state: the report and the
-accept command still decide what `done` means.
+tells the lane to write its report and then ping that pane with
+`herdr pane run <pane>`. The ping wakes the parent agent so it can settle the
+unit. It carries no state: the report plus the unit's accept command or verdict
+line decide what `done` means.
 
 `up` is idempotent: a minion whose agent is live is left alone, so a second `up`
 resumes instead of doubling the fleet. A writer gets its own worktree at
 `<repo>/../<encounter>-<minion>` on branch `<encounter>/<minion>`. Lanes run with
 `--no-skills --no-mcp` and a tool allowlist that matches their role: `read,bash`
 for staff work, `read,bash,edit,write` for writers.
+
+A minion may replace that default with its own `tools` list:
+`- {id: scout, role: scout, tools: "read,bash,grep,find,ls"}`. The value is a
+comma separated allowlist. An empty value keeps the role default. Names are
+lowercase tool names; an empty item, a duplicate or an unknown shape fails
+validation.
+
+A reviewer paired with `of: w1` reads `w1`'s worktree, and its pane starts
+there, so it reviews the branch that was written from the checkout that holds
+it. A staff minion with no pair reads the base checkout. `of` is the writer
+whose worktree the reviewer reads.
 
 Worktrunk cuts the worktree when `wt` is on PATH, so its hooks and
 ignored-file copies run. dungeon pins the path through the `worktree-path`
@@ -174,10 +198,13 @@ instead of opening a TUI.
 brief, a report, a screenshot, a handoff note. It stores an absolute path, so
 the file stays readable wherever the plan is opened from.
 
-Unit statuses: `planned`, `working`, `finished`, `done`, `unproven`,
-`rejected`, `blocked`, `canceled`. **`done` means one thing: the unit's `accept`
-command exited 0 in its minion's worktree.** No command, no done: the unit goes
-`unproven` and its dependents stay blocked.
+Unit statuses: `blocked`, `failed`, `working`, `planned`, `unproven`,
+`rejected`, `done`, `canceled`. **`done` means the unit was proved.** A unit
+with an `accept` command is done when that command exits 0 in its minion's
+worktree. A unit with a `verdict` line is done when its report
+carries that line; a report without it is `failed`. No accept and no verdict, no
+done: the unit goes `unproven` and its dependents stay blocked, unless the unit
+is provisional.
 
 One encounter is one directory: `.dungeon/` holds `plan.yaml`, `state.json`,
 `briefs/` and `reports/`. Nothing goes to `$XDG_STATE_HOME`, so a brief survives
@@ -190,6 +217,51 @@ Exit codes: `0` clean, `1` findings, `2` could not run (missing file, bad usage)
 
 See `testdata/plan.yaml`. Roles: `scout` and `reviewer` produce facts and
 verdicts; `worker` and `integrator` own a worktree and write.
+
+## Loops
+
+A loop declares a review and fix cycle once. `dungeon` expands it into ordinary
+units. N rounds expand to 2N+1 units: review-1, fix-1, ..., review-N, fix-N,
+review-N+1. Every fixer pass is judged, including the last.
+
+```yaml
+loops:
+  - id: auth
+    reviewer: r1
+    fixer: w1
+    rounds: 2
+    focus: timeout handling and error paths
+    pass: "Verdict: PASS"
+    paths: [apps/api/**]
+    review_goal: Review the auth timeout fix. Cite file:line.
+    fix_goal: Fix what the review found. Read its report.
+```
+
+That block expands to five units: `auth-review-1`, `auth-fix-1`,
+`auth-review-2`, `auth-fix-2` and `auth-review-3`. The first review has no deps.
+Each fix depends on its review. Each review after the first depends on the fix
+before it.
+
+`rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
+a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
+`review_goal` and `fix_goal` are optional; without them the generated goals name
+the round, the focus and the report to read.
+
+A review is proved by its verdict. The pass line marks it `done`. A report
+without that line, including a FAIL verdict, marks it `failed`. That failure
+releases the next fix.
+
+A passed review cancels its own round's fix and every later planned unit of
+that loop. The state note says `loop <id> satisfied at round <n>`.
+
+A generated fix is provisional. It has no accept command, so it settles
+`unproven`. That unproven state is not proof: it carries the next review, and
+that review is the proof for the fix before it. A provisional unproven unit
+releases its dependants; an ordinary unproven unit does not.
+
+A passing review promotes the fix before it from `unproven` to `done`, with the
+note `proved by <review>`, so `land` carries that fix's branch. A failed review
+promotes nothing.
 
 ## Tested against a real dagr run
 
