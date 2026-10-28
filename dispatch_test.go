@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeHerdr puts a herdr on PATH that records what it was asked, tracks the
@@ -390,4 +391,108 @@ func TestOfMustNameAWriter(t *testing.T) {
 	plan = strings.Replace(goodPlan, "{id: r1, role: reviewer, of: w1}",
 		"{id: r1, role: reviewer, of: nope}", 1)
 	wantCodes(t, Validate(decodeOK(t, plan)), EUnknownMinion)
+}
+
+// verdictCase builds a reviewer unit and, when report is not empty, writes that
+// report. The paired worktree exists so a no-verdict unit can still run its
+// accept command there.
+func verdictCase(t *testing.T, verdict, report string) (dispatchOpts, Plan, *State, Unit, Minion) {
+	t.Helper()
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, ".dungeon", "plan.yaml")
+	p := Plan{Encounter: "enc", Repo: dir, Minions: []Minion{
+		{ID: "w1", Role: RoleWorker, Worktree: "w1"},
+		{ID: "r1", Role: RoleReviewer, Of: "w1"},
+	}}
+	u := Unit{ID: "R", Minion: "r1", Verdict: verdict, Accept: "true"}
+	if verdict == "" {
+		u.Minion = "w1"
+	}
+	m, ok := findMinion(p, u.Minion)
+	if !ok {
+		t.Fatalf("minion %q not found", u.Minion)
+	}
+	if err := os.MkdirAll(worktreePath(p.Repo, p.Encounter, "w1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if report != "" {
+		path := reportPath(planPath, u.ID)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(report), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st := &State{Encounter: "enc", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	o := dispatchOpts{planPath: planPath, acceptTimeout: time.Minute}
+	return o, p, st, u, m
+}
+
+func TestVerdictPassMarksDone(t *testing.T) {
+	o, p, st, u, m := verdictCase(t, "Merge verdict: PASS",
+		"# Report\n\n  Merge verdict: PASS  \n\nDone.\n")
+	if got := settle(t.Context(), o, p, st, u, m); got != "done" {
+		t.Fatalf("settle %q, want done: %s", got, st.Units[u.ID].Note)
+	}
+	if want := "verdict: Merge verdict: PASS"; st.Units[u.ID].Note != want {
+		t.Fatalf("receipt %q, want %q", st.Units[u.ID].Note, want)
+	}
+}
+
+func TestVerdictFailRejectsAndNamesWhatItSaw(t *testing.T) {
+	o, p, st, u, m := verdictCase(t, "Merge verdict: PASS",
+		"Merge verdict: FAIL\nthen some detail\n")
+	if got := settle(t.Context(), o, p, st, u, m); got != "rejected" {
+		t.Fatalf("settle %q, want rejected", got)
+	}
+	note := st.Units[u.ID].Note
+	for _, want := range []string{"Merge verdict: PASS", "Merge verdict: FAIL"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q missing %q", note, want)
+		}
+	}
+}
+
+func TestVerdictFailWithNoVerdictLineSaysNone(t *testing.T) {
+	o, p, st, u, m := verdictCase(t, "Merge verdict: PASS", "# Report\n\nNothing shipped.\n")
+	if got := settle(t.Context(), o, p, st, u, m); got != "rejected" {
+		t.Fatalf("settle %q, want rejected", got)
+	}
+	note := st.Units[u.ID].Note
+	if !strings.Contains(note, "Merge verdict: PASS") || !strings.Contains(note, "none") {
+		t.Fatalf("note %q should name the wanted verdict and none", note)
+	}
+}
+
+func TestVerdictMissingReportBlocks(t *testing.T) {
+	o, p, st, u, m := verdictCase(t, "Merge verdict: PASS", "")
+	if got := settle(t.Context(), o, p, st, u, m); got != "blocked" {
+		t.Fatalf("settle %q, want blocked", got)
+	}
+	if !strings.Contains(st.Units[u.ID].Note, "no report") {
+		t.Fatalf("note %q should name the missing report", st.Units[u.ID].Note)
+	}
+}
+
+func TestNoVerdictStillRunsTheAcceptCommand(t *testing.T) {
+	o, p, st, u, m := verdictCase(t, "", "did it\n")
+	if got := settle(t.Context(), o, p, st, u, m); got != "done" {
+		t.Fatalf("settle %q, want done: %s", got, st.Units[u.ID].Note)
+	}
+	if !strings.Contains(st.Units[u.ID].Note, "accept: true ok") {
+		t.Fatalf("receipt %q should be the accept command's", st.Units[u.ID].Note)
+	}
+}
+
+func TestBriefStatesTheVerdictInsteadOfAccept(t *testing.T) {
+	u := Unit{ID: "R", Goal: "Review it.", Verdict: "Merge verdict: PASS", Accept: "should not appear"}
+	m := Minion{ID: "r1", Role: RoleReviewer}
+	text := briefText(briefData{minion: m, unit: u, dir: "/repo", report: "/enc/reports/R.md"})
+	if !strings.Contains(text, "verdict: Merge verdict: PASS") {
+		t.Fatalf("brief should state the verdict line:\n%s", text)
+	}
+	if strings.Contains(text, "should not appear") {
+		t.Fatalf("a verdict unit must not get an accept command:\n%s", text)
+	}
 }

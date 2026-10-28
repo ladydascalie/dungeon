@@ -158,9 +158,13 @@ func briefText(d briefData) string {
 			fmt.Fprintf(&b, "- %s: %s\n", r.ID, r.Path)
 		}
 	}
-	if u.Accept != "" {
+	switch {
+	case u.Verdict != "":
+		fmt.Fprintf(&b, "verdict: %s\n", u.Verdict)
+		b.WriteString("Write that line in your report, exactly, when the unit passes.\n")
+	case u.Accept != "":
 		fmt.Fprintf(&b, "accept: %s\n", u.Accept)
-	} else {
+	default:
 		b.WriteString("accept: none. This unit cannot be marked done, so say plainly what you did.\n")
 	}
 	fmt.Fprintf(&b, "\nreport: %s\n", d.report)
@@ -255,6 +259,9 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 	if blockedByWorktree(o, p, st, u, m) {
 		return "blocked"
 	}
+	if u.Verdict != "" {
+		return settleVerdict(st, u, report)
+	}
 	if u.Accept == "" {
 		st.SetUnit(u.ID, "unproven", "no accept command, so nothing can prove it")
 		return "unproven"
@@ -271,6 +278,34 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 	}
 	st.SetUnit(u.ID, "done", fmt.Sprintf("accept: %s ok (%s)", u.Accept, receipt))
 	return "done"
+}
+
+// settleVerdict proves a reviewer unit by its report, not by a shell command.
+// Any report line whose trimmed text equals the wanted verdict proves it. A
+// report without that line rejects the unit and names what it saw instead.
+func settleVerdict(st *State, u Unit, report string) string {
+	raw, err := os.ReadFile(report)
+	if err != nil {
+		st.SetUnit(u.ID, "blocked", "settled with no readable report at "+report)
+		return "blocked"
+	}
+	seen := "none"
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "Merge verdict:") {
+			seen = line
+		}
+		if line == u.Verdict {
+			st.SetUnit(u.ID, "done", "verdict: "+line)
+			return "done"
+		}
+	}
+	st.SetUnit(u.ID, "rejected",
+		fmt.Sprintf("wanted verdict %q, last Merge verdict: %s", u.Verdict, seen))
+	return "rejected"
 }
 
 func lastLine(s string) string {
