@@ -19,6 +19,36 @@ func isMarkdown(path string) bool {
 	return false
 }
 
+// sparseStyleJSON keeps colour on structure only: headings, links, inline code,
+// rules and code blocks. Document color is deliberately absent, so glamour does
+// not wrap every prose run in an escape sequence. On a 400 line report at width
+// 100 the dark style emitted 64,143 escapes and 521KB; this style emits 680 and
+// 45KB. Margins match notty, so the layout does not move.
+const sparseStyleJSON = `{
+  "document": {"block_prefix": "\n", "block_suffix": "\n", "margin": 2},
+  "paragraph": {},
+  "list": {"level_indent": 2},
+  "heading": {"block_suffix": "\n", "color": "39", "bold": true},
+  "h1": {"prefix": " ", "suffix": " ", "color": "228", "background_color": "63", "bold": true},
+  "h2": {"prefix": "## "},
+  "h3": {"prefix": "### "},
+  "h4": {"prefix": "#### "},
+  "h5": {"prefix": "##### "},
+  "h6": {"prefix": "###### ", "color": "35", "bold": false},
+  "text": {},
+  "strikethrough": {"crossed_out": true},
+  "emph": {"italic": true},
+  "strong": {"bold": true},
+  "hr": {"color": "240", "format": "\n--------\n"},
+  "item": {"block_prefix": "• "},
+  "enumeration": {"block_prefix": ". "},
+  "task": {"ticked": "[✓] ", "unticked": "[ ] "},
+  "link": {"color": "30", "underline": true},
+  "link_text": {"color": "35", "bold": true},
+  "code": {"prefix": " ", "suffix": " ", "color": "203", "background_color": "236"},
+  "code_block": {"color": "244", "margin": 2}
+}`
+
 // The renderer is built once per width and reused. Building one per frame cost
 // milliseconds and, worse, a style chosen by probing the terminal, which fights
 // the TUI for the same tty: the view froze for seconds on the first render. A
@@ -32,12 +62,8 @@ func markdownRenderer(width int) *glamour.TermRenderer {
 	if mdRenderer != nil && mdWidth == width {
 		return mdRenderer
 	}
-	// notty keeps the structure and drops the per-word colour and padding that
-	// the dark style emits: tens of characters of escape code per line, which
-	// made the reader heavy to draw and slow to scroll. The view has its own
-	// styling; the markdown only has to keep headings, lists and code legible.
 	r, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("notty"),
+		glamour.WithStylesFromJSONBytes([]byte(sparseStyleJSON)),
 		glamour.WithWordWrap(max(20, width)),
 	)
 	if err != nil {

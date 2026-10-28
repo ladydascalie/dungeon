@@ -325,10 +325,12 @@ On a loop summary row, `d` or `enter` opens the round timeline instead of a unit
 card. From there `enter` opens a round's unit card, `esc` goes back to the
 timeline, and `space f` jumps to the selected round's lane.
 
-A brief or a report is markdown, and the reader renders it: headings, lists,
-emphasis and code blocks all survive. Write them as markdown and the operator
-sees structure instead of a wall of text. A `.log` or any other extension is
-shown as plain text, because a build log is not prose.
+A brief or a report is markdown, and the reader renders it once at open, and
+again only when the pane width changes, never per frame. Headings, links,
+inline code and code blocks keep their colour; prose stays plain because the
+sparse style avoids colouring every prose run. Write them as markdown and the
+operator sees structure instead of a wall of text. A `.log` or any other
+extension is shown as plain text, because a build log is not prose.
 
 Only files are rendered. A unit's goal and note are plain text in the card, so
 do not put markdown in them expecting it to be styled.

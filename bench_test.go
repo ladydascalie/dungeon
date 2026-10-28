@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/glamour"
 )
 
 // A report the size of a real one: headings, lists, paragraphs and code.
 func bigReport(lines int) string {
 	var b strings.Builder
-	for i := 0; b.Len() < 0 && i < 0; i++ {
-	}
 	for i := 0; i < lines; i++ {
 		fmt.Fprintf(&b, "## Step %d\n\n- changed `file%d.go` and ran the build\n- left the rest alone\n\nSome prose about step %d, long enough to wrap at a normal panel width and prove the renderer is doing work.\n\n```sh\ngo test ./...\n```\n\n", i, i, i)
 	}
@@ -25,6 +25,25 @@ func BenchmarkRenderMarkdown(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if got := renderMarkdown(src, 100); len(got) == 0 {
 			b.Fatal("empty")
+		}
+	}
+}
+
+// BenchmarkSparseStyleRender measures the sparse style itself, without the
+// renderer cache, so the cost of the style is not hidden by the cache.
+func BenchmarkSparseStyleRender(b *testing.B) {
+	src := bigReport(40)
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStylesFromJSONBytes([]byte(sparseStyleJSON)),
+		glamour.WithWordWrap(100),
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if out, err := r.Render(src); err != nil || out == "" {
+			b.Fatalf("render: %v", err)
 		}
 	}
 }
