@@ -141,9 +141,18 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 
 		// A reviewer reads its writer's worktree, so it starts there, not in
 		// the base checkout. The accept command already runs in the same place.
+		// The worktree must exist before the pane opens, so a reviewer declared
+		// before its writer still gets a real cwd.
 		cwd := minionDir(p, m)
-		if writes(m.Role) {
-			if err := ensureWorktree(p.Repo, p.Base, p.Encounter, m.ID, cwd); err != nil {
+		owner := ""
+		switch {
+		case writes(m.Role):
+			owner = m.ID
+		case m.Of != "":
+			owner = m.Of
+		}
+		if owner != "" {
+			if err := ensureWorktree(p.Repo, p.Base, p.Encounter, owner, cwd); err != nil {
 				res.Failed = append(res.Failed, m.ID)
 				fmt.Fprintf(out, "%s: %v\n", m.ID, err)
 				continue

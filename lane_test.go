@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -303,17 +304,60 @@ func TestLaneToolsOverrideAndFallBack(t *testing.T) {
 	}
 }
 
-// A reviewer's tab opens in the worktree it reads, not the base checkout. Its
-// accept already runs there; the process now starts there too.
-func TestReviewerTabOpensInThePairedWorktree(t *testing.T) {
-	repo := gitRepo(t)
-	log := fakeHerdr(t, "")
-	plan := `encounter: enc
+// requirePaneCwdExists wraps the herdr already on PATH so any pane-creating call
+// whose --cwd is missing fails, which is what a real herdr refuses to do.
+func requirePaneCwdExists(t *testing.T) {
+	t.Helper()
+	real, err := exec.LookPath("herdr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprev=\nfor a in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"--cwd\" ] && [ ! -d \"$a\" ]; then\n" +
+		"    echo \"missing cwd: $a\" >&2\n    exit 1\n  fi\n" +
+		"  prev=\"$a\"\ndone\nexec \"" + real + "\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "herdr"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// A reviewer's pane opens in the worktree it reads, not the base checkout. Its
+// accept already runs there; the process starts there too. The paired worktree
+// must exist first, so both declaration orders work.
+func TestReviewerPaneUsesThePairedWorktree(t *testing.T) {
+	worker := "  - {id: w1, role: worker, worktree: w1}"
+	reviewer := "  - {id: r1, role: reviewer, of: w1}"
+	cases := []struct {
+		name    string
+		minions string
+		// The first minion's role tab is the workspace's root tab; later roles
+		// get a tab of their own. The reviewer pane is created by whichever
+		// line matches.
+		want string
+	}{
+		{
+			name:    "writer declared first",
+			minions: worker + "\n" + reviewer,
+			want:    "--label reviewer --cwd ",
+		},
+		{
+			name:    "reviewer declared first",
+			minions: reviewer + "\n" + worker,
+			want:    "workspace create --label enc --cwd ",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := gitRepo(t)
+			log := fakeHerdr(t, "")
+			requirePaneCwdExists(t)
+			plan := `encounter: enc
 repo: ` + repo + `
 base: main
 minions:
-  - {id: w1, role: worker, worktree: w1}
-  - {id: r1, role: reviewer, of: w1}
+` + tc.minions + `
 units:
   - id: A
     minion: w1
@@ -321,16 +365,21 @@ units:
     goal: Do A.
     accept: "true"
 `
-	planPath, _, _ := encounter(t, repo, plan)
-	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
-		t.Fatalf("up: %s", stderr)
-	}
-	calls, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "--label reviewer --cwd " + worktreePath(repo, "enc", "w1")
-	if !strings.Contains(string(calls), want) {
-		t.Fatalf("the reviewer tab should open in w1's worktree (%q):\n%s", want, calls)
+			planPath, _, _ := encounter(t, repo, plan)
+			if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+				t.Fatalf("up: %s", stderr)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wt := worktreePath(repo, "enc", "w1")
+			if _, err := os.Stat(wt); err != nil {
+				t.Fatalf("the reviewer's worktree must exist: %v", err)
+			}
+			if want := tc.want + wt; !strings.Contains(string(calls), want) {
+				t.Fatalf("the reviewer pane should open in w1's worktree (%q):\n%s", want, calls)
+			}
+		})
 	}
 }
