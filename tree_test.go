@@ -136,3 +136,141 @@ func TestFoldableListsOnlyNodesWithChildren(t *testing.T) {
 		t.Fatalf("got %v, want A,C", got)
 	}
 }
+
+const loopForestPlan = `encounter: lf
+minions:
+  - {id: w1, role: worker, worktree: wt1}
+  - {id: r1, role: reviewer, of: w1}
+units:
+  - {id: A, minion: w1, paths: [a/**], goal: root}
+loops:
+  - {id: polish, reviewer: r1, fixer: w1, rounds: 2, focus: correctness,
+     pass: "Merge verdict: PASS", paths: [a/**], deps: [A]}
+`
+
+// loopForestOf expands the loops, then builds the forest from the same
+// snapshot the view sees. A test that skipped expansion would see no loop
+// units at all.
+func loopForestOf(t *testing.T, src string, set map[string]string) []*forestNode {
+	t.Helper()
+	p := decodeOK(t, src)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	e, f := ExpandLoops(p)
+	if len(f) > 0 {
+		t.Fatalf("expand: %v", f)
+	}
+	st := State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	for id, status := range set {
+		if err := st.SetUnit(id, status, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return buildForest(buildSnapshot(e, "plan.yaml", st, nil))
+}
+
+func nodeByID(roots []*forestNode, id string) *forestNode {
+	var walk func(*forestNode) *forestNode
+	walk = func(n *forestNode) *forestNode {
+		if n.ID == id {
+			return n
+		}
+		for _, c := range n.Children {
+			if found := walk(c); found != nil {
+				return found
+			}
+		}
+		return nil
+	}
+	for _, r := range roots {
+		if found := walk(r); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+// A loop hangs under the unit its first review waits on, not as a free root.
+func TestForestNestsLoopUnderItsEntryDep(t *testing.T) {
+	roots := loopForestOf(t, loopForestPlan, nil)
+	if len(roots) != 1 || roots[0].ID != "A" {
+		t.Fatalf("roots %v, want just A", idsIn(flattenForest(roots)))
+	}
+	loop := nodeByID(roots, "polish")
+	if loop == nil || !loop.Loop {
+		t.Fatalf("the loop is not a node: %v", idsIn(flattenForest(roots)))
+	}
+	if got := idsIn(flattenForest(roots)); strings.Join(got, ",") != "A,polish,polish-review-1,polish-fix-1,polish-review-2,polish-fix-2,polish-review-3" {
+		t.Fatalf("flattened %v", got)
+	}
+}
+
+// With no entry deps the loop takes the position of its first unit. A working
+// review outranks a ready declared unit, so the loop comes first.
+func TestForestPlacesLoopByItsFirstUnitWhenItHasNoEntryDeps(t *testing.T) {
+	src := strings.Replace(loopForestPlan, ", deps: [A]}", "}", 1)
+	roots := loopForestOf(t, src, map[string]string{"polish-review-1": "working"})
+	got := idsIn(flattenForest(roots))
+	if len(got) == 0 || got[0] != "polish" {
+		t.Fatalf("the loop should take its first unit's place, got %v", got)
+	}
+	if nodeByID(roots, "A") == nil {
+		t.Fatalf("A disappeared: %v", got)
+	}
+}
+
+// A round is a pair: the review hangs under the loop in round order, and its
+// fix hangs under that review.
+func TestForestNestsFixesUnderTheirReviews(t *testing.T) {
+	roots := loopForestOf(t, loopForestPlan, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "working",
+	})
+	loop := nodeByID(roots, "polish")
+	if loop == nil {
+		t.Fatal("no loop node")
+	}
+	var got []string
+	for _, c := range loop.Children {
+		got = append(got, c.ID)
+	}
+	want := []string{"polish-review-1", "polish-review-2", "polish-review-3"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("reviews %v, want round order %v", got, want)
+	}
+	for _, tc := range []struct{ review, fix string }{
+		{"polish-review-1", "polish-fix-1"},
+		{"polish-review-2", "polish-fix-2"},
+	} {
+		r := nodeByID(roots, tc.review)
+		if r == nil || len(r.Children) != 1 || r.Children[0].ID != tc.fix {
+			t.Fatalf("%s should hold %s, got %+v", tc.review, tc.fix, r)
+		}
+	}
+	final := nodeByID(roots, "polish-review-3")
+	if final == nil || len(final.Children) != 0 {
+		t.Fatalf("the final review holds no fix, got %+v", final)
+	}
+}
+
+// A child row can drop the loop prefix because its parent names the loop.
+func TestForestStripsTheLoopPrefixFromGeneratedIDs(t *testing.T) {
+	roots := loopForestOf(t, loopForestPlan, nil)
+	loop := nodeByID(roots, "polish")
+	if loop == nil {
+		t.Fatal("no loop node")
+	}
+	want := []string{"review-1", "review-2", "review-3"}
+	for i, c := range loop.Children {
+		if c.Label != want[i] {
+			t.Fatalf("review %d label %q, want %q", i, c.Label, want[i])
+		}
+	}
+	for i, fix := range []string{"fix-1", "fix-2"} {
+		c := loop.Children[i]
+		if len(c.Children) != 1 || c.Children[0].Label != fix {
+			t.Fatalf("review %d should hold a child labelled %q, got %+v", i, fix, c.Children)
+		}
+	}
+}

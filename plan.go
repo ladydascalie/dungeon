@@ -52,6 +52,9 @@ type Unit struct {
 	Accept      string   `yaml:"accept"`
 	Verdict     string   `yaml:"verdict"` // optional: the report line that proves this reviewer unit
 	Provisional bool     `yaml:"-"`       // generated only: an unproven loop fix whose dep still counts as satisfied
+	Loop        string   `yaml:"-"`       // generated only: the loop this unit belongs to
+	Round       int      `yaml:"-"`       // generated only: 1-based round inside that loop
+	Kind        string   `yaml:"-"`       // generated only: review or fix
 	Split       *Split   `yaml:"split"`
 }
 
@@ -65,6 +68,7 @@ type Loop struct {
 	Focus      string   `yaml:"focus"`
 	Pass       string   `yaml:"pass"`
 	Paths      []string `yaml:"paths"`
+	Deps       []string `yaml:"deps"` // unit ids the first review waits on
 	ReviewGoal string   `yaml:"review_goal"`
 	FixGoal    string   `yaml:"fix_goal"`
 }

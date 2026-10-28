@@ -238,9 +238,20 @@ loops:
 ```
 
 That block expands to five units: `auth-review-1`, `auth-fix-1`,
-`auth-review-2`, `auth-fix-2` and `auth-review-3`. The first review has no deps.
-Each fix depends on its review. Each review after the first depends on the fix
-before it.
+`auth-review-2`, `auth-fix-2` and `auth-review-3`. Each fix depends on its
+review. Each review after the first depends on the fix before it.
+
+A loop may declare `deps` for its first review:
+
+```yaml
+loops:
+  - {id: auth, reviewer: r1, fixer: w1, rounds: 2, deps: [recon],
+     focus: timeout handling, pass: "Verdict: PASS", paths: [apps/api/**]}
+```
+
+`deps` names declared units, so the loop reviews work that has landed instead of
+racing it. Every id must be a declared unit. Without `deps` the first review has
+no deps.
 
 `rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
 a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
@@ -262,6 +273,33 @@ releases its dependants; an ordinary unproven unit does not.
 A passing review promotes the fix before it from `unproven` to `done`, with the
 note `proved by <review>`, so `land` carries that fix's branch. A failed review
 promotes nothing.
+
+### Loop display
+
+The tree draws a loop as one summary row, marked `⛧`. The row shows the loop id,
+then `⟳ N/cap` and the focus in the goal column, then the loop state in the
+status column. A working loop also shows its live pane. Each review hangs under
+the summary row in round order, and its fix hangs under the review. The final
+review has no fix. A child row shows `review-1` or `fix-1`, with the loop id
+prefix stripped, and `review, round N` or `fix, round N` in the goal column.
+The full generated goal stays in the unit card.
+
+An unstarted loop is folded to its summary row. A started loop unfolds. An
+explicit `space space` fold or unfold wins and survives a refresh, so a loop
+that starts while the view is open unfolds itself unless the operator folded it.
+
+`d` or `enter` on a summary row opens a round timeline in the detail pane. It
+names the loop, focus, cap, current round and pass line, then one row per round
+with the review state and the fix state, plus a final row for the last review. A
+failed verdict prints its note under the round, so the merge verdict the reviewer
+saw is visible. `j` and `k` move between rounds, `enter` opens the round's live
+unit card, `esc` goes back to the timeline, and `space f` jumps to the round's
+lane. A second `esc` closes the timeline. `dungeon view --detail <loop id>`
+opens it directly.
+
+`dungeon status` prints a LOOPS block after the unit sections, one line per loop:
+id, focus, `round N/cap` and state. `status --json` carries the same rows under
+`loops`.
 
 ## Tested against a real dagr run
 

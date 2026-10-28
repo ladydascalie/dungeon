@@ -1,6 +1,9 @@
 package main
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // A DAG is not a tree, so nesting needs a rule that loses nothing.
 //
@@ -11,21 +14,86 @@ import "sort"
 // so a fan-in is visible without drawing four edges.
 //
 // Depth is the longest path from a root, so a chain reads top to bottom.
+//
+// A loop is one synthetic node. Its entry deps place it in the same forest,
+// and its generated units hang under it in round order instead of floating as
+// free nodes. A loop is not a chain: its rounds read as a list, not as depth.
 
 type forestNode struct {
 	ID       string
+	Label    string // display id override, empty means ID
 	Inputs   int
+	Loop     bool
 	Children []*forestNode
 }
 
-// buildForest returns the roots. Every unit in the snapshot appears exactly
-// once, depth first, ordered by urgency.
+// loopUnits maps a generated unit id to the loop that generated it.
+func loopUnits(s Snapshot) (map[string]string, map[string][]string) {
+	of := map[string]string{}
+	units := map[string][]string{}
+	for _, l := range s.Loops {
+		units[l.ID] = l.Units
+		for _, id := range l.Units {
+			of[id] = l.ID
+		}
+	}
+	return of, units
+}
+
+// buildForest returns the roots. Every unit and loop in the snapshot appears
+// exactly once, depth first, ordered by urgency.
 func buildForest(s Snapshot) []*forestNode {
 	byID := make(map[string]UnitRow, len(s.Units))
-	urgency := make(map[string]int, len(s.Units))
+	urgency := make(map[string]int, len(s.Units)+len(s.Loops))
 	for i, u := range s.Units {
 		byID[u.ID] = u
 		urgency[u.ID] = i // the snapshot is already in urgency order
+	}
+	loopOf, loopKids := loopUnits(s)
+
+	depsOf := map[string][]string{}
+	nodes := map[string]*forestNode{}
+	placed := map[string]bool{}
+
+	// A loop node sits where its entry deps put it: the first review's deps.
+	entry := func(l LoopRow) []string {
+		kids := loopKids[l.ID]
+		if len(kids) == 0 {
+			return nil
+		}
+		return byID[kids[0]].Inputs
+	}
+	for i, l := range s.Loops {
+		nodes[l.ID] = &forestNode{
+			ID:     l.ID,
+			Loop:   true,
+			Inputs: len(entry(l)),
+		}
+		placed[l.ID] = true
+		depsOf[l.ID] = entry(l)
+		urgency[l.ID] = len(s.Units) + i
+		if kids := loopKids[l.ID]; len(kids) > 0 {
+			urgency[l.ID] = urgency[kids[0]] // the position of its first unit
+		}
+		for _, id := range loopKids[l.ID] {
+			nodes[id] = &forestNode{ID: id, Label: strings.TrimPrefix(id, l.ID+"-"), Inputs: len(byID[id].Inputs)}
+		}
+	}
+
+	for _, u := range s.Units {
+		if loopOf[u.ID] != "" {
+			continue
+		}
+		nodes[u.ID] = &forestNode{ID: u.ID, Inputs: len(u.Inputs)}
+		placed[u.ID] = true
+		depsOf[u.ID] = u.Inputs
+	}
+
+	nodeFor := func(dep string) string {
+		if loop := loopOf[dep]; loop != "" {
+			return loop
+		}
+		return dep
 	}
 
 	depth := map[string]int{}
@@ -35,40 +103,75 @@ func buildForest(s Snapshot) []*forestNode {
 			return d
 		}
 		d := 0
-		for _, dep := range byID[id].Inputs {
-			if _, ok := byID[dep]; !ok {
+		for _, dep := range depsOf[id] {
+			target := nodeFor(dep)
+			if _, ok := nodes[target]; !ok || target == id {
 				continue
 			}
-			d = max(d, depthOf(dep)+1)
+			d = max(d, depthOf(target)+1)
 		}
 		depth[id] = d
 		return d
 	}
 
 	parent := map[string]string{}
-	for _, u := range s.Units {
+	for id := range placed {
 		best := ""
-		for _, dep := range u.Inputs {
-			if _, ok := byID[dep]; !ok {
+		for _, dep := range depsOf[id] {
+			target := nodeFor(dep)
+			if _, ok := nodes[target]; !ok || target == id {
 				continue
 			}
 			if best == "" ||
-				depthOf(dep) > depthOf(best) ||
-				(depthOf(dep) == depthOf(best) && urgency[dep] > urgency[best]) {
-				best = dep
+				depthOf(target) > depthOf(best) ||
+				(depthOf(target) == depthOf(best) && urgency[target] > urgency[best]) {
+				best = target
 			}
 		}
-		parent[u.ID] = best
+		parent[id] = best
 	}
 
 	children := map[string][]string{}
 	var roots []string
-	for _, u := range s.Units {
-		if parent[u.ID] == "" {
-			roots = append(roots, u.ID)
+	for id := range placed {
+		if parent[id] == "" {
+			roots = append(roots, id)
 			continue
 		}
-		children[parent[u.ID]] = append(children[parent[u.ID]], u.ID)
+		children[parent[id]] = append(children[parent[id]], id)
+	}
+	// A loop's children are its reviews, in round order, not urgency order.
+	// Each fix hangs under the review that produced it, so a round reads as one
+	// pair and the review can fold its own fix.
+	for _, l := range s.Loops {
+		if _, ok := nodes[l.ID]; !ok {
+			continue
+		}
+		var reviews []string
+		fixes := map[int]string{}
+		for _, id := range loopKids[l.ID] {
+			kind, round, ok := loopChildKind(l.ID, id)
+			if !ok {
+				reviews = append(reviews, id)
+				continue
+			}
+			switch kind {
+			case "review":
+				reviews = append(reviews, id)
+			case "fix":
+				fixes[round] = id
+			}
+		}
+		children[l.ID] = reviews
+		for _, id := range reviews {
+			_, round, ok := loopChildKind(l.ID, id)
+			if !ok {
+				continue
+			}
+			if fix, ok := fixes[round]; ok {
+				children[id] = append(children[id], fix)
+			}
+		}
 	}
 
 	byUrgency := func(ids []string) {
@@ -76,12 +179,15 @@ func buildForest(s Snapshot) []*forestNode {
 	}
 	byUrgency(roots)
 	for id := range children {
+		if nodes[id].Loop {
+			continue
+		}
 		byUrgency(children[id])
 	}
 
 	var build func(id string) *forestNode
 	build = func(id string) *forestNode {
-		n := &forestNode{ID: id, Inputs: len(byID[id].Inputs)}
+		n := nodes[id]
 		for _, c := range children[id] {
 			n.Children = append(n.Children, build(c))
 		}
@@ -99,6 +205,8 @@ func buildForest(s Snapshot) []*forestNode {
 type treeLine struct {
 	ID     string
 	Prefix string
+	Loop   bool   // a synthetic loop summary row
+	Label  string // display id override, empty means ID
 }
 
 // maxIndent is the deepest the connectors go before they stop growing. A long
@@ -193,7 +301,7 @@ func flattenForest(roots []*forestNode) []treeLine {
 		default:
 			branch, childPrefix = "├─", prefix+"│ "
 		}
-		out = append(out, treeLine{ID: n.ID, Prefix: prefix + branch})
+		out = append(out, treeLine{ID: n.ID, Prefix: prefix + branch, Loop: n.Loop, Label: n.Label})
 		for i, c := range n.Children {
 			walk(c, childPrefix, depth+1, i == len(n.Children)-1, false)
 		}

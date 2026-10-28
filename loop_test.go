@@ -304,3 +304,69 @@ func TestCheckSeesExpandedUnits(t *testing.T) {
 		t.Fatalf("check should count the expanded units: %q", stdout)
 	}
 }
+
+// Every generated unit carries its loop, round and kind. They are not plan
+// fields, so a plan file cannot set them.
+func TestExpandLoopsTagsGeneratedUnits(t *testing.T) {
+	p := expanded(t)
+	want := map[string][2]any{
+		"polish-review-1": {"review", 1},
+		"polish-fix-1":    {"fix", 1},
+		"polish-review-2": {"review", 2},
+		"polish-fix-2":    {"fix", 2},
+		"polish-review-3": {"review", 3},
+	}
+	for _, u := range p.Units {
+		if u.ID == "A" {
+			if u.Loop != "" || u.Round != 0 || u.Kind != "" {
+				t.Fatalf("a declared unit must stay untagged: %+v", u)
+			}
+			continue
+		}
+		w, ok := want[u.ID]
+		if !ok {
+			t.Fatalf("unexpected unit %q", u.ID)
+		}
+		if u.Loop != "polish" || u.Kind != w[0] || u.Round != w[1] {
+			t.Fatalf("%s is loop %q %s round %d, want polish %s round %d",
+				u.ID, u.Loop, u.Kind, u.Round, w[0], w[1])
+		}
+	}
+}
+
+func TestLoopDepsReachTheFirstReview(t *testing.T) {
+	src := strings.Replace(loopPlan, "paths: [a/**]}", "paths: [a/**], deps: [A]}", 1)
+	p := decodeOK(t, src)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	e, f := ExpandLoops(p)
+	if len(f) > 0 {
+		t.Fatalf("expand: %v", f)
+	}
+	review1, _ := unitByID(e, "polish-review-1")
+	if strings.Join(review1.Deps, " ") != "A" {
+		t.Fatalf("the first review waits on %v, want [A]", review1.Deps)
+	}
+	// Only the first review takes the loop deps: later rounds follow the fix.
+	review2, _ := unitByID(e, "polish-review-2")
+	if strings.Join(review2.Deps, " ") != "polish-fix-1" {
+		t.Fatalf("review-2 deps %v, want [polish-fix-1]", review2.Deps)
+	}
+}
+
+func TestLoopDepsMustNameADeclaredUnit(t *testing.T) {
+	src := strings.Replace(loopPlan, "paths: [a/**]}", "paths: [a/**], deps: [nope]}", 1)
+	p := decodeOK(t, src)
+	f := Validate(p)
+	wantCodes(t, f, EMissingDep)
+	if f[0].Path != "loops[0].deps[0]" {
+		t.Fatalf("finding at %q, want loops[0].deps[0]", f[0].Path)
+	}
+}
+
+func TestGeneratedTagsAreNotPlanFields(t *testing.T) {
+	src := strings.Replace(loopPlan, "    goal: Do A.\n", "    loop: polish\n    goal: Do A.\n", 1)
+	_, f := Decode([]byte(src))
+	wantCodes(t, f, EParse)
+}

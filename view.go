@@ -49,17 +49,42 @@ type refreshedMsg struct {
 
 type focusMsg struct{ err error }
 
-// focusCmd jumps the operator to the selected unit's lane. A live agent is
+// focusCmd jumps the operator to the chosen unit's lane. A live agent is
 // exact; with none, the pane hint recorded at spawn is used.
 func (m viewModel) focusCmd() tea.Cmd {
-	u, ok := m.selected()
+	u, ok := m.focusTarget()
 	if !ok {
 		return nil
 	}
 	minion, hint := u.Minion, m.state.Minions[u.Minion].Pane
+	if u.Pane != "" {
+		hint = u.Pane
+	}
 	return func() tea.Msg {
 		return focusMsg{err: newHerdrClient().focus(context.Background(), minion, hint)}
 	}
+}
+
+// focusTarget is the unit the operator means when they press space f. In the
+// loop timeline that is the selected round's live unit; in a card opened from
+// one it is that card's unit; on a loop summary row it is the loop's live unit.
+func (m viewModel) focusTarget() (UnitRow, bool) {
+	if m.overlay == "loop" {
+		return m.roundUnit()
+	}
+	if m.cardID != "" {
+		return m.rowByID(m.cardID), true
+	}
+	u, ok := m.selected()
+	if !ok {
+		return u, false
+	}
+	if l := m.snapLoop(u.ID); l != nil {
+		if live, ok := m.liveLoopUnit(*l); ok {
+			return live, true
+		}
+	}
+	return u, true
 }
 
 type viewModel struct {
@@ -80,15 +105,18 @@ type viewModel struct {
 	choice      int
 
 	notice         string // the last thing that went wrong, shown in the footer until the next key
-	overlay        string // "", "detail" or "reader"
+	overlay        string // "", "detail", "reader" or "loop"
 	artIdx         int
+	cardID         string // the unit shown in a detail card opened from a loop round
+	roundIdx       int    // the selected round in the loop timeline
 	reader         string
 	readerLines    []string
 	readerTop      int
 	readerRendered []string // markdown, rendered once per width, never per frame
 	readerWidth    int
-	folded         map[string]bool
-	order          []string // unit ids in display order
+	folded         map[string]bool // explicit operator folds
+	foldExplicit   map[string]bool // the operator set this fold, so auto-fold must not win
+	order          []string        // unit and loop ids in display order
 	cursor         int
 
 	width  int
@@ -97,13 +125,14 @@ type viewModel struct {
 
 func newViewModel(planPath, statePath string, interval time.Duration) viewModel {
 	return viewModel{
-		planPath:  planPath,
-		statePath: statePath,
-		interval:  interval,
-		mode:      "tree",
-		folded:    map[string]bool{},
-		width:     100,
-		height:    30,
+		planPath:     planPath,
+		statePath:    statePath,
+		interval:     interval,
+		mode:         "tree",
+		folded:       map[string]bool{},
+		foldExplicit: map[string]bool{},
+		width:        100,
+		height:       30,
 	}
 }
 
@@ -195,7 +224,12 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "d", "enter":
-			m.overlay, m.artIdx = "detail", 0
+			if l := m.snapLoop(m.selectedID()); l != nil {
+				m.overlay, m.cardID = "loop", ""
+				m.roundIdx = m.currentRoundIndex(*l)
+			} else {
+				m.overlay, m.cardID, m.artIdx = "detail", "", 0
+			}
 		case "j", "down":
 			m.cursor++
 		case "k", "up":
@@ -238,7 +272,7 @@ func (m *viewModel) runPrefix(key string) tea.Cmd {
 	case " ":
 		m.toggleFold()
 	case "o":
-		u, ok := m.selected()
+		u, ok := m.cardRow()
 		if !ok || u.Link == "" {
 			m.notice = "no link on this unit"
 			return nil
@@ -263,10 +297,15 @@ func (m *viewModel) runPrefix(key string) tea.Cmd {
 	case "c":
 		for _, id := range foldable(pruneForest(buildForest(m.snap), m.hidden)) {
 			m.folded[id] = true
+			m.foldExplicit[id] = true
 		}
 		m.rebuildOrder(m.selectedID())
 	case "e":
 		m.folded = map[string]bool{}
+		m.foldExplicit = map[string]bool{}
+		for _, l := range m.snap.Loops {
+			m.foldExplicit[l.ID] = true // an explicit unfold beats an unstarted loop's auto fold
+		}
 		m.rebuildOrder(m.selectedID())
 	case "?":
 		m.help = !m.help
@@ -393,17 +432,36 @@ func (m viewModel) choiceView() string {
 }
 
 // toggleFold folds or unfolds the selected branch. It sits behind the prefix on space.
+// The choice is explicit, so it survives a refresh and beats the auto fold an
+// unstarted loop gets.
 func (m *viewModel) toggleFold() {
 	id := m.selectedID()
 	if id == "" {
 		return
 	}
-	if m.folded[id] {
-		delete(m.folded, id)
-	} else {
-		m.folded[id] = true
-	}
+	m.folded[id] = !m.foldsNow()[id]
+	m.foldExplicit[id] = true
 	m.rebuildOrder(id)
+}
+
+// foldsNow is the fold map the view draws. An operator choice wins. Otherwise a
+// loop follows its own rule: unstarted folds, started unfolds.
+func (m viewModel) foldsNow() map[string]bool {
+	folded := map[string]bool{}
+	for id, on := range m.folded {
+		if on {
+			folded[id] = true
+		}
+	}
+	for _, l := range m.snap.Loops {
+		if m.foldExplicit[l.ID] {
+			continue
+		}
+		if !l.Started {
+			folded[l.ID] = true
+		}
+	}
+	return folded
 }
 
 // rebuildOrder recomputes the display list and keeps the cursor on the same
@@ -439,7 +497,7 @@ func (m viewModel) tree() ([]treeLine, map[string]int, map[string]bool) {
 	for _, id := range foldable(roots) {
 		branches[id] = true
 	}
-	roots, counts := applyFolds(roots, m.folded)
+	roots, counts := applyFolds(roots, m.foldsNow())
 	return flattenForest(roots), counts, branches
 }
 
@@ -447,15 +505,59 @@ func (m viewModel) hidden(id string) bool {
 	if !m.hideSettled {
 		return false
 	}
+	if m.snapLoop(id) != nil {
+		// A loop is the summary of its children. Hiding it would splice its
+		// generated units back into the forest as free nodes.
+		return false
+	}
 	st := m.rowByID(id).Status
 	return st == "done" || st == "canceled"
 }
 
-func (m viewModel) rowByID(id string) UnitRow {
+func (m viewModel) snapLoop(id string) *LoopRow {
+	for i := range m.snap.Loops {
+		if m.snap.Loops[i].ID == id {
+			return &m.snap.Loops[i]
+		}
+	}
+	return nil
+}
+
+// loopRow is the summary of a loop: its aggregate state and the pane of the
+// unit that is live now.
+func (m viewModel) loopRow(l LoopRow) UnitRow {
+	r := UnitRow{ID: l.ID, Status: l.State}
+	for i, id := range l.Units {
+		c := m.unitByID(id)
+		if i == 0 {
+			r.Inputs = c.Inputs // the loop's entry deps
+		}
+		if c.Status == "working" && c.Pane != "" {
+			r.Pane = c.Pane
+			break
+		}
+		if r.Pane == "" && c.Pane != "" {
+			r.Pane = c.Pane
+		}
+	}
+	return r
+}
+
+func (m viewModel) unitByID(id string) UnitRow {
 	for _, u := range m.snap.Units {
 		if u.ID == id {
 			return u
 		}
+	}
+	return UnitRow{}
+}
+
+func (m viewModel) rowByID(id string) UnitRow {
+	if u := m.unitByID(id); u.ID != "" {
+		return u
+	}
+	if l := m.snapLoop(id); l != nil {
+		return m.loopRow(*l)
 	}
 	return UnitRow{}
 }
@@ -484,6 +586,16 @@ func (m viewModel) selected() (UnitRow, bool) {
 	return m.rowByID(id), true
 }
 
+// cardRow is the unit a detail card shows. A card opened from a loop round
+// names its unit; every other card follows the cursor.
+func (m viewModel) cardRow() (UnitRow, bool) {
+	if m.cardID != "" {
+		u := m.rowByID(m.cardID)
+		return u, u.ID != ""
+	}
+	return m.selected()
+}
+
 func (m viewModel) render() string {
 	if m.choiceMode() {
 		return m.choiceView()
@@ -496,6 +608,8 @@ func (m viewModel) render() string {
 	switch {
 	case m.help:
 		body = m.helpView()
+	case m.overlay == "loop":
+		body = m.loopOverlay()
 	case m.overlay == "detail":
 		body = m.detailOverlay()
 	case m.overlay == "reader":
@@ -519,7 +633,7 @@ func (m viewModel) helpView() string {
 	keys := []string{
 		"j / k      move",
 		"g / G      first and last",
-		"enter / d  detail pane for the selected unit",
+		"enter / d  detail pane for the selected unit or loop",
 		"esc        close the overlay or legend",
 		"ctrl+c     quit",
 		"",
@@ -612,7 +726,7 @@ func (m viewModel) listLines(width int) ([]string, int) {
 
 func (m viewModel) treeLines(width int) ([]string, int) {
 	type row struct {
-		u                    UnitRow
+		d                    displayRow
 		prefix, suffix, fold string
 	}
 	var rows []row
@@ -626,12 +740,30 @@ func (m viewModel) treeLines(width int) ([]string, int) {
 		case branches[line.ID]:
 			fold = "⛧"
 		}
-		rows = append(rows, row{m.rowByID(line.ID), line.Prefix, suffix, fold})
+		var d displayRow
+		switch {
+		case line.Loop:
+			l := m.snapLoop(line.ID)
+			if l == nil {
+				continue
+			}
+			// The loop glyph is its own mark, folded or not: a summary row must
+			// never read as a unit.
+			fold = "⛧"
+			d = m.loopDisplay(*l)
+		case line.Label != "":
+			d = unitRow(m.rowByID(line.ID))
+			d.id = line.Label
+			d.goal = loopChildGoal(line.Label)
+		default:
+			d = unitRow(m.rowByID(line.ID))
+		}
+		rows = append(rows, row{d, line.Prefix, suffix, fold})
 	}
 
 	parts := make([]rowCells, 0, len(rows))
 	for _, r := range rows {
-		parts = append(parts, m.rowParts(r.u, r.prefix, r.suffix, r.fold))
+		parts = append(parts, m.rowParts(r.d, r.prefix, r.suffix, r.fold))
 	}
 	mt := m.metricsOf(parts, max(10, width-1))
 
@@ -639,12 +771,38 @@ func (m viewModel) treeLines(width int) ([]string, int) {
 	cursorLine := 0
 	cursor := m.selectedID()
 	for _, r := range rows {
-		if r.u.ID == cursor {
+		if r.d.u.ID == cursor {
 			cursorLine = len(lines)
 		}
-		lines = append(lines, m.rowLine(r.u, width, r.prefix, r.suffix, r.fold, mt))
+		lines = append(lines, m.rowLine(r.d, width, r.prefix, r.suffix, r.fold, mt))
 	}
 	return lines, cursorLine
+}
+
+// loopDisplay is the loop summary row: the id, its round progress and focus in
+// the goal column, its aggregate state in the status column, and no lane.
+func (m viewModel) loopDisplay(l LoopRow) displayRow {
+	u := m.loopRow(l)
+	return displayRow{
+		u:    u,
+		id:   l.ID,
+		goal: fmt.Sprintf("⟳ %d/%d %s", l.Round, l.Rounds, collapseSpace(l.Focus)),
+		lane: "",
+	}
+}
+
+// loopChildGoal is the short label a generated row shows. The full generated
+// goal stays in the card, which reads the unit itself.
+func loopChildGoal(label string) string {
+	i := strings.LastIndex(label, "-")
+	if i < 0 {
+		return label
+	}
+	kind, round := label[:i], label[i+1:]
+	if kind != "review" && kind != "fix" {
+		return label
+	}
+	return kind + ", round " + round
 }
 
 func (m viewModel) sectionLines(width int) ([]string, int) {
@@ -663,7 +821,7 @@ func (m viewModel) sectionLines(width int) ([]string, int) {
 		}
 		var parts []rowCells
 		for _, u := range rows {
-			parts = append(parts, m.rowParts(u, "", "", ""))
+			parts = append(parts, m.rowParts(unitRow(u), "", "", ""))
 		}
 		mt := m.metricsOf(parts, max(10, width-1))
 
@@ -675,7 +833,7 @@ func (m viewModel) sectionLines(width int) ([]string, int) {
 			if u.ID == cursor {
 				cursorLine = len(lines)
 			}
-			lines = append(lines, m.rowLine(u, width, "", "", "", mt))
+			lines = append(lines, m.rowLine(unitRow(u), width, "", "", "", mt))
 		}
 	}
 	return lines, cursorLine
@@ -693,7 +851,7 @@ func (m viewModel) statusText(u UnitRow) string {
 		return "working"
 	case "waiting":
 		if len(u.WaitsOn) == 1 {
-			return "waits " + u.WaitsOn[0]
+			return "waits " + displayUnitID(m.snap, u.WaitsOn[0])
 		}
 		if len(u.WaitsOn) > 1 {
 			return fmt.Sprintf("waits %d", len(u.WaitsOn))
@@ -730,7 +888,28 @@ func (m viewModel) detailBox(width, height int) string {
 	}
 	inner := width - 4
 	var lines []string
+	if l := m.snapLoop(u.ID); l != nil {
+		lines = m.loopDetailLines(*l, inner)
+	} else {
+		lines = m.unitDetailLines(u, inner)
+	}
 
+	for len(lines) < height-2 {
+		lines = append(lines, "")
+	}
+	lines = lines[:max(0, height-2)]
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		Width(max(10, inner+2)). // lipgloss counts padding inside Width; +2 keeps the box at the frame width
+		Render(strings.Join(lines, "\n"))
+}
+
+// unitDetailLines is the bottom strip for a unit: what it is, what it waits
+// for, and its latest note or change.
+func (m viewModel) unitDetailLines(u UnitRow, inner int) []string {
+	var lines []string
 	head := titleStyle.Render(u.ID) + "  " + statusStyles[u.Status].Render(u.Status)
 	tail := u.Role + " " + u.Minion
 	if u.Pane != "" {
@@ -770,16 +949,30 @@ func (m viewModel) detailBox(width, height int) string {
 	if u.Link != "" {
 		lines = append(lines, dimStyle.Render(truncate("link: "+u.Link, inner)))
 	}
-	for len(lines) < height-2 {
-		lines = append(lines, "")
-	}
-	lines = lines[:max(0, height-2)]
+	return lines
+}
 
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1).
-		Width(max(10, inner+2)). // lipgloss counts padding inside Width; +2 keeps the box at the frame width
-		Render(strings.Join(lines, "\n"))
+// loopDetailLines is the bottom strip for a loop summary row. The row carries
+// the loop, not a unit, so the strip names the round the loop is on and the
+// unit that round is working.
+func (m viewModel) loopDetailLines(l LoopRow, inner int) []string {
+	head := titleStyle.Render(l.ID) + "  " + statusStyles[l.State].Render(l.State) + dimStyle.Render("  loop")
+	lines := []string{head}
+	lines = append(lines, truncate("focus: "+collapseSpace(l.Focus), inner))
+
+	rows := m.loopRounds(l)
+	if len(rows) == 0 {
+		lines = append(lines, dimStyle.Render(truncate(fmt.Sprintf("cap: %d", l.Rounds), inner)))
+	} else {
+		lines = append(lines, dimStyle.Render(truncate(fmt.Sprintf("round %d/%d", l.Round, l.Rounds), inner)))
+		if u, ok := m.roundPick(rows[m.currentRoundIndex(l)]); ok {
+			kind, round, _ := loopChildKind(l.ID, u.ID)
+			now := fmt.Sprintf("%s, round %d", kind, round)
+			lines = append(lines, truncate("now: "+now+" · "+collapseSpace(u.Goal), inner))
+		}
+	}
+	lines = append(lines, dimStyle.Render(truncate("d opens the round timeline", inner)))
+	return lines
 }
 
 func (m viewModel) footerView() string {
@@ -799,9 +992,26 @@ func (m viewModel) footerView() string {
 func idWidth(s Snapshot) int {
 	w := 4
 	for _, u := range s.Units {
-		w = max(w, len(u.ID))
+		w = max(w, runeLen(displayUnitID(s, u.ID)))
+	}
+	for _, l := range s.Loops {
+		w = max(w, runeLen(l.ID))
 	}
 	return w
+}
+
+// displayUnitID drops the loop prefix a generated unit's parent already names.
+// A declared unit keeps its full id even when it starts with a loop id, because
+// only a generated unit is listed under its loop.
+func displayUnitID(s Snapshot, id string) string {
+	for _, l := range s.Loops {
+		for _, generated := range l.Units {
+			if generated == id {
+				return strings.TrimPrefix(id, l.ID+"-")
+			}
+		}
+	}
+	return id
 }
 
 func whereWidth(s Snapshot) int {
@@ -944,8 +1154,14 @@ func viewCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	m = m.applyRefresh(loadSnapshot(*planPath, *statePath))
 	if *detail != "" {
 		for i, id := range m.order {
-			if id == *detail {
-				m.cursor, m.overlay, m.artIdx = i, "detail", 0
+			if id != *detail {
+				continue
+			}
+			m.cursor, m.artIdx, m.cardID = i, 0, ""
+			if l := m.snapLoop(id); l != nil {
+				m.overlay, m.roundIdx = "loop", m.currentRoundIndex(*l)
+			} else {
+				m.overlay = "detail"
 			}
 		}
 		if m.overlay == "" {

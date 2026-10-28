@@ -600,3 +600,570 @@ func TestFailedHasAStyle(t *testing.T) {
 		t.Fatal("the view draws sections from status.go, which must list failed")
 	}
 }
+
+// loopViewWith builds the view against a snapshot made in memory, so a test
+// controls the state and the live panes without touching herdr.
+func loopViewWith(t *testing.T, set map[string]string, agents map[string]Agent) viewModel {
+	t.Helper()
+	st := State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	for id, status := range set {
+		if err := st.SetUnit(id, status, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return loopViewFromState(t, st, agents)
+}
+
+func loopViewFromState(t *testing.T, st State, agents map[string]Agent) viewModel {
+	t.Helper()
+	p := decodeOK(t, loopForestPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	e, f := ExpandLoops(p)
+	if len(f) > 0 {
+		t.Fatalf("expand: %v", f)
+	}
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = e, st
+	m.snap = buildSnapshot(e, "plan.yaml", st, agents)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+	return m
+}
+
+func emptyLoopState() State {
+	return State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+}
+
+func selectID(t *testing.T, m *viewModel, id string) {
+	t.Helper()
+	for i, got := range m.order {
+		if got == id {
+			m.cursor = i
+			return
+		}
+	}
+	t.Fatalf("%q is not in the order %v", id, m.order)
+}
+
+func loopLine(t *testing.T, m viewModel, id string) string {
+	t.Helper()
+	lines, _ := m.treeLines(m.width)
+	for _, line := range lines {
+		if strings.Contains(line, id) {
+			return line
+		}
+	}
+	t.Fatalf("no line for %q in:\n%s", id, strings.Join(lines, "\n"))
+	return ""
+}
+
+func TestLoopSummaryRow(t *testing.T) {
+	m := loopViewWith(t,
+		map[string]string{"A": "done", "polish-review-1": "working"},
+		map[string]Agent{"r1": {Name: "r1", Pane: "w9:p3", Status: "working"}},
+	)
+	lines := strings.Join(mustTreeLines(t, m), "\n")
+
+	for _, want := range []string{
+		"⛧ polish", "⟳ 1/2 correctness", "working w9:p3",
+		"review-1", "review, round 1", "fix-1", "fix, round 1",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Fatalf("missing %q in:\n%s", want, lines)
+		}
+	}
+	if strings.Contains(lines, "polish-review-1") {
+		t.Fatalf("a child row should drop the loop prefix:\n%s", lines)
+	}
+	if strings.Contains(lines, "Review round 1 of loop polish") {
+		t.Fatalf("a child row should show the short label, not the long goal:\n%s", lines)
+	}
+}
+
+func mustTreeLines(t *testing.T, m viewModel) []string {
+	t.Helper()
+	lines, _ := m.treeLines(m.width)
+	return lines
+}
+
+// The child row is short, and the card still holds the full generated goal.
+func TestLoopChildCardKeepsTheFullGoal(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	selectID(t, &m, "polish-review-1")
+	card := m.detailBox(120, 7)
+	if !strings.Contains(card, "Review round 1 of loop polish") {
+		t.Fatalf("the card should show the full goal:\n%s", card)
+	}
+	if !strings.Contains(card, "polish-review-1") {
+		t.Fatalf("the card should name the real unit id:\n%s", card)
+	}
+}
+
+// The status column reads the loop's aggregate state, not one unit's state.
+func TestLoopAggregateStateInTheStatusColumn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		set   map[string]string
+		agent map[string]Agent
+		want  string
+	}{
+		{
+			name: "working wins",
+			set:  map[string]string{"A": "done", "polish-review-1": "working"},
+			agent: map[string]Agent{
+				"r1": {Name: "r1", Pane: "w9:p3", Status: "working"},
+			},
+			want: "working w9:p3",
+		},
+		{
+			name: "a failed review names the loop",
+			set:  map[string]string{"A": "done", "polish-review-1": "failed"},
+			want: "failed",
+		},
+		{
+			name: "a ready review makes the loop ready",
+			set:  map[string]string{"A": "done"},
+			want: "ready",
+		},
+		{
+			name: "an unsatisfied entry dep keeps it waiting",
+			set:  map[string]string{},
+			want: "waiting",
+		},
+		{
+			name: "a passed review makes it done",
+			set: map[string]string{
+				"A": "done", "polish-review-1": "done", "polish-fix-1": "canceled",
+				"polish-review-2": "canceled", "polish-fix-2": "canceled",
+				"polish-review-3": "canceled",
+			},
+			want: "done",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := loopViewWith(t, tc.set, tc.agent)
+			l := m.snapLoop("polish")
+			if l == nil {
+				t.Fatal("no loop row in the snapshot")
+			}
+			c := m.rowParts(m.loopDisplay(*l), "", "", "")
+			if c.right != tc.want {
+				t.Fatalf("status column %q, want %q", c.right, tc.want)
+			}
+		})
+	}
+}
+
+// Fold rules: unstarted folds, started unfolds, an explicit choice wins, and a
+// loop that starts while the view is open unfolds unless the operator folded it.
+func TestLoopFoldRules(t *testing.T) {
+	t.Run("an unstarted loop is folded", func(t *testing.T) {
+		m := loopViewWith(t, map[string]string{}, nil)
+		if got := strings.Join(m.order, ","); got != "A,polish" {
+			t.Fatalf("order %q, want A,polish", got)
+		}
+		if !strings.Contains(mustTreeLines(t, m)[1], "[+5]") {
+			t.Fatalf("a folded loop should say how much it hides:\n%s", strings.Join(mustTreeLines(t, m), "\n"))
+		}
+	})
+
+	t.Run("a started loop unfolds", func(t *testing.T) {
+		m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+		if got := strings.Join(m.order, ","); got != "A,polish,polish-review-1,polish-fix-1,polish-review-2,polish-fix-2,polish-review-3" {
+			t.Fatalf("order %q", got)
+		}
+	})
+
+	t.Run("an explicit fold wins", func(t *testing.T) {
+		m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+		selectID(t, &m, "polish")
+		m = press(t, m, " ", " ")
+		if got := strings.Join(m.order, ","); got != "A,polish" {
+			t.Fatalf("explicit fold left %q", got)
+		}
+	})
+
+	t.Run("an explicit unfold wins", func(t *testing.T) {
+		m := loopViewWith(t, map[string]string{}, nil)
+		selectID(t, &m, "polish")
+		m = press(t, m, " ", " ")
+		if len(m.order) != 7 {
+			t.Fatalf("explicit unfold left %v", m.order)
+		}
+	})
+
+	t.Run("expand all beats the auto fold", func(t *testing.T) {
+		m := loopViewWith(t, map[string]string{}, nil)
+		m = press(t, m, " ", "e")
+		if len(m.order) != 7 {
+			t.Fatalf("expand all left %v", m.order)
+		}
+	})
+}
+
+func saveLoopState(t *testing.T, path string, set map[string]string) {
+	t.Helper()
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Encounter == "" {
+		st.Encounter = "lf"
+	}
+	for id, status := range set {
+		if err := st.SetUnit(id, status, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SaveState(path, st); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An explicit fold and an explicit unfold both survive a refresh. A loop that
+// starts with no operator choice unfolds by itself.
+func TestLoopFoldsSurviveRefresh(t *testing.T) {
+	plan := writePlan(t, loopForestPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	if err := SaveState(state, State{Encounter: "lf", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}); err != nil {
+		t.Fatal(err)
+	}
+	m := newTestView(t, plan, state)
+	m.width, m.height = 120, 40
+	if got := strings.Join(m.order, ","); got != "A,polish" {
+		t.Fatalf("fresh loop order %q", got)
+	}
+
+	// Starting while the view is open unfolds the loop by itself.
+	saveLoopState(t, state, map[string]string{"A": "done", "polish-review-1": "working"})
+	m = m.applyRefresh(loadSnapshot(plan, state))
+	if len(m.order) != 7 {
+		t.Fatalf("a started loop should unfold on refresh, order %v", m.order)
+	}
+
+	// An explicit fold survives both the refresh and the start.
+	selectID(t, &m, "polish")
+	m = press(t, m, " ", " ")
+	if got := strings.Join(m.order, ","); got != "A,polish" {
+		t.Fatalf("explicit fold left %q", got)
+	}
+	saveLoopState(t, state, map[string]string{"polish-review-1": "done", "polish-review-2": "working"})
+	m = m.applyRefresh(loadSnapshot(plan, state))
+	if got := strings.Join(m.order, ","); got != "A,polish" {
+		t.Fatalf("a refresh lost the operator fold: %q", got)
+	}
+
+	// An explicit unfold on an unstarted loop also survives the refresh.
+	other := writePlan(t, loopForestPlan)
+	otherState := filepath.Join(t.TempDir(), "state.json")
+	if err := SaveState(otherState, State{Encounter: "lf", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}); err != nil {
+		t.Fatal(err)
+	}
+	n := newTestView(t, other, otherState)
+	n.width, n.height = 120, 40
+	selectID(t, &n, "polish")
+	n = press(t, n, " ", " ")
+	if len(n.order) != 7 {
+		t.Fatalf("explicit unfold left %v", n.order)
+	}
+	n = n.applyRefresh(loadSnapshot(other, otherState))
+	if len(n.order) != 7 {
+		t.Fatalf("a refresh lost the operator unfold: %v", n.order)
+	}
+}
+
+func openLoopTimeline(t *testing.T, m viewModel) viewModel {
+	t.Helper()
+	selectID(t, &m, "polish")
+	return press(t, m, "enter")
+}
+
+func TestLoopTimelineOpensOnTheSummaryRow(t *testing.T) {
+	for _, key := range []string{"d", "enter"} {
+		t.Run(key, func(t *testing.T) {
+			m := loopViewWith(t, map[string]string{
+				"A": "done", "polish-review-1": "working",
+			}, nil)
+			selectID(t, &m, "polish")
+			m = press(t, m, key)
+			if m.overlay != "loop" {
+				t.Fatalf("%s opened overlay %q, want loop", key, m.overlay)
+			}
+			out := m.View()
+			for _, want := range []string{
+				"polish", "focus:", "correctness", "cap: 2",
+				"current round: 1 of 2", "Merge verdict: PASS",
+				"ROUNDS 3", "round 1", "round 2", "final",
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("missing %q in:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestLoopTimelineShowsBothStatesAndTheFailureNote(t *testing.T) {
+	st := emptyLoopState()
+	if err := st.SetUnit("A", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUnit("polish-review-1", "failed",
+		`wanted verdict "Merge verdict: PASS", last Merge verdict: Merge verdict: FAIL`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUnit("polish-fix-1", "working", ""); err != nil {
+		t.Fatal(err)
+	}
+	m := loopViewFromState(t, st, nil)
+	m = openLoopTimeline(t, m)
+	out := m.View()
+
+	if !strings.Contains(out, "review failed") {
+		t.Fatalf("a round row should name the review state:\n%s", out)
+	}
+	if !strings.Contains(out, "fix working") {
+		t.Fatalf("a round row should name the fix state:\n%s", out)
+	}
+	if !strings.Contains(out, "Merge verdict: FAIL") {
+		t.Fatalf("a failed verdict should name its note:\n%s", out)
+	}
+}
+
+func TestLoopTimelineMovesBetweenRounds(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	m = openLoopTimeline(t, m)
+	if m.roundIdx != 0 {
+		t.Fatalf("timeline opened on round index %d, want 0", m.roundIdx)
+	}
+	m = press(t, m, "j")
+	if m.roundIdx != 1 {
+		t.Fatalf("j moved to %d, want 1", m.roundIdx)
+	}
+	m = press(t, m, "j")
+	if m.roundIdx != 2 {
+		t.Fatalf("j moved to %d, want 2", m.roundIdx)
+	}
+	m = press(t, m, "j")
+	if m.roundIdx != 0 {
+		t.Fatalf("j should wrap to 0, got %d", m.roundIdx)
+	}
+	m = press(t, m, "k")
+	if m.roundIdx != 2 {
+		t.Fatalf("k should wrap to 2, got %d", m.roundIdx)
+	}
+	m = press(t, m, "g")
+	if m.roundIdx != 0 {
+		t.Fatalf("g moved to %d, want 0", m.roundIdx)
+	}
+	m = press(t, m, "G")
+	if m.roundIdx != 2 {
+		t.Fatalf("G moved to %d, want 2", m.roundIdx)
+	}
+}
+
+func TestLoopRoundCardOpensAndEscGoesBack(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	m = openLoopTimeline(t, m)
+	m = press(t, m, "enter")
+	if m.overlay != "detail" {
+		t.Fatalf("enter opened overlay %q, want detail", m.overlay)
+	}
+	if m.cardID != "polish-review-1" {
+		t.Fatalf("card unit %q, want polish-review-1", m.cardID)
+	}
+	out := m.View()
+	if !strings.Contains(out, "polish-review-1") || !strings.Contains(out, "Review round 1 of loop polish") {
+		t.Fatalf("the round card should show the full unit:\n%s", out)
+	}
+
+	m = press(t, m, "esc")
+	if m.overlay != "loop" || m.cardID != "" {
+		t.Fatalf("esc left overlay %q card %q, want back on the timeline", m.overlay, m.cardID)
+	}
+	m = press(t, m, "esc")
+	if m.overlay != "" {
+		t.Fatalf("a second esc should close the timeline, overlay %q", m.overlay)
+	}
+}
+
+func TestLoopRoundCardPicksTheLiveUnit(t *testing.T) {
+	m := loopViewWith(t, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "done", "polish-fix-2": "working",
+	}, nil)
+	m = openLoopTimeline(t, m) // the timeline opens on the current round, 2
+	m = press(t, m, "enter")
+	if m.cardID != "polish-fix-2" {
+		t.Fatalf("a round with a working fix should open it, got %q", m.cardID)
+	}
+}
+
+func TestLoopTimelineFocusTargetsTheSelectedRound(t *testing.T) {
+	m := loopViewWith(t, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "working",
+	}, map[string]Agent{"r1": {Name: "r1", Pane: "w9:p3", Status: "working"}})
+	m = openLoopTimeline(t, m) // the timeline opens on the current round, 2
+	u, ok := m.focusTarget()
+	if !ok || u.ID != "polish-review-2" || u.Minion != "r1" || u.Pane != "w9:p3" {
+		t.Fatalf("focus target %+v, want the live review of round 2", u)
+	}
+
+	// A working fix in the same round wins over the review.
+	m = loopViewWith(t, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "done", "polish-fix-2": "working",
+	}, map[string]Agent{"w1": {Name: "w1", Pane: "w9:p4", Status: "working"}})
+	m = openLoopTimeline(t, m)
+	u, ok = m.focusTarget()
+	if !ok || u.ID != "polish-fix-2" || u.Minion != "w1" {
+		t.Fatalf("focus target %+v, want the live fix of round 2", u)
+	}
+}
+
+func TestLoopTimelineIsEmptyBeforeExpansion(t *testing.T) {
+	p := decodeOK(t, loopForestPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	st := emptyLoopState()
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = p, st
+	m.snap = buildSnapshot(p, "plan.yaml", st, nil)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+
+	m = openLoopTimeline(t, m)
+	if m.overlay != "loop" {
+		t.Fatalf("overlay %q, want loop", m.overlay)
+	}
+	out := m.View()
+	if !strings.Contains(out, "no rounds yet") {
+		t.Fatalf("an unexpanded loop should show an empty timeline:\n%s", out)
+	}
+	// Keys on an empty timeline are harmless.
+	m = press(t, m, "j", "k", "enter")
+	if m.overlay != "loop" {
+		t.Fatalf("enter on an empty timeline changed the overlay to %q", m.overlay)
+	}
+}
+
+func TestViewDetailFlagOpensTheLoopTimeline(t *testing.T) {
+	plan := writePlan(t, loopForestPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	code, stdout, stderr := runCLI("view", "--once", "--plan", plan, "--state", state, "--detail", "polish")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{"polish  ", "current round:", "ROUNDS", "round 1"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("missing %q in:\n%s", want, stdout)
+		}
+	}
+}
+
+// The always-visible strip shows the loop when the cursor is on its summary
+// row, not a blank unit card.
+func TestDetailBoxShowsTheLoop(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	selectID(t, &m, "polish")
+
+	box := m.detailBox(120, 7)
+	if n := len(strings.Split(box, "\n")); n != 7 {
+		t.Fatalf("loop detail box is %d lines, want 7:\n%s", n, box)
+	}
+	for _, want := range []string{
+		"polish", "working", "focus: correctness", "round 1/2",
+		"now: review, round 1", "Review round 1 of loop polish",
+		"d opens the round timeline",
+	} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("missing %q in the loop detail box:\n%s", want, box)
+		}
+	}
+
+	// The same strip is what the first frame draws under the tree.
+	if out := m.View(); !strings.Contains(out, "d opens the round timeline") {
+		t.Fatalf("the first frame should show the loop strip:\n%s", out)
+	}
+}
+
+// An unexpanded loop has no round to name, so the strip shows its focus and
+// cap only.
+func TestDetailBoxForAnUnexpandedLoop(t *testing.T) {
+	p := decodeOK(t, loopForestPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	st := emptyLoopState()
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = p, st
+	m.snap = buildSnapshot(p, "plan.yaml", st, nil)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+	selectID(t, &m, "polish")
+
+	box := m.detailBox(120, 7)
+	for _, want := range []string{"focus: correctness", "cap: 2", "d opens the round timeline"} {
+		if !strings.Contains(box, want) {
+			t.Fatalf("missing %q in the loop detail box:\n%s", want, box)
+		}
+	}
+	for _, unwanted := range []string{"round 1/2", "now:"} {
+		if strings.Contains(box, unwanted) {
+			t.Fatalf("an unexpanded loop should not show %q:\n%s", unwanted, box)
+		}
+	}
+}
+
+const authCheckPlan = `encounter: ap
+minions:
+  - {id: w1, role: worker, worktree: wt1}
+  - {id: r1, role: reviewer, of: w1}
+units:
+  - {id: auth-check, minion: w1, paths: [a/**], goal: holds the check}
+  - {id: B, minion: w1, paths: [b/**], deps: [auth-check], goal: waits}
+loops:
+  - {id: auth, reviewer: r1, fixer: w1, rounds: 1, focus: correctness,
+     pass: "Merge verdict: PASS", paths: [a/**]}
+`
+
+// Only a generated unit loses its loop prefix. A declared unit that starts
+// with a loop id keeps its full id, including in a waits label.
+func TestDisplayUnitIDOnlyStripsGeneratedIDs(t *testing.T) {
+	p := decodeOK(t, authCheckPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	e, f := ExpandLoops(p)
+	if len(f) > 0 {
+		t.Fatalf("expand: %v", f)
+	}
+	st := emptyLoopState()
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = e, st
+	m.snap = buildSnapshot(e, "plan.yaml", st, nil)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+
+	if got := displayUnitID(m.snap, "auth-check"); got != "auth-check" {
+		t.Fatalf("a declared unit became %q, want auth-check", got)
+	}
+	if got := displayUnitID(m.snap, "auth-review-1"); got != "review-1" {
+		t.Fatalf("a generated unit became %q, want review-1", got)
+	}
+
+	lines := strings.Join(mustTreeLines(t, m), "\n")
+	if !strings.Contains(lines, "waits auth-check") {
+		t.Fatalf("a declared dep should keep its full id:\n%s", lines)
+	}
+	if strings.Contains(lines, "waits check") {
+		t.Fatalf("a declared dep lost its loop prefix:\n%s", lines)
+	}
+	if strings.Contains(lines, "auth-review-1") {
+		t.Fatalf("a generated unit should show its stripped id:\n%s", lines)
+	}
+}

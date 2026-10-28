@@ -350,6 +350,14 @@ func checkLoops(loops []Loop, roleOf map[string]string, unitIDs map[string]bool)
 		if len(l.Paths) == 0 {
 			f = append(f, Finding{ENoPaths, at + ".paths", "loop must declare the paths the fixer owns"})
 		}
+		for j, d := range l.Deps {
+			if !unitIDs[d] {
+				f = append(f, Finding{
+					EMissingDep, fmt.Sprintf("%s.deps[%d]", at, j),
+					fmt.Sprintf("dep %q is not a declared unit", d),
+				})
+			}
+		}
 	}
 	return f
 }

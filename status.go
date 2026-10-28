@@ -47,6 +47,22 @@ type MinionRow struct {
 	Unit   string `json:"unit,omitempty"`
 }
 
+// LoopRow is one loop as one thing: its declaration, its round progress and
+// the action it is on. Units are the generated unit ids, in round order.
+type LoopRow struct {
+	ID       string   `json:"id"`
+	Focus    string   `json:"focus"`
+	Rounds   int      `json:"rounds"`
+	Reviewer string   `json:"reviewer"`
+	Fixer    string   `json:"fixer"`
+	Pass     string   `json:"pass"`
+	Started  bool     `json:"started"`
+	Passed   bool     `json:"passed"`
+	Round    int      `json:"round"`
+	State    string   `json:"state"`
+	Units    []string `json:"units"`
+}
+
 type Snapshot struct {
 	Encounter string         `json:"encounter"`
 	PlanPath  string         `json:"plan_path"`
@@ -56,6 +72,7 @@ type Snapshot struct {
 	Counts    map[string]int `json:"counts"`
 	Units     []UnitRow      `json:"units"`
 	Minions   []MinionRow    `json:"minions"`
+	Loops     []LoopRow      `json:"loops"`
 }
 
 // buildSnapshot derives readiness from the plan and the state. "ready" and
@@ -141,7 +158,141 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 		row.Unit = unitByMinion[m.ID]
 		s.Minions = append(s.Minions, row)
 	}
+	s.Loops = buildLoopRows(plan, &st)
 	return s
+}
+
+// buildLoopRows reads the expanded plan, so a generated unit is found by its
+// Loop tag. A plan that was never expanded has no loop units: the row still
+// names the loop and waits.
+func buildLoopRows(p Plan, st *State) []LoopRow {
+	var rows []LoopRow
+	for _, l := range p.Loops {
+		row := LoopRow{
+			ID:       l.ID,
+			Focus:    l.Focus,
+			Rounds:   l.Rounds,
+			Reviewer: l.Reviewer,
+			Fixer:    l.Fixer,
+			Pass:     l.Pass,
+		}
+		for _, u := range p.Units {
+			if u.Loop != l.ID {
+				continue
+			}
+			row.Units = append(row.Units, u.ID)
+			status := st.UnitStatus(u.ID)
+			if status != "planned" {
+				row.Started = true
+			}
+			if u.Kind == "review" && status == "done" {
+				row.Passed = true
+			}
+		}
+		row.Round = loopRound(p, st, row.Units, l.Rounds)
+		row.State = loopState(p, st, row.Units)
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// loopRound is the round the loop is on now. The first unsettled unit names
+// it. A finished loop falls back to its last live round, clamped to the cap,
+// because the final review judges the last fix without adding a round.
+func loopRound(p Plan, st *State, units []string, cap int) int {
+	round := 0
+	for _, id := range units {
+		status := st.UnitStatus(id)
+		// A failed review has had its say, and an unproven fix waits for the
+		// next review. Both mean the loop has moved on to its round.
+		if status == "done" || status == "canceled" || status == "failed" || status == "unproven" {
+			continue
+		}
+		if u, ok := findUnit(p, id); ok {
+			round = u.Round
+			break
+		}
+	}
+	if round == 0 {
+		for _, id := range units {
+			if st.UnitStatus(id) == "canceled" {
+				continue
+			}
+			if u, ok := findUnit(p, id); ok && u.Round > round {
+				round = u.Round
+			}
+		}
+	}
+	if round < 1 {
+		round = 1
+	}
+	if cap > 0 && round > cap {
+		round = cap
+	}
+	return round
+}
+
+// loopState is the loop's current action, most urgent first: working, failed,
+// ready, done, waiting. A failed review is called out even when its fix is
+// already ready, because the failure is what the operator needs to see.
+func loopState(p Plan, st *State, units []string) string {
+	if len(units) == 0 {
+		return "waiting"
+	}
+	working, ready, settled := false, false, true
+	for _, id := range units {
+		switch st.UnitStatus(id) {
+		case "working":
+			working = true
+			settled = false
+		case "planned":
+			settled = false
+			if u, ok := findUnit(p, id); ok && unitReady(p, st, u) {
+				ready = true
+			}
+		case "done", "canceled":
+		default:
+			settled = false
+		}
+	}
+	switch {
+	case working:
+		return "working"
+	case lastReviewFailed(p, st, units):
+		return "failed"
+	case ready:
+		return "ready"
+	case settled:
+		return "done"
+	default:
+		return "waiting"
+	}
+}
+
+// lastReviewFailed reads the newest review that has an outcome. An unstarted
+// or canceled review says nothing about the loop.
+func lastReviewFailed(p Plan, st *State, units []string) bool {
+	for i := len(units) - 1; i >= 0; i-- {
+		u, ok := findUnit(p, units[i])
+		if !ok || u.Kind != "review" {
+			continue
+		}
+		switch st.UnitStatus(u.ID) {
+		case "planned", "canceled":
+			continue
+		}
+		return st.UnitStatus(u.ID) == "failed"
+	}
+	return false
+}
+
+func unitReady(p Plan, st *State, u Unit) bool {
+	for _, d := range u.Deps {
+		if !depSatisfied(p, st, d) {
+			return false
+		}
+	}
+	return true
 }
 
 // markPlanDrift compares the plan on disk with the hash recorded at dispatch.
@@ -226,6 +377,22 @@ func renderText(w io.Writer, s Snapshot) {
 				line += "  " + m.Unit
 			}
 			fmt.Fprintln(w, strings.TrimRight(line, " "))
+		}
+	}
+
+	if len(s.Loops) > 0 {
+		idW, focW, roundW := 4, 5, 6
+		rounds := make([]string, len(s.Loops))
+		for i, l := range s.Loops {
+			idW = max(idW, len(l.ID))
+			focW = max(focW, len(collapseLine(l.Focus)))
+			rounds[i] = fmt.Sprintf("round %d/%d", l.Round, l.Rounds)
+			roundW = max(roundW, len(rounds[i]))
+		}
+		fmt.Fprintf(w, "\nLOOPS (%d)\n", len(s.Loops))
+		for i, l := range s.Loops {
+			fmt.Fprintf(w, "  %s  %s  %s  %s\n",
+				pad(l.ID, idW), pad(collapseLine(l.Focus), focW), pad(rounds[i], roundW), l.State)
 		}
 	}
 

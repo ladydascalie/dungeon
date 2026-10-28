@@ -141,8 +141,12 @@ N rounds expand to 2N+1 units: review-1, fix-1, ..., review-N, fix-N,
 review-N+1. Every fixer pass is judged, including the last.
 
 That example expands to `auth-review-1`, `auth-fix-1`, `auth-review-2`,
-`auth-fix-2` and `auth-review-3`. The first review has no deps. Each fix
-depends on its review. Each review after the first depends on the fix before it.
+`auth-fix-2` and `auth-review-3`. Each fix depends on its review. Each review
+after the first depends on the fix before it.
+
+A loop may declare `deps` for its first review, for example `deps: [recon]`.
+The ids must be declared units. The loop then reviews work that has landed
+instead of racing it. Without `deps` the first review has no deps.
 
 `rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
 a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
@@ -164,6 +168,20 @@ dependants. An ordinary unproven unit does not.
 A passing review promotes the fix before it from `unproven` to `done`, with the
 note `proved by <review>`, so `land` carries that fix's branch. A failed review
 promotes nothing.
+
+In the view, a loop is one summary row marked `⛧`: the loop id, `⟳ N/cap` and
+the focus, then the loop state and live pane. Each review hangs under it in
+round order, and its fix hangs under the review. The final review has no fix. A
+child row shows `review-1` or `fix-1`, and `review, round N` or `fix, round N`
+as its goal. An unstarted loop is folded. A started loop unfolds. An explicit
+fold or unfold wins and survives a refresh.
+
+`d` or `enter` on a loop summary row opens the round timeline: loop, focus, cap,
+current round, pass line, and one row per round with the review and fix state. A
+failed verdict prints its note. `j` and `k` move between rounds, `enter` opens
+the round's live unit card, `esc` goes back to the timeline, and `space f` jumps
+to the round's lane. `dungeon status` ends with a LOOPS block naming each loop
+and its state.
 
 ## The loop
 
@@ -271,6 +289,10 @@ The lane owns the fix. Your moves, in order:
 files kept with it, and its link. `j`/`k` or `tab` picks a file, `enter` reads it, `esc`
 steps back, `space o` opens the unit's link in the browser, `space f` jumps to
 its lane.
+
+On a loop summary row, `d` or `enter` opens the round timeline instead of a unit
+card. From there `enter` opens a round's unit card, `esc` goes back to the
+timeline, and `space f` jumps to the selected round's lane.
 
 A brief or a report is markdown, and the reader renders it: headings, lists,
 emphasis and code blocks all survive. Write them as markdown and the operator
