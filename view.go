@@ -49,17 +49,42 @@ type refreshedMsg struct {
 
 type focusMsg struct{ err error }
 
-// focusCmd jumps the operator to the selected unit's lane. A live agent is
+// focusCmd jumps the operator to the chosen unit's lane. A live agent is
 // exact; with none, the pane hint recorded at spawn is used.
 func (m viewModel) focusCmd() tea.Cmd {
-	u, ok := m.selected()
+	u, ok := m.focusTarget()
 	if !ok {
 		return nil
 	}
 	minion, hint := u.Minion, m.state.Minions[u.Minion].Pane
+	if u.Pane != "" {
+		hint = u.Pane
+	}
 	return func() tea.Msg {
 		return focusMsg{err: newHerdrClient().focus(context.Background(), minion, hint)}
 	}
+}
+
+// focusTarget is the unit the operator means when they press space f. In the
+// loop timeline that is the selected round's live unit; in a card opened from
+// one it is that card's unit; on a loop summary row it is the loop's live unit.
+func (m viewModel) focusTarget() (UnitRow, bool) {
+	if m.overlay == "loop" {
+		return m.roundUnit()
+	}
+	if m.cardID != "" {
+		return m.rowByID(m.cardID), true
+	}
+	u, ok := m.selected()
+	if !ok {
+		return u, false
+	}
+	if l := m.snapLoop(u.ID); l != nil {
+		if live, ok := m.liveLoopUnit(*l); ok {
+			return live, true
+		}
+	}
+	return u, true
 }
 
 type viewModel struct {
@@ -80,8 +105,10 @@ type viewModel struct {
 	choice      int
 
 	notice         string // the last thing that went wrong, shown in the footer until the next key
-	overlay        string // "", "detail" or "reader"
+	overlay        string // "", "detail", "reader" or "loop"
 	artIdx         int
+	cardID         string // the unit shown in a detail card opened from a loop round
+	roundIdx       int    // the selected round in the loop timeline
 	reader         string
 	readerLines    []string
 	readerTop      int
@@ -197,7 +224,12 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			return m, tea.Quit
 		case "d", "enter":
-			m.overlay, m.artIdx = "detail", 0
+			if l := m.snapLoop(m.selectedID()); l != nil {
+				m.overlay, m.cardID = "loop", ""
+				m.roundIdx = m.currentRoundIndex(*l)
+			} else {
+				m.overlay, m.cardID, m.artIdx = "detail", "", 0
+			}
 		case "j", "down":
 			m.cursor++
 		case "k", "up":
@@ -240,7 +272,7 @@ func (m *viewModel) runPrefix(key string) tea.Cmd {
 	case " ":
 		m.toggleFold()
 	case "o":
-		u, ok := m.selected()
+		u, ok := m.cardRow()
 		if !ok || u.Link == "" {
 			m.notice = "no link on this unit"
 			return nil
@@ -554,6 +586,16 @@ func (m viewModel) selected() (UnitRow, bool) {
 	return m.rowByID(id), true
 }
 
+// cardRow is the unit a detail card shows. A card opened from a loop round
+// names its unit; every other card follows the cursor.
+func (m viewModel) cardRow() (UnitRow, bool) {
+	if m.cardID != "" {
+		u := m.rowByID(m.cardID)
+		return u, u.ID != ""
+	}
+	return m.selected()
+}
+
 func (m viewModel) render() string {
 	if m.choiceMode() {
 		return m.choiceView()
@@ -566,6 +608,8 @@ func (m viewModel) render() string {
 	switch {
 	case m.help:
 		body = m.helpView()
+	case m.overlay == "loop":
+		body = m.loopOverlay()
 	case m.overlay == "detail":
 		body = m.detailOverlay()
 	case m.overlay == "reader":
@@ -589,7 +633,7 @@ func (m viewModel) helpView() string {
 	keys := []string{
 		"j / k      move",
 		"g / G      first and last",
-		"enter / d  detail pane for the selected unit",
+		"enter / d  detail pane for the selected unit or loop",
 		"esc        close the overlay or legend",
 		"ctrl+c     quit",
 		"",
@@ -1071,8 +1115,14 @@ func viewCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	m = m.applyRefresh(loadSnapshot(*planPath, *statePath))
 	if *detail != "" {
 		for i, id := range m.order {
-			if id == *detail {
-				m.cursor, m.overlay, m.artIdx = i, "detail", 0
+			if id != *detail {
+				continue
+			}
+			m.cursor, m.artIdx, m.cardID = i, 0, ""
+			if l := m.snapLoop(id); l != nil {
+				m.overlay, m.roundIdx = "loop", m.currentRoundIndex(*l)
+			} else {
+				m.overlay = "detail"
 			}
 		}
 		if m.overlay == "" {

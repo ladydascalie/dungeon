@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,7 +72,7 @@ func (m viewModel) artifacts(u UnitRow) []artifact {
 }
 
 func (m viewModel) detailOverlay() string {
-	u, ok := m.selected()
+	u, ok := m.cardRow()
 	if !ok {
 		return dimStyle.Render("no units")
 	}
@@ -143,7 +144,11 @@ func (m viewModel) detailOverlay() string {
 		Padding(0, 1).
 		Width(inner).
 		Render(b.String())
-	hint := dimStyle.Render("j/k file · enter read · d close")
+	back := "d close"
+	if m.cardID != "" {
+		back = "esc back"
+	}
+	hint := dimStyle.Render("j/k file · enter read · " + back)
 	return lipgloss.Place(m.width, max(4, m.height-5), lipgloss.Center, lipgloss.Center, box) + "\n" + hint
 }
 
@@ -196,7 +201,7 @@ func (m viewModel) readerView() string {
 }
 
 func (m *viewModel) openArtifact() {
-	u, ok := m.selected()
+	u, ok := m.cardRow()
 	if !ok {
 		return
 	}
@@ -228,9 +233,9 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 	case "detail":
 		switch key {
 		case "d":
-			m.overlay = ""
+			m.closeCard()
 		case "esc":
-			m.overlay = ""
+			m.closeCard()
 		case "j", "down", "tab", "l", "right":
 			if n := len(m.artifacts(m.mustSelected())); n > 0 {
 				m.artIdx = (m.artIdx + 1) % n
@@ -241,6 +246,31 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 			}
 		case "enter":
 			m.openArtifact()
+		default:
+			return false
+		}
+		return true
+	case "loop":
+		rows := m.selectedLoopRounds()
+		switch key {
+		case "esc", "d":
+			m.overlay, m.cardID = "", ""
+		case "j", "down":
+			if len(rows) > 0 {
+				m.roundIdx = (m.roundIdx + 1) % len(rows)
+			}
+		case "k", "up":
+			if len(rows) > 0 {
+				m.roundIdx = (m.roundIdx + len(rows) - 1) % len(rows)
+			}
+		case "g", "home":
+			m.roundIdx = 0
+		case "G", "end":
+			if len(rows) > 0 {
+				m.roundIdx = len(rows) - 1
+			}
+		case "enter":
+			m.openRoundCard()
 		default:
 			return false
 		}
@@ -270,8 +300,263 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 }
 
 func (m viewModel) mustSelected() UnitRow {
-	u, _ := m.selected()
+	u, _ := m.cardRow()
 	return u
+}
+
+// closeCard closes a card. A card opened from the loop timeline goes back to
+// the timeline; every other card returns to the list.
+func (m *viewModel) closeCard() {
+	if m.cardID != "" {
+		m.cardID = ""
+		m.overlay = "loop"
+		return
+	}
+	m.overlay = ""
+}
+
+// A loop round pairs a review with the fix it judges. The final review has no
+// fix of its own: it judges the last round's fix.
+type loopRoundRow struct {
+	Round     int
+	Final     bool
+	Review    UnitRow
+	Fix       UnitRow
+	hasReview bool
+	hasFix    bool
+}
+
+// loopChildKind reads the kind and round back out of a generated unit id. The
+// loop row names the loop, so the suffix carries the rest.
+func loopChildKind(loopID, unitID string) (string, int, bool) {
+	rest := strings.TrimPrefix(unitID, loopID+"-")
+	if rest == unitID {
+		return "", 0, false
+	}
+	i := strings.LastIndex(rest, "-")
+	if i < 0 {
+		return "", 0, false
+	}
+	kind := rest[:i]
+	if kind != "review" && kind != "fix" {
+		return "", 0, false
+	}
+	round, err := strconv.Atoi(rest[i+1:])
+	if err != nil {
+		return "", 0, false
+	}
+	return kind, round, true
+}
+
+// loopRounds is one row per round, plus the final review when the loop has
+// generated units. A loop with no generated units has no timeline rows.
+func (m viewModel) loopRounds(l LoopRow) []loopRoundRow {
+	if len(l.Units) == 0 || l.Rounds < 1 {
+		return nil
+	}
+	rows := make([]loopRoundRow, l.Rounds)
+	for i := range rows {
+		rows[i].Round = i + 1
+	}
+	var final *loopRoundRow
+	for _, id := range l.Units {
+		kind, round, ok := loopChildKind(l.ID, id)
+		if !ok {
+			continue
+		}
+		u := m.unitByID(id)
+		if u.ID == "" {
+			continue
+		}
+		if kind == "review" && round == l.Rounds+1 {
+			final = &loopRoundRow{Round: round, Final: true, Review: u, hasReview: true}
+			continue
+		}
+		if round < 1 || round > l.Rounds {
+			continue
+		}
+		switch kind {
+		case "review":
+			rows[round-1].Review, rows[round-1].hasReview = u, true
+		case "fix":
+			rows[round-1].Fix, rows[round-1].hasFix = u, true
+		}
+	}
+	if final != nil {
+		rows = append(rows, *final)
+	}
+	return rows
+}
+
+func (m viewModel) selectedLoop() *LoopRow {
+	return m.snapLoop(m.selectedID())
+}
+
+func (m viewModel) selectedLoopRounds() []loopRoundRow {
+	l := m.selectedLoop()
+	if l == nil {
+		return nil
+	}
+	return m.loopRounds(*l)
+}
+
+// currentRoundIndex opens the timeline on the loop's current round.
+func (m viewModel) currentRoundIndex(l LoopRow) int {
+	rows := m.loopRounds(l)
+	if len(rows) == 0 {
+		return 0
+	}
+	for i, r := range rows {
+		if !r.Final && r.Round == l.Round {
+			return i
+		}
+	}
+	return min(max(l.Round-1, 0), len(rows)-1)
+}
+
+// roundPick is the unit a round's card and lane mean: the live one when there
+// is one, else the review that judges the round.
+func (m viewModel) roundPick(r loopRoundRow) (UnitRow, bool) {
+	candidates := make([]UnitRow, 0, 2)
+	if r.hasReview {
+		candidates = append(candidates, r.Review)
+	}
+	if r.hasFix {
+		candidates = append(candidates, r.Fix)
+	}
+	if len(candidates) == 0 {
+		return UnitRow{}, false
+	}
+	for _, working := range []bool{true, false} {
+		for _, u := range candidates {
+			if u.Status == "working" && (!working || u.Pane != "") {
+				return u, true
+			}
+		}
+	}
+	for _, u := range candidates {
+		if u.Pane != "" {
+			return u, true
+		}
+	}
+	return candidates[0], true
+}
+
+func (m viewModel) roundUnit() (UnitRow, bool) {
+	rows := m.selectedLoopRounds()
+	if m.roundIdx < 0 || m.roundIdx >= len(rows) {
+		return UnitRow{}, false
+	}
+	return m.roundPick(rows[m.roundIdx])
+}
+
+// liveLoopUnit is the loop's live lane, used when space f is pressed on the
+// summary row itself.
+func (m viewModel) liveLoopUnit(l LoopRow) (UnitRow, bool) {
+	var any UnitRow
+	for _, id := range l.Units {
+		u := m.unitByID(id)
+		if u.ID == "" {
+			continue
+		}
+		if any.ID == "" {
+			any = u
+		}
+		if u.Status == "working" && u.Pane != "" {
+			return u, true
+		}
+	}
+	for _, id := range l.Units {
+		u := m.unitByID(id)
+		if u.Status == "working" {
+			return u, true
+		}
+	}
+	for _, id := range l.Units {
+		u := m.unitByID(id)
+		if u.Pane != "" {
+			return u, true
+		}
+	}
+	return any, any.ID != ""
+}
+
+func (m *viewModel) openRoundCard() {
+	u, ok := m.roundUnit()
+	if !ok {
+		return
+	}
+	m.cardID = u.ID
+	m.artIdx = 0
+	m.overlay = "detail"
+}
+
+// loopOverlay is the round timeline: what the loop is, where it is, and one
+// line per round with the review and the fix that round produced.
+func (m viewModel) loopOverlay() string {
+	l := m.selectedLoop()
+	if l == nil {
+		return dimStyle.Render("no loop")
+	}
+	inner := max(20, min(m.width-6, 110))
+	var b strings.Builder
+
+	head := titleStyle.Render(l.ID) + "  " + statusStyles[l.State].Render(l.State) + dimStyle.Render("  loop")
+	b.WriteString(head + "\n\n")
+	b.WriteString("focus: " + wrap(collapseSpace(l.Focus), inner-7) + "\n")
+	b.WriteString(fmt.Sprintf("cap: %d · current round: %d of %d\n", l.Rounds, l.Round, l.Rounds))
+	b.WriteString("pass: " + wrap(collapseSpace(l.Pass), inner-6) + "\n")
+
+	rows := m.loopRounds(*l)
+	b.WriteString("\n" + sectionStyle.Render(fmt.Sprintf("ROUNDS %d", len(rows))) + "\n")
+	if len(rows) == 0 {
+		b.WriteString(dimStyle.Render("no rounds yet. the loop expands when it is dispatched.") + "\n")
+	}
+	for i, r := range rows {
+		mark := "  "
+		if i == m.roundIdx {
+			mark = "▸ "
+		}
+		label := fmt.Sprintf("round %d", r.Round)
+		if r.Final {
+			label = "final"
+		}
+		review, fix := "-", "-"
+		if r.hasReview {
+			review = r.Review.Status
+		}
+		if r.hasFix {
+			fix = r.Fix.Status
+		}
+		line := truncate(fmt.Sprintf("%s%s  review %-9s  fix %-9s", mark, pad(label, 7), review, fix), inner)
+		if i == m.roundIdx {
+			b.WriteString(selectedStyle.Render(line) + "\n")
+		} else {
+			b.WriteString(line + "\n")
+		}
+		// A failed verdict carries the reason in the unit's note. Name it under
+		// the round, so the operator sees what the reviewer actually saw.
+		note := ""
+		if r.hasReview && r.Review.Status == "failed" {
+			note = r.Review.Note
+		}
+		if note == "" && r.hasFix && r.Fix.Status == "failed" {
+			note = r.Fix.Note
+		}
+		if note != "" {
+			for _, line := range strings.Split(wrap("note: "+collapseSpace(note), max(10, inner-4)), "\n") {
+				b.WriteString(dimStyle.Render("    "+line) + "\n")
+			}
+		}
+	}
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		Width(inner).
+		Render(b.String())
+	hint := dimStyle.Render("j/k round · enter card · space f lane · esc close")
+	return lipgloss.Place(m.width, max(4, m.height-5), lipgloss.Center, lipgloss.Center, box) + "\n" + hint
 }
 
 func humanSize(n int64) string {

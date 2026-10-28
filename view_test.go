@@ -605,6 +605,17 @@ func TestFailedHasAStyle(t *testing.T) {
 // controls the state and the live panes without touching herdr.
 func loopViewWith(t *testing.T, set map[string]string, agents map[string]Agent) viewModel {
 	t.Helper()
+	st := State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	for id, status := range set {
+		if err := st.SetUnit(id, status, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return loopViewFromState(t, st, agents)
+}
+
+func loopViewFromState(t *testing.T, st State, agents map[string]Agent) viewModel {
+	t.Helper()
 	p := decodeOK(t, loopForestPlan)
 	if f := Validate(p); len(f) > 0 {
 		t.Fatalf("plan is not valid: %v", f)
@@ -613,18 +624,16 @@ func loopViewWith(t *testing.T, set map[string]string, agents map[string]Agent) 
 	if len(f) > 0 {
 		t.Fatalf("expand: %v", f)
 	}
-	st := State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
-	for id, status := range set {
-		if err := st.SetUnit(id, status, ""); err != nil {
-			t.Fatal(err)
-		}
-	}
 	m := newViewModel("plan.yaml", "state.json", time.Second)
 	m.plan, m.state = e, st
 	m.snap = buildSnapshot(e, "plan.yaml", st, agents)
 	m.width, m.height = 120, 40
 	m.rebuildOrder("")
 	return m
+}
+
+func emptyLoopState() State {
+	return State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
 }
 
 func selectID(t *testing.T, m *viewModel, id string) {
@@ -862,5 +871,196 @@ func TestLoopFoldsSurviveRefresh(t *testing.T) {
 	n = n.applyRefresh(loadSnapshot(other, otherState))
 	if len(n.order) != 7 {
 		t.Fatalf("a refresh lost the operator unfold: %v", n.order)
+	}
+}
+
+func openLoopTimeline(t *testing.T, m viewModel) viewModel {
+	t.Helper()
+	selectID(t, &m, "polish")
+	return press(t, m, "enter")
+}
+
+func TestLoopTimelineOpensOnTheSummaryRow(t *testing.T) {
+	for _, key := range []string{"d", "enter"} {
+		t.Run(key, func(t *testing.T) {
+			m := loopViewWith(t, map[string]string{
+				"A": "done", "polish-review-1": "working",
+			}, nil)
+			selectID(t, &m, "polish")
+			m = press(t, m, key)
+			if m.overlay != "loop" {
+				t.Fatalf("%s opened overlay %q, want loop", key, m.overlay)
+			}
+			out := m.View()
+			for _, want := range []string{
+				"polish", "focus:", "correctness", "cap: 2",
+				"current round: 1 of 2", "Merge verdict: PASS",
+				"ROUNDS 3", "round 1", "round 2", "final",
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("missing %q in:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestLoopTimelineShowsBothStatesAndTheFailureNote(t *testing.T) {
+	st := emptyLoopState()
+	if err := st.SetUnit("A", "done", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUnit("polish-review-1", "failed",
+		`wanted verdict "Merge verdict: PASS", last Merge verdict: Merge verdict: FAIL`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUnit("polish-fix-1", "working", ""); err != nil {
+		t.Fatal(err)
+	}
+	m := loopViewFromState(t, st, nil)
+	m = openLoopTimeline(t, m)
+	out := m.View()
+
+	if !strings.Contains(out, "review failed") {
+		t.Fatalf("a round row should name the review state:\n%s", out)
+	}
+	if !strings.Contains(out, "fix working") {
+		t.Fatalf("a round row should name the fix state:\n%s", out)
+	}
+	if !strings.Contains(out, "Merge verdict: FAIL") {
+		t.Fatalf("a failed verdict should name its note:\n%s", out)
+	}
+}
+
+func TestLoopTimelineMovesBetweenRounds(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	m = openLoopTimeline(t, m)
+	if m.roundIdx != 0 {
+		t.Fatalf("timeline opened on round index %d, want 0", m.roundIdx)
+	}
+	m = press(t, m, "j")
+	if m.roundIdx != 1 {
+		t.Fatalf("j moved to %d, want 1", m.roundIdx)
+	}
+	m = press(t, m, "j")
+	if m.roundIdx != 2 {
+		t.Fatalf("j moved to %d, want 2", m.roundIdx)
+	}
+	m = press(t, m, "j")
+	if m.roundIdx != 0 {
+		t.Fatalf("j should wrap to 0, got %d", m.roundIdx)
+	}
+	m = press(t, m, "k")
+	if m.roundIdx != 2 {
+		t.Fatalf("k should wrap to 2, got %d", m.roundIdx)
+	}
+	m = press(t, m, "g")
+	if m.roundIdx != 0 {
+		t.Fatalf("g moved to %d, want 0", m.roundIdx)
+	}
+	m = press(t, m, "G")
+	if m.roundIdx != 2 {
+		t.Fatalf("G moved to %d, want 2", m.roundIdx)
+	}
+}
+
+func TestLoopRoundCardOpensAndEscGoesBack(t *testing.T) {
+	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
+	m = openLoopTimeline(t, m)
+	m = press(t, m, "enter")
+	if m.overlay != "detail" {
+		t.Fatalf("enter opened overlay %q, want detail", m.overlay)
+	}
+	if m.cardID != "polish-review-1" {
+		t.Fatalf("card unit %q, want polish-review-1", m.cardID)
+	}
+	out := m.View()
+	if !strings.Contains(out, "polish-review-1") || !strings.Contains(out, "Review round 1 of loop polish") {
+		t.Fatalf("the round card should show the full unit:\n%s", out)
+	}
+
+	m = press(t, m, "esc")
+	if m.overlay != "loop" || m.cardID != "" {
+		t.Fatalf("esc left overlay %q card %q, want back on the timeline", m.overlay, m.cardID)
+	}
+	m = press(t, m, "esc")
+	if m.overlay != "" {
+		t.Fatalf("a second esc should close the timeline, overlay %q", m.overlay)
+	}
+}
+
+func TestLoopRoundCardPicksTheLiveUnit(t *testing.T) {
+	m := loopViewWith(t, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "done", "polish-fix-2": "working",
+	}, nil)
+	m = openLoopTimeline(t, m) // the timeline opens on the current round, 2
+	m = press(t, m, "enter")
+	if m.cardID != "polish-fix-2" {
+		t.Fatalf("a round with a working fix should open it, got %q", m.cardID)
+	}
+}
+
+func TestLoopTimelineFocusTargetsTheSelectedRound(t *testing.T) {
+	m := loopViewWith(t, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "working",
+	}, map[string]Agent{"r1": {Name: "r1", Pane: "w9:p3", Status: "working"}})
+	m = openLoopTimeline(t, m) // the timeline opens on the current round, 2
+	u, ok := m.focusTarget()
+	if !ok || u.ID != "polish-review-2" || u.Minion != "r1" || u.Pane != "w9:p3" {
+		t.Fatalf("focus target %+v, want the live review of round 2", u)
+	}
+
+	// A working fix in the same round wins over the review.
+	m = loopViewWith(t, map[string]string{
+		"A": "done", "polish-review-1": "done", "polish-fix-1": "unproven",
+		"polish-review-2": "done", "polish-fix-2": "working",
+	}, map[string]Agent{"w1": {Name: "w1", Pane: "w9:p4", Status: "working"}})
+	m = openLoopTimeline(t, m)
+	u, ok = m.focusTarget()
+	if !ok || u.ID != "polish-fix-2" || u.Minion != "w1" {
+		t.Fatalf("focus target %+v, want the live fix of round 2", u)
+	}
+}
+
+func TestLoopTimelineIsEmptyBeforeExpansion(t *testing.T) {
+	p := decodeOK(t, loopForestPlan)
+	if f := Validate(p); len(f) > 0 {
+		t.Fatalf("plan is not valid: %v", f)
+	}
+	st := emptyLoopState()
+	m := newViewModel("plan.yaml", "state.json", time.Second)
+	m.plan, m.state = p, st
+	m.snap = buildSnapshot(p, "plan.yaml", st, nil)
+	m.width, m.height = 120, 40
+	m.rebuildOrder("")
+
+	m = openLoopTimeline(t, m)
+	if m.overlay != "loop" {
+		t.Fatalf("overlay %q, want loop", m.overlay)
+	}
+	out := m.View()
+	if !strings.Contains(out, "no rounds yet") {
+		t.Fatalf("an unexpanded loop should show an empty timeline:\n%s", out)
+	}
+	// Keys on an empty timeline are harmless.
+	m = press(t, m, "j", "k", "enter")
+	if m.overlay != "loop" {
+		t.Fatalf("enter on an empty timeline changed the overlay to %q", m.overlay)
+	}
+}
+
+func TestViewDetailFlagOpensTheLoopTimeline(t *testing.T) {
+	plan := writePlan(t, loopForestPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	code, stdout, stderr := runCLI("view", "--once", "--plan", plan, "--state", state, "--detail", "polish")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	for _, want := range []string{"polish  ", "current round:", "ROUNDS", "round 1"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("missing %q in:\n%s", want, stdout)
+		}
 	}
 }
