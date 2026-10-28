@@ -358,7 +358,9 @@ ln -s ~/Code/Personal/dungeon/skills/dungeon ~/.agents/skills/dungeon
 ```
 
 The skill covers writing a plan, the dispatch loop, what each state means,
-what to do when a unit is rejected, and the moves a parent must never make.
+what to do when a unit is rejected, and the moves a parent must never make. It
+also carries its own recipe for a one-off pane, for the work that does not
+deserve an encounter, so the skill stands alone.
 
 ## Design
 
