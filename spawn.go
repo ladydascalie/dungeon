@@ -89,13 +89,11 @@ func ensureToken(ctx context.Context, h herdrClient, st *State, minions []Minion
 		return nil
 	}
 	agents := h.agents(ctx)
-	// A run that started before tokens is already live under its bare ids.
-	// Naming it now would orphan those agents and spawn a second fleet, so the
-	// in-flight run keeps the names it has.
-	for _, m := range minions {
-		if _, live := agents[m.ID]; live {
-			return nil
-		}
+	// A tokenless state is an in-flight legacy run only when this state records
+	// the pane its bare agent is in. A bare name live anywhere else belongs to
+	// another run, so adopting it would put two encounters on one agent.
+	if legacyRunLive(st, agents, minions) {
+		return nil
 	}
 	token, err := pickToken(agents, minions, gen)
 	if err != nil {
@@ -103,6 +101,23 @@ func ensureToken(ctx context.Context, h herdrClient, st *State, minions []Minion
 	}
 	st.Token = token
 	return nil
+}
+
+// legacyRunLive reports whether a state with no token still owns the bare
+// agents it sees. The pane record is the proof: a live bare agent at the pane
+// this state recorded is this run's lane. Any other live bare agent is another
+// run's.
+func legacyRunLive(st *State, agents map[string]Agent, minions []Minion) bool {
+	for _, m := range minions {
+		pane := st.Minions[m.ID].Pane
+		if pane == "" {
+			continue
+		}
+		if a, live := agents[m.ID]; live && a.Pane == pane {
+			return true
+		}
+	}
+	return false
 }
 
 func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, splitOverride string, out io.Writer) (spawnResult, error) {

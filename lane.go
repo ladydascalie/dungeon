@@ -38,12 +38,12 @@ func (h herdrClient) lanePane(ctx context.Context, encounter, pinned string, roo
 // stopPinned exits the agent and leaves the shell. The two interrupts must be
 // separate writes with a gap: sent together, the agent coalesces them and keeps
 // running, which down would then have to report as a lie.
-func (h herdrClient) stopPinned(ctx context.Context, minion string) error {
-	if err := h.sendKeys(ctx, minion, "ctrl+c"); err != nil {
+func (h herdrClient) stopPinned(ctx context.Context, agent string) error {
+	if err := h.sendKeys(ctx, agent, "ctrl+c"); err != nil {
 		return err
 	}
 	time.Sleep(400 * time.Millisecond)
-	return h.sendKeys(ctx, minion, "ctrl+c")
+	return h.sendKeys(ctx, agent, "ctrl+c")
 }
 
 // verifyDown re-reads the fleet before down reports. A lane that ignores the
@@ -54,7 +54,7 @@ func verifyDown(ctx context.Context, h herdrClient, st *State, stopped, refused 
 	after := h.agents(ctx)
 	var done []string
 	for _, id := range stopped {
-		if _, live := after[id]; live {
+		if _, live := after[st.AgentName(id)]; live {
 			st.SetMinion(id, "busy", "ignored the interrupt, still live")
 			refused = append(refused, id)
 			continue
@@ -89,9 +89,9 @@ func (h herdrClient) sendKeys(ctx context.Context, target string, keys ...string
 
 // stopLane ends a lane. A pane the operator pinned is theirs, so the agent is
 // interrupted twice and its shell survives: one ctrl+c interrupts a turn, two
-func (h herdrClient) stopLane(ctx context.Context, minion, pane string, pinned bool) error {
+func (h herdrClient) stopLane(ctx context.Context, agent, pane string, pinned bool) error {
 	if pinned {
-		return h.stopPinned(ctx, minion)
+		return h.stopPinned(ctx, agent)
 	}
 	return h.closePane(ctx, pane)
 }

@@ -172,3 +172,75 @@ func TestTokenSurvivesAReload(t *testing.T) {
 		t.Fatalf("a reloaded state lost the token: %q", got.AgentName("w1"))
 	}
 }
+
+// A tokenless state owns a bare lane only when it recorded that lane's pane.
+func TestLegacyRunLiveNeedsItsOwnPaneRecord(t *testing.T) {
+	minions := []Minion{{ID: "w1"}}
+	agents := map[string]Agent{"w1": {Name: "w1", Pane: "w9:p2"}}
+
+	st := &State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if legacyRunLive(st, agents, minions) {
+		t.Fatal("a state with no pane record must not adopt a live bare lane")
+	}
+
+	st.PinPane("w1", "w9:p9")
+	if legacyRunLive(st, agents, minions) {
+		t.Fatal("a live bare lane in another pane is another run's")
+	}
+
+	st.PinPane("w1", "w9:p2")
+	if !legacyRunLive(st, agents, minions) {
+		t.Fatal("a live bare lane at the recorded pane is this run's")
+	}
+}
+
+// A fresh run that finds a bare w1 from another run must take a token and
+// spawn its own lane, not attach to the stranger.
+func TestEnsureTokenRefusesAForeignBareLane(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "w1:working\n")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	code, stdout, stderr := runCLI("up", "--no-dispatch", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("up exit %d: %s", code, stderr)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Token == "" {
+		t.Fatal("a foreign bare lane must not stop the run taking a token")
+	}
+	if !strings.Contains(stdout, "1 spawned") {
+		t.Fatalf("the run must spawn its own lane:\n%s", stdout)
+	}
+}
+
+// A legacy run is live under its bare ids, and its state remembers the pane.
+// up keeps the bare id so the fleet is not renamed under it.
+func TestEnsureTokenKeepsALegacyRunWithItsPane(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "w1:idle\n")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	st := State{Encounter: "enc", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	st.PinPane("w1", "w9:p2") // the fake reports every agent at w9:p2
+	if err := SaveState(statePath, st); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("up", "--no-dispatch", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("up exit %d: %s", code, stderr)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Token != "" {
+		t.Fatalf("a legacy run must keep the bare id, got token %q", st.Token)
+	}
+	if !strings.Contains(stdout, "0 spawned, 1 already live") {
+		t.Fatalf("the legacy lane should be adopted:\n%s", stdout)
+	}
+}

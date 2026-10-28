@@ -68,29 +68,8 @@ func (h herdrClient) agents(ctx context.Context) map[string]Agent {
 			continue
 		}
 		byName[a.Name] = a
-		// A tokenized name is also keyed by the plan's minion id, first wins.
-		// A caller that holds only the plan, such as down, still finds the lane.
-		if alias, ok := agentAlias(a.Name); ok {
-			if _, taken := byName[alias]; !taken {
-				byName[alias] = a
-			}
-		}
 	}
 	return byName
-}
-
-// agentAlias strips a token suffix and reports whether name carries one.
-func agentAlias(name string) (string, bool) {
-	i := strings.LastIndex(name, "-")
-	if i <= 0 || len(name)-i-1 != tokenLen {
-		return "", false
-	}
-	for _, c := range name[i+1:] {
-		if !strings.ContainsRune(tokenAlphabet, c) {
-			return "", false
-		}
-	}
-	return name[:i], true
 }
 
 func probeAgents(ctx context.Context) map[string]Agent {
