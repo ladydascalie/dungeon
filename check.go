@@ -28,6 +28,13 @@ const (
 	ESplitInvalid  Code = "E_SPLIT_INVALID"
 	ESplitNoMinion Code = "E_SPLIT_NO_MINION"
 	EUnknownSplit  Code = "E_UNKNOWN_SPLIT"
+	EBadTools      Code = "E_BAD_TOOLS"
+	EVerdictRole   Code = "E_VERDICT_ROLE"
+	EVerdictAccept Code = "E_VERDICT_ACCEPT"
+	ELoopRole      Code = "E_LOOP_ROLE"
+	ELoopRounds    Code = "E_LOOP_ROUNDS"
+	ELoopPass      Code = "E_LOOP_PASS"
+	ELoopFocus     Code = "E_LOOP_FOCUS"
 )
 
 type Finding struct {
@@ -45,6 +52,9 @@ func (f Finding) String() string {
 
 // A minion id becomes a herdr agent name, so it obeys that alphabet.
 var minionID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
+// A tool name is what pi accepts after --tools.
+var toolName = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // The directions herdr can split a pane in.
 var splits = map[string]bool{"right": true, "down": true, "left": true, "up": true}
@@ -107,6 +117,10 @@ func Validate(p Plan) []Finding {
 			})
 		}
 		roleOf[m.ID] = m.Role
+
+		if m.Tools != "" {
+			f = append(f, checkTools(at, m.Tools)...)
+		}
 	}
 
 	for i, m := range p.Minions {
@@ -194,6 +208,21 @@ func Validate(p Plan) []Finding {
 			}
 		}
 
+		if u.Verdict != "" {
+			if role != RoleReviewer {
+				f = append(f, Finding{
+					EVerdictRole, at + ".verdict",
+					fmt.Sprintf("unit %q sets a verdict but its role is %q: only a reviewer proves a unit", u.ID, role),
+				})
+			}
+			if u.Accept != "" {
+				f = append(f, Finding{
+					EVerdictAccept, at + ".accept",
+					"a verdict unit is proven by the reviewer's report line, so it cannot also set accept",
+				})
+			}
+		}
+
 		for j, d := range u.Deps {
 			where := fmt.Sprintf("%s.deps[%d]", at, j)
 			if d == u.ID {
@@ -209,8 +238,114 @@ func Validate(p Plan) []Finding {
 		}
 	}
 
+	f = append(f, checkLoops(p.Loops, roleOf, unitIDs)...)
 	f = append(f, duplicatePanes(p.Minions)...)
 	return append(f, cycles(p.Units, rep)...)
+}
+
+// checkTools validates a minion's tool allowlist: names, no empties, no
+// duplicates. An empty string means the role default and is not checked here.
+func checkTools(at, tools string) []Finding {
+	var f []Finding
+	seen := map[string]bool{}
+	for i, raw := range strings.Split(tools, ",") {
+		name := strings.TrimSpace(raw)
+		switch {
+		case name == "":
+			f = append(f, Finding{
+				EBadTools, at + ".tools",
+				fmt.Sprintf("tool %d is empty: an empty item names no tool", i+1),
+			})
+			continue
+		case !toolName.MatchString(name):
+			f = append(f, Finding{
+				EBadTools, at + ".tools",
+				fmt.Sprintf("tool %q must match [a-z_][a-z0-9_]*", name),
+			})
+		}
+		if seen[name] {
+			f = append(f, Finding{
+				EBadTools, at + ".tools",
+				fmt.Sprintf("tool %q is listed twice", name),
+			})
+		}
+		seen[name] = true
+	}
+	return f
+}
+
+// checkLoops validates each loop without expanding it: another unit owns the
+// expansion, so this only proves the loop could be expanded.
+func checkLoops(loops []Loop, roleOf map[string]string, unitIDs map[string]bool) []Finding {
+	var f []Finding
+	loopIDs := map[string]bool{}
+	for i, l := range loops {
+		at := fmt.Sprintf("loops[%d]", i)
+		switch {
+		case l.ID == "":
+			f = append(f, Finding{ENoID, at + ".id", "loop needs an id"})
+		case unitIDs[l.ID]:
+			f = append(f, Finding{
+				EDuplicateID, at + ".id",
+				fmt.Sprintf("loop id %q is already used by a unit", l.ID),
+			})
+		case loopIDs[l.ID]:
+			f = append(f, Finding{
+				EDuplicateID, at + ".id",
+				fmt.Sprintf("loop id %q is already used by another loop", l.ID),
+			})
+		}
+		loopIDs[l.ID] = true
+
+		role, ok := roleOf[l.Reviewer]
+		switch {
+		case l.Reviewer == "":
+			f = append(f, Finding{ENoMinion, at + ".reviewer", "loop names no reviewer"})
+		case !ok:
+			f = append(f, Finding{
+				EUnknownMinion, at + ".reviewer",
+				fmt.Sprintf("minion %q is not declared", l.Reviewer),
+			})
+		case role != RoleReviewer:
+			f = append(f, Finding{
+				ELoopRole, at + ".reviewer",
+				fmt.Sprintf("loop reviewer %q has role %q, so it cannot review", l.Reviewer, role),
+			})
+		}
+
+		fixRole, ok := roleOf[l.Fixer]
+		switch {
+		case l.Fixer == "":
+			f = append(f, Finding{ENoMinion, at + ".fixer", "loop names no fixer"})
+		case !ok:
+			f = append(f, Finding{
+				EUnknownMinion, at + ".fixer",
+				fmt.Sprintf("minion %q is not declared", l.Fixer),
+			})
+		case !writes(fixRole):
+			f = append(f, Finding{
+				ELoopRole, at + ".fixer",
+				fmt.Sprintf("loop fixer %q has role %q, so it cannot write a fix", l.Fixer, fixRole),
+			})
+		}
+
+		if l.Rounds < 1 || l.Rounds > 9 {
+			f = append(f, Finding{
+				ELoopRounds, at + ".rounds",
+				fmt.Sprintf("loop rounds is %d: give 1 to 9", l.Rounds),
+			})
+		}
+		if strings.TrimSpace(l.Pass) == "" {
+			f = append(f, Finding{ELoopPass, at + ".pass", "loop needs a pass condition"})
+		}
+		if strings.TrimSpace(l.Focus) == "" {
+			f = append(f, Finding{ELoopFocus, at + ".focus", "loop needs a focus"})
+		}
+		if len(l.Paths) == 0 {
+			f = append(f, Finding{ENoPaths, at + ".paths", "loop must declare the paths the fixer owns"})
+		}
+	}
+	return f
 }
 
 // Worker units own paths. An integrator unit owns the merge, not the files.
