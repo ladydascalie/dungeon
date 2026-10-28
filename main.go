@@ -73,7 +73,7 @@ func usage(w io.Writer) {
 
   dungeon set unit   <id> <status> [--note text]
   dungeon set minion <id> <status> [--note text]
-      Record a change. Unit statuses: blocked, working, planned,
+      Record a change. Unit statuses: blocked, failed, working, planned,
       unproven, rejected, done, canceled.
       Minion statuses: spawned, busy, waiting, lost, absent.
 

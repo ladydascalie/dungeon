@@ -348,3 +348,65 @@ func TestLandGroupsByFirstDoneUnit(t *testing.T) {
 		t.Fatalf("w1 is first done, so it merges first:\n%s", strings.Join(merges, "\n"))
 	}
 }
+
+// A passing review proves its fix. The fix was unproven, so land would skip it;
+// the promotion makes it done so land merges the branch and lists it. A failing
+// review promotes nothing.
+func TestPassingReviewPromotesItsFixForLand(t *testing.T) {
+	cases := []struct {
+		name     string
+		report   string
+		promoted bool
+	}{
+		{name: "pass promotes the fix", report: "Merge verdict: PASS\n", promoted: true},
+		{name: "fail promotes nothing", report: "Merge verdict: FAIL\n", promoted: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeHerdr(t, "r1:idle\n")
+			dir := t.TempDir()
+			planPath := filepath.Join(dir, ".dungeon", "plan.yaml")
+			p := expanded(t)
+			p.Repo = dir
+			report := reportPath(planPath, "polish-review-2")
+			if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(report, []byte(tc.report), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			st := &State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+			for _, u := range p.Units {
+				st.SetUnit(u.ID, "planned", "")
+			}
+			st.SetUnit("polish-fix-1", "unproven", "")
+			st.SetUnit("polish-review-2", "working", "")
+
+			o := dispatchOpts{planPath: planPath, statePath: filepath.Join(dir, "state.json")}
+			reconcile(t.Context(), newHerdrClient(), o, p, st, &digest{})
+
+			landed := map[string]bool{}
+			for _, u := range landable(p, st) {
+				landed[u.ID] = true
+			}
+			if tc.promoted {
+				if got := st.UnitStatus("polish-fix-1"); got != "done" {
+					t.Fatalf("fix-1 is %q, want done after a passing review", got)
+				}
+				if note := st.Units["polish-fix-1"].Note; note != "proved by polish-review-2" {
+					t.Fatalf("fix-1 note %q, want it to name the review", note)
+				}
+				if !landed["polish-fix-1"] {
+					t.Fatalf("a promoted fix must be landable: %v", landed)
+				}
+			} else {
+				if got := st.UnitStatus("polish-fix-1"); got != "unproven" {
+					t.Fatalf("fix-1 is %q, a failing review must not promote it", got)
+				}
+				if landed["polish-fix-1"] {
+					t.Fatalf("an unproven fix must not be landable: %v", landed)
+				}
+			}
+		})
+	}
+}

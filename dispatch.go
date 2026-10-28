@@ -349,6 +349,7 @@ func reconcile(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st *S
 			switch settle(ctx, o, p, st, u, m) {
 			case "done":
 				StopLoopAfter(p, st, u.ID)
+				PromoteLoopFix(p, st, u.ID)
 				d.Done = append(d.Done, u.ID)
 			case "failed":
 				d.Failed = append(d.Failed, u.ID)

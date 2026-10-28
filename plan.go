@@ -50,8 +50,8 @@ type Unit struct {
 	Deps        []string `yaml:"deps"`
 	Goal        string   `yaml:"goal"`
 	Accept      string   `yaml:"accept"`
-	Verdict     string   `yaml:"verdict"`     // optional: the report line that proves this reviewer unit
-	Provisional bool     `yaml:"provisional"` // optional: an unproven unit whose dep still counts as satisfied
+	Verdict     string   `yaml:"verdict"` // optional: the report line that proves this reviewer unit
+	Provisional bool     `yaml:"-"`       // generated only: an unproven loop fix whose dep still counts as satisfied
 	Split       *Split   `yaml:"split"`
 }
 

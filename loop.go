@@ -93,6 +93,27 @@ func loopFix(l Loop, round int) Unit {
 	}
 }
 
+// PromoteLoopFix marks the fix a passing review just judged as done. A
+// provisional fix settles unproven, and land merges only done units, so without
+// this promotion the fixer's branch would never land. Review N judges fix N-1,
+// so that is the fix it promotes, and only while that fix is unproven. A FAIL
+// promotes nothing.
+func PromoteLoopFix(p Plan, st *State, unitID string) {
+	loopID, round, kind, ok := parseLoopUnit(p, unitID)
+	if !ok || kind != "review" || round < 2 {
+		return
+	}
+	fixID := fmt.Sprintf("%s-fix-%d", loopID, round-1)
+	u, ok := findUnit(p, fixID)
+	if !ok || !u.Provisional {
+		return
+	}
+	if st.UnitStatus(fixID) != "unproven" {
+		return
+	}
+	st.SetUnit(fixID, "done", "proved by "+unitID)
+}
+
 // StopLoopAfter cancels the planned units of the same loop that a passing
 // review made pointless: its own round's fix, and every later round. It acts
 // only on a review unit: a fixer finishing proves nothing about satisfaction.

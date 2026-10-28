@@ -499,3 +499,13 @@ func TestVerdictFindings(t *testing.T) {
 		})
 	}
 }
+
+func TestProvisionalIsGeneratedOnly(t *testing.T) {
+	src := strings.Replace(goodPlan, "    accept: go test ./apps/api/...",
+		"    accept: go test ./apps/api/...\n    provisional: true", 1)
+	_, f := Decode([]byte(src))
+	wantCodes(t, f, EParse)
+	if !strings.Contains(f[0].Message, "provisional") {
+		t.Fatalf("the decode error should name the key: %q", f[0].Message)
+	}
+}
