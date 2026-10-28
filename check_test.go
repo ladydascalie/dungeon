@@ -509,3 +509,22 @@ func TestProvisionalIsGeneratedOnly(t *testing.T) {
 		t.Fatalf("the decode error should name the key: %q", f[0].Message)
 	}
 }
+
+// Two minion ids that share a prefix collide once the name is truncated, so a
+// plan that declares them is refused rather than left to race one agent.
+func TestTruncatedMinionIDsCollide(t *testing.T) {
+	base := strings.Repeat("a", 29)
+	src := "encounter: enc\nminions:\n" +
+		"  - {id: " + base + "aa, role: worker, worktree: w1}\n" +
+		"  - {id: " + base + "bb, role: worker, worktree: w2}\n"
+	wantCodes(t, Validate(decodeOK(t, src)), EDuplicateAgent)
+}
+
+// A long id that stays distinct in its first 29 characters derives its own name.
+func TestLongMinionIDsStayDistinct(t *testing.T) {
+	base := strings.Repeat("a", 28)
+	src := "encounter: enc\nminions:\n" +
+		"  - {id: " + base + "aa, role: worker, worktree: w1}\n" +
+		"  - {id: " + base + "bb, role: worker, worktree: w2}\n"
+	wantCodes(t, Validate(decodeOK(t, src)))
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,93 @@ func TestDefaultsArePlannedAndAbsent(t *testing.T) {
 func TestStatePathSitsBesideThePlan(t *testing.T) {
 	if got := StatePath(".dungeon/plan.yaml"); got != ".dungeon/state.json" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestTokenFormat(t *testing.T) {
+	valid := regexp.MustCompile(`^[0-9a-z]{2}$`)
+	for i := 0; i < 500; i++ {
+		if tok := newToken(); !valid.MatchString(tok) {
+			t.Fatalf("token %q is not two characters from [0-9a-z]", tok)
+		}
+	}
+}
+
+func TestAgentNameUsesTheToken(t *testing.T) {
+	if got := (State{Token: "7f"}).AgentName("w1"); got != "w1-7f" {
+		t.Fatalf("agent name %q, want w1-7f", got)
+	}
+	// A state with no token keeps the bare id, so an in-flight run is unchanged.
+	if got := (State{}).AgentName("w1"); got != "w1" {
+		t.Fatalf("a tokenless state must use the bare id, got %q", got)
+	}
+}
+
+// Two runs of the same plan declare the same minion ids. The token is what
+// keeps them off one agent.
+func TestTwoRunsOfOnePlanGetDifferentNames(t *testing.T) {
+	a, b := State{Token: "aa"}, State{Token: "bb"}
+	if a.AgentName("w1") == b.AgentName("w1") {
+		t.Fatalf("both runs derived %q", a.AgentName("w1"))
+	}
+}
+
+func TestAgentNameTruncatesToTheHerdrLimit(t *testing.T) {
+	long := "w" + strings.Repeat("x", 31) // 32, the longest minion id a plan allows
+	name := (State{Token: "7f"}).AgentName(long)
+	if len(name) != 32 {
+		t.Fatalf("agent name %q is %d bytes, want 32", name, len(name))
+	}
+	if !strings.HasSuffix(name, "-7f") {
+		t.Fatalf("the token must survive truncation, got %q", name)
+	}
+}
+
+func TestPickTokenRerollsALiveCandidate(t *testing.T) {
+	agents := map[string]Agent{"w1-aa": {Name: "w1-aa", Status: "idle"}}
+	seq := []string{"aa", "bb"}
+	draws := 0
+	gen := func() string {
+		tok := seq[draws]
+		draws++
+		return tok
+	}
+	tok, err := pickToken(agents, []Minion{{ID: "w1"}}, gen)
+	if err != nil {
+		t.Fatalf("pick: %v", err)
+	}
+	if tok != "bb" || draws != 2 {
+		t.Fatalf("token %q after %d draws, want bb after 2", tok, draws)
+	}
+}
+
+func TestPickTokenGivesUpAfter64Tries(t *testing.T) {
+	agents := map[string]Agent{"w1-aa": {Name: "w1-aa", Status: "idle"}}
+	draws := 0
+	gen := func() string { draws++; return "aa" }
+	_, err := pickToken(agents, []Minion{{ID: "w1"}}, gen)
+	if err == nil {
+		t.Fatal("a token that always collides must fail rather than return a name")
+	}
+	if draws != 64 {
+		t.Fatalf("drew %d tokens, want 64", draws)
+	}
+	if !strings.Contains(err.Error(), "w1-aa") {
+		t.Fatalf("the finding must name the live agent, got %v", err)
+	}
+}
+
+func TestTokenSurvivesAReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	st := State{Encounter: "x", Token: "7f", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := SaveState(path, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentName("w1") != "w1-7f" {
+		t.Fatalf("a reloaded state lost the token: %q", got.AgentName("w1"))
 	}
 }

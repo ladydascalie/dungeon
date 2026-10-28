@@ -26,7 +26,9 @@ func TestPinnedPaneIsUsedWhenItExists(t *testing.T) {
 	if strings.Contains(string(calls), "pane split") {
 		t.Fatalf("a live pin should not split a pane:\n%s", calls)
 	}
-	if !strings.Contains(string(calls), "agent start w1 --kind pi --pane w1P:p9") {
+	// The agent name carries the run's token, so only the prefix is exact.
+	if !strings.Contains(string(calls), "agent start w1-") ||
+		!strings.Contains(string(calls), "--kind pi --pane w1P:p9") {
 		t.Fatalf("the agent should start in the pinned pane:\n%s", calls)
 	}
 	st, _ := LoadState(statePath)
@@ -284,9 +286,9 @@ func TestLaneToolsOverrideAndFallBack(t *testing.T) {
 	var scout, worker string
 	for _, line := range strings.Split(string(calls), "\n") {
 		switch {
-		case strings.HasPrefix(line, "agent start s1 "):
+		case strings.HasPrefix(line, "agent start s1-"):
 			scout = line
-		case strings.HasPrefix(line, "agent start w1 "):
+		case strings.HasPrefix(line, "agent start w1-"):
 			worker = line
 		}
 	}

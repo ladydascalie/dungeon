@@ -1185,3 +1185,39 @@ func TestDisplayUnitIDOnlyStripsGeneratedIDs(t *testing.T) {
 		t.Fatalf("a generated unit should show its stripped id:\n%s", lines)
 	}
 }
+
+// Focus jumps to the lane under the run's derived name, not the plan's id.
+func TestFocusUsesTheDerivedAgentName(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	st := State{
+		Encounter: "st",
+		Token:     "7f",
+		Units:     map[string]UnitState{},
+		Minions:   map[string]MinionState{},
+	}
+	if err := st.SetUnit("A", "working", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveState(state, st); err != nil {
+		t.Fatal(err)
+	}
+	log := fakeHerdr(t, "w1-7f:working\n")
+
+	m := newTestView(t, plan, state)
+	m.rebuildOrder("A")
+	cmd := m.focusCmd()
+	if cmd == nil {
+		t.Fatal("a selected unit should focus")
+	}
+	if msg, ok := cmd().(focusMsg); !ok || msg.err != nil {
+		t.Fatalf("focus: %+v", msg)
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "agent focus w1-7f") {
+		t.Fatalf("focus must use the derived name:\n%s", calls)
+	}
+	if strings.Contains(string(calls), "agent focus w1\n") {
+		t.Fatalf("focus must not use the bare minion id:\n%s", calls)
+	}
+}
