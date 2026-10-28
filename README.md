@@ -92,7 +92,7 @@ A minion may name a pane to run in, and `up` uses it when herdr still has it:
 `- {id: w1, role: worker, worktree: w1, pane: "w5N:pH"}`. A pane the
 operator picked is where their attention already is, so the pin is honoured and
 recorded as a hint in the state. If the pane is gone, `up` splits a fresh one
-and the note says so. `ctrl+d f` in the view jumps straight to the selected unit's
+and the note says so. `space f` in the view jumps straight to the selected unit's
 lane: a live agent is focused exactly, and with no live agent the recorded
 pane's tab is focused instead. That is the shortcut for a `blocked` row.
 
@@ -105,23 +105,24 @@ pinned pane belongs to the operator, so `down` interrupts its agent and leaves
 the shell instead of closing the pane, then re-reads the fleet to check that
 the lane really stopped.
 
-`ctrl+d f` jumps to the selected unit's lane. A blocked row, a reviewer's verdict and a
+`space f` jumps to the selected unit's lane. A blocked row, a reviewer's verdict and a
 lane asking for approval are all one keypress away, and the pane it lands on is
 the one `up` recorded or the one the plan pinned.
 
-Keys are modal. `ctrl+d` holds a prefix and opens a which-key pane bottom right,
-listing every action the prefix can take: focus, open link, reload, layout,
-hide, fold all, help, quit. Motion, `d`, `space` and the overlay keys stay
-direct. `esc` cancels the prefix, closes an overlay or the legend, and never
-quits the app; `ctrl+c` quits. The header says `PREFIX` while the prefix is
-held, and the footer says `ctrl+d actions` otherwise.
-`d` opens the detail pane for the selected unit: goal, deps, note, history, and
+Keys are modal. `space` opens a prefix and a which-key pane bottom right, listing
+every action the prefix can take: fold, focus, open link, reload, layout, hide,
+fold all, help, quit. Motion, `d`/`enter` and the overlay keys stay direct.
+`esc` cancels the prefix, closes an overlay or the legend, and never quits the
+app; `ctrl+c` quits. The header says `PREFIX` while the prefix is open, and the
+footer says `space actions` otherwise.
+`d` or `enter` opens the detail pane for the selected unit: goal, deps, note, history, and
 the files kept with it. Two are found by convention,
 `.dungeon/briefs/<unit>.md` and `.dungeon/reports/<unit>.md`; anything else comes
-from `dungeon attach`. `tab` picks a file, `enter` reads it in place with `j`/`k`,
-scrolling, `esc` goes back. A `.md` brief or report is rendered as markdown, so
-the headings, lists and code blocks a lane wrote survive the trip. Anything else
-is shown as plain text. A missing brief is shown as missing, not hidden.
+from `dungeon attach`. `j`/`k` or `tab` picks a file, `enter` reads it in
+place with `j`/`k` scrolling, `esc` goes back. A `.md` brief or report is
+rendered as markdown, so the headings, lists and code blocks a lane wrote
+survive the trip. Anything else is shown as plain text. A missing brief is shown
+as missing, not hidden.
 
 Markdown is rendered **once**, when the file is opened and again only when the
 pane's width changes. Rendering it in the frame path made every keystroke pay for
@@ -132,7 +133,7 @@ scrolls at about 1.3ms a frame.
 
 `link` pins a pull request, a review, or any http(s) url to a unit. The tool
 never parses it, so no forge gets special treatment. The row is marked `↗`,
-the card shows the url, and `ctrl+d o` opens it in the browser. `--clear` forgets it.
+the card shows the url, and `space o` opens it in the browser. `--clear` forgets it.
 
 `view` is the same snapshot as `status`, rendered with charmbracelet. Rows carry
 a right-aligned status column (`working w5M:p8`, `waits TOK4`, `needs you`), and
@@ -143,7 +144,8 @@ The two columns are sized to their content and separated by a two column gap.
 The left column is as wide as its longest row, the status column as wide as its
 longest status, and the pair sits at the left of the frame. On a wide terminal
 the block ends where the text ends instead of stretching a goal to reach a status
-pinned to the far edge, and every status still lines up. Two layouts, `t` and `s`:
+pinned to the far edge, and every status still lines up. Two layouts, `space t`
+and `space s`:
 
 - **tree** (default): dependencies as nesting, drawn with box-drawing
   connectors. Each unit hangs under its deepest dependency, ties going to the
@@ -152,19 +154,20 @@ pinned to the far edge, and every status still lines up. Two layouts, `t` and `s
   the joining unit, and the panel lists every input with its status.
 - **sections**: urgency-first groups, BLOCKED down to CANCELED.
 
-`space` folds the selected branch. A foldable row is marked `⛧`, and a folded one
-adds `[+N]` for how much it hides. The header counts the folds in force,
-so a collapsed branch is never silent. `c` collapses every branch, `e` expands
-everything. Folds survive a refresh; they
-are a view of the session, not part of the state file. `h` hides done and
-canceled units and splices their children into the parent, so a settled chain
-collapses without leaving orphaned connectors.
+`space` then `space` folds the selected branch, the same as any other prefixed
+action. A foldable row is marked `⛧`, and a folded one adds `[+N]` for how
+much it hides. The header counts the folds in force, so a collapsed branch is
+never silent. `space c` collapses every branch, `space e` expands everything.
+Folds survive a refresh; they are a view of the session, not part of the state
+file. `space h` hides done and canceled units and splices their children into
+the parent, so a settled chain collapses without leaving orphaned connectors.
 
-The cursor follows a unit across a refresh, not a row. A row shows its state
-twice: the id takes the state's colour, and the right column names it in words.
-The goal and lane are faint, so the id and the status column carry the eye.
-`ctrl+d ?` opens the legend for every key. `j`/`k` move and `g`/`G` jump;
-`ctrl+d r` refreshes and `ctrl+d q` quits. Piped output prints one frame
+The cursor follows a unit across a refresh, not a row. A row shows its state in
+the right column, which names it in words and takes the state's colour. The id
+and the lane are bold; the goal is faint, so the identifiers and the status
+column carry the eye.
+`space ?` opens the legend for every key. `j`/`k` move and `g`/`G` jump;
+`space r` refreshes and `space q` quits. Piped output prints one frame
 instead of opening a TUI.
 
 `dungeon attach <unit> <path>` keeps a file one keystroke from the unit: a

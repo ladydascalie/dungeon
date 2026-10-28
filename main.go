@@ -109,7 +109,7 @@ func usage(w io.Writer) {
       --force. The plan, the state, the briefs and the reports stay.
 
   dungeon view   [--once] [--interval 2s] [--plan path] [--state path]
-      The live table. j/k move, g/G ends, d detail, ctrl+d actions.
+      The live table. j/k move, g/G ends, d detail, space actions.
       Piped output and --once print one frame instead. With more than one
       encounter under .dungeon and no --plan, view opens a picker.
 

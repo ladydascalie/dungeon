@@ -30,7 +30,7 @@ func TestViewSectionsFrame(t *testing.T) {
 	m.rebuildOrder("")
 	out := m.View()
 
-	for _, want := range []string{"dungeon", "st", "READY 1", "WAITING 2", "ctrl+d actions", "deps 0/0"} {
+	for _, want := range []string{"dungeon", "st", "READY 1", "WAITING 2", "space actions", "deps 0/0"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -101,13 +101,13 @@ func TestViewModeToggleKeepsTheCursor(t *testing.T) {
 	m.cursor = 1
 	want := m.selectedID()
 
-	m = press(t, m, "ctrl+d", "s")
+	m = press(t, m, " ", "s")
 	if got := m.selectedID(); got != want {
-		t.Fatalf("after ctrl+d s the cursor is on %q, want %q", got, want)
+		t.Fatalf("after space s the cursor is on %q, want %q", got, want)
 	}
-	m = press(t, m, "ctrl+d", "t")
+	m = press(t, m, " ", "t")
 	if got := m.selectedID(); got != want {
-		t.Fatalf("after ctrl+d t the cursor is on %q, want %q", got, want)
+		t.Fatalf("after space t the cursor is on %q, want %q", got, want)
 	}
 }
 
@@ -169,7 +169,7 @@ func TestViewPrintsOneFrameWhenPiped(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
-	if !strings.Contains(stdout, "dungeon") || !strings.Contains(stdout, "ctrl+d actions") {
+	if !strings.Contains(stdout, "dungeon") || !strings.Contains(stdout, "space actions") {
 		t.Fatalf("output:\n%s", stdout)
 	}
 }
@@ -190,9 +190,6 @@ func press(t *testing.T, m viewModel, keys ...string) viewModel {
 	t.Helper()
 	for _, k := range keys {
 		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
-		if k == "ctrl+d" {
-			msg = tea.KeyMsg{Type: tea.KeyCtrlD}
-		}
 		if k == " " {
 			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune(" ")}
 		}
@@ -215,7 +212,7 @@ func TestFoldHidesTheBranchAndSaysHowMuch(t *testing.T) {
 		t.Fatalf("a branch should be marked expandable:\n%s", m.View())
 	}
 
-	m = press(t, m, " ")
+	m = press(t, m, " ", " ")
 	if len(m.order) != 1 || m.order[0] != "A" {
 		t.Fatalf("folding the root should leave one row, got %v", m.order)
 	}
@@ -233,7 +230,7 @@ func TestFoldHidesTheBranchAndSaysHowMuch(t *testing.T) {
 		t.Fatalf("the header should count folds:\n%s", folded)
 	}
 
-	m = press(t, m, " ")
+	m = press(t, m, " ", " ")
 	if len(m.order) != 3 {
 		t.Fatalf("unfolding should restore the branch, got %v", m.order)
 	}
@@ -244,11 +241,11 @@ func TestCollapseAllAndExpandAll(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state.json")
 	m := newTestView(t, plan, state)
 
-	m = press(t, m, "ctrl+d", "c")
+	m = press(t, m, " ", "c")
 	if len(m.order) != 1 {
 		t.Fatalf("collapse all should leave only roots, got %v", m.order)
 	}
-	m = press(t, m, "ctrl+d", "e")
+	m = press(t, m, " ", "e")
 	if len(m.order) != 3 {
 		t.Fatalf("expand all should restore every unit, got %v", m.order)
 	}
@@ -262,14 +259,14 @@ func TestHelpExplainsTheView(t *testing.T) {
 	if strings.Contains(m.View(), "STATUS") {
 		t.Fatal("the legend should be hidden by default")
 	}
-	m = press(t, m, "ctrl+d", "?")
+	m = press(t, m, " ", "?")
 	out := m.View()
-	for _, want := range []string{"STATUS", "colour", "space      fold", "∧N"} {
+	for _, want := range []string{"STATUS", "bold", "enter / d  detail", "∧N"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
 	}
-	m = press(t, m, "ctrl+d", "?")
+	m = press(t, m, " ", "?")
 	if strings.Contains(m.View(), "STATUS") {
 		t.Fatal("? should close the legend")
 	}
@@ -280,15 +277,15 @@ func TestPrefixShowsTheActionPaneAndCancels(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "state.json")
 	m := newTestView(t, plan, state)
 
-	m = press(t, m, "ctrl+d")
+	m = press(t, m, " ")
 	out := m.View()
-	for _, want := range []string{"PREFIX", "focus lane", "open link", "collapse all", "quit", "esc cancels"} {
+	for _, want := range []string{"PREFIX", "fold selected", "focus lane", "open link", "collapse all", "quit", "esc cancels"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("prefix should show %q:\n%s", want, out)
 		}
 	}
 	if !m.prefix {
-		t.Fatal("ctrl+d should hold the prefix")
+		t.Fatal("space should open the prefix")
 	}
 
 	m = press(t, m, "esc")
@@ -309,17 +306,22 @@ func TestPrefixKeysDoNotActWithoutThePrefix(t *testing.T) {
 	if m.mode != "tree" {
 		t.Fatalf("s alone changed the mode to %q", m.mode)
 	}
-	m = press(t, m, "ctrl+d", "s")
+	m = press(t, m, " ", "s")
 	if m.mode != "sections" {
-		t.Fatalf("ctrl+d s should switch to sections, mode %q", m.mode)
+		t.Fatalf("space s should switch to sections, mode %q", m.mode)
 	}
 
-	m = press(t, m, "ctrl+d", "z")
+	m = press(t, m, " ", "z")
 	if !strings.Contains(m.View(), "no action on z") {
 		t.Fatalf("an unknown prefix key should say so:\n%s", m.View())
 	}
 	if m.prefix {
 		t.Fatal("an unknown key should close the prefix")
+	}
+
+	m = press(t, m, " ", " ")
+	if len(m.folded) != 1 {
+		t.Fatalf("space space should fold the selected branch, folded=%v", m.folded)
 	}
 }
 
@@ -336,7 +338,7 @@ func TestEscapeNeverQuitsAndClosesWhatIsOpen(t *testing.T) {
 	m = next.(viewModel)
 
 	// The legend closes on esc.
-	m = press(t, m, "ctrl+d", "?")
+	m = press(t, m, " ", "?")
 	if !m.help {
 		t.Fatal("help should be open")
 	}
@@ -383,10 +385,24 @@ func TestDetailOverlayListsAndReadsFiles(t *testing.T) {
 	m := newTestView(t, plan, state)
 	m = press(t, m, "d")
 	out := m.View()
-	for _, want := range []string{"FILES", "reports/A.md", "tab file"} {
+	for _, want := range []string{"FILES", "reports/A.md", "j/k file"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
+	}
+
+	// j/k moves the file list, not the unit cursor behind the pane.
+	selected := m.selectedID()
+	m = press(t, m, "j")
+	if m.artIdx != 1 {
+		t.Fatalf("j moved the file cursor to %d, want 1", m.artIdx)
+	}
+	if m.selectedID() != selected {
+		t.Fatalf("j moved the unit cursor to %q, want %q", m.selectedID(), selected)
+	}
+	m = press(t, m, "k")
+	if m.artIdx != 0 {
+		t.Fatalf("k moved the file cursor to %d, want 0", m.artIdx)
 	}
 
 	// The attached file is first, so enter reads it.
@@ -525,5 +541,20 @@ func TestColumnsAreContentSizedWithASmallGap(t *testing.T) {
 				t.Fatalf("long content should fill to the edge")
 			}
 		})
+	}
+}
+
+func TestEnterOpensTheDetailPane(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	m := newTestView(t, plan, filepath.Join(t.TempDir(), "state.json"))
+
+	m = press(t, m, "enter")
+	if m.overlay != "detail" {
+		t.Fatalf("enter should open the detail pane, overlay %q", m.overlay)
+	}
+	// Folding stays on the prefix and never fires on a bare enter.
+	m = press(t, m, "esc")
+	if len(m.folded) != 0 {
+		t.Fatalf("enter must not fold, folded=%v", m.folded)
 	}
 }

@@ -19,6 +19,7 @@ import (
 var (
 	titleStyle    = lipgloss.NewStyle().Bold(true)
 	dimStyle      = lipgloss.NewStyle().Faint(true)
+	boldStyle     = lipgloss.NewStyle().Bold(true)
 	sectionStyle  = lipgloss.NewStyle().Bold(true).Faint(true)
 	selectedStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
 	panelStyle    = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, false, false, true).PaddingLeft(1)
@@ -73,7 +74,7 @@ type viewModel struct {
 	mode        string // "tree" or "sections"
 	hideSettled bool
 	help        bool
-	prefix      bool        // ctrl+d is held: the next key names an action
+	prefix      bool        // the prefix is open: the next key names an action
 	choosing    []Encounter // a picker is open: choose an encounter before loading
 	choice      int
 
@@ -176,7 +177,7 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prefix = false
 			return m, m.runPrefix(key)
 		}
-		if key == "ctrl+d" {
+		if key == " " {
 			m.prefix = true
 			return m, nil
 		}
@@ -192,18 +193,8 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+c":
 			return m, tea.Quit
-		case "d":
+		case "d", "enter":
 			m.overlay, m.artIdx = "detail", 0
-		case " ", "enter":
-			id := m.selectedID()
-			if id != "" {
-				if m.folded[id] {
-					delete(m.folded, id)
-				} else {
-					m.folded[id] = true
-				}
-				m.rebuildOrder(id)
-			}
 		case "j", "down":
 			m.cursor++
 		case "k", "up":
@@ -219,9 +210,10 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// prefixMenu is the set of actions behind ctrl+d. Motion, fold, detail and the
+// prefixMenu is the set of actions behind space. Motion, fold, detail and the
 // overlays stay direct; everything that changes the view or leaves it is here.
 var prefixMenu = []struct{ key, label string }{
+	{" ", "fold selected"},
 	{"f", "focus lane"},
 	{"o", "open link"},
 	{"r", "reload"},
@@ -234,14 +226,16 @@ var prefixMenu = []struct{ key, label string }{
 	{"q", "quit"},
 }
 
-// runPrefix executes one prefixed action. esc and ctrl+d cancel; an unknown
+// runPrefix executes one prefixed action. esc cancels; an unknown
 // key says so and returns, so a stray press never changes the run.
 func (m *viewModel) runPrefix(key string) tea.Cmd {
 	switch key {
-	case "esc", "ctrl+d":
+	case "esc":
 		return nil
 	case "ctrl+c":
 		return tea.Quit
+	case " ":
+		m.toggleFold()
 	case "o":
 		u, ok := m.selected()
 		if !ok || u.Link == "" {
@@ -285,21 +279,28 @@ func (m *viewModel) runPrefix(key string) tea.Cmd {
 }
 
 // prefixBox is the which-key pane: every action the prefix can take, drawn
-// bottom right while ctrl+d is held.
+// bottom right while the prefix is open.
 func (m viewModel) prefixBox() string {
-	labelW := 0
+	keyLabel := func(k string) string {
+		if k == " " {
+			return "space"
+		}
+		return k
+	}
+	keyW, labelW := 0, 0
 	for _, a := range prefixMenu {
+		keyW = max(keyW, runeLen(keyLabel(a.key)))
 		labelW = max(labelW, runeLen(a.label))
 	}
 	var rows []string
 	for i := 0; i < len(prefixMenu); i += 2 {
-		row := fmt.Sprintf("%-2s %-*s", prefixMenu[i].key, labelW, prefixMenu[i].label)
+		row := fmt.Sprintf("%-*s %-*s", keyW, keyLabel(prefixMenu[i].key), labelW, prefixMenu[i].label)
 		if i+1 < len(prefixMenu) {
-			row += "   " + fmt.Sprintf("%-2s %-*s", prefixMenu[i+1].key, labelW, prefixMenu[i+1].label)
+			row += "   " + fmt.Sprintf("%-*s %-*s", keyW, keyLabel(prefixMenu[i+1].key), labelW, prefixMenu[i+1].label)
 		}
 		rows = append(rows, row)
 	}
-	head := dimStyle.Render("ctrl+d") + "   " + dimStyle.Render("esc cancels")
+	head := dimStyle.Render("space") + "   " + dimStyle.Render("esc cancels")
 	body := head + "\n" + strings.Join(rows, "\n")
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -390,6 +391,20 @@ func (m viewModel) choiceView() string {
 	return lipgloss.Place(max(40, m.width), max(12, m.height), lipgloss.Center, lipgloss.Center, content)
 }
 
+// toggleFold folds or unfolds the selected branch. It sits behind the prefix on space.
+func (m *viewModel) toggleFold() {
+	id := m.selectedID()
+	if id == "" {
+		return
+	}
+	if m.folded[id] {
+		delete(m.folded, id)
+	} else {
+		m.folded[id] = true
+	}
+	m.rebuildOrder(id)
+}
+
 // rebuildOrder recomputes the display list and keeps the cursor on the same
 // unit, not the same row: a refresh reorders everything.
 func (m *viewModel) rebuildOrder(keep string) {
@@ -473,7 +488,7 @@ func (m viewModel) render() string {
 		return m.choiceView()
 	}
 	if m.err != nil {
-		return titleStyle.Render("dungeon") + "\n\n" + m.err.Error() + "\n\n" + dimStyle.Render("ctrl+d r to retry, ctrl+d q to quit") + "\n"
+		return titleStyle.Render("dungeon") + "\n\n" + m.err.Error() + "\n\n" + dimStyle.Render("space r to retry, space q to quit") + "\n"
 	}
 
 	var body string
@@ -497,18 +512,18 @@ func (m viewModel) render() string {
 // coloured marks is not a substitute for naming them.
 func (m viewModel) helpView() string {
 	status := []string{
-		"The id takes the state's colour. The right column names the state in words,",
-		"and says what the unit waits for, which pane it is in, or that it needs you.",
+		"The id and lane are bold. The right column names the state in words, and says",
+		"what the unit waits for, which pane it is in, or that it needs you.",
 	}
 	keys := []string{
 		"j / k      move",
 		"g / G      first and last",
-		"space      fold the selected branch",
-		"d          detail pane for the selected unit",
+		"enter / d  detail pane for the selected unit",
 		"esc        close the overlay or legend",
 		"ctrl+c     quit",
 		"",
-		"ctrl+d     then an action:",
+		"space      then an action:",
+		"  space    fold the selected branch",
 		"  f        jump to the selected unit's pane",
 		"  o        open the unit's link (a pull request, a review)",
 		"  r        re-read plan, state and herdr",
@@ -613,10 +628,9 @@ func (m viewModel) treeLines(width int) ([]string, int) {
 		rows = append(rows, row{m.rowByID(line.ID), line.Prefix, suffix, fold})
 	}
 
-	parts := make([][5]string, 0, len(rows))
+	parts := make([]rowCells, 0, len(rows))
 	for _, r := range rows {
-		h, l, i, rest, right := m.rowParts(r.u, r.prefix, r.suffix, r.fold)
-		parts = append(parts, [5]string{h, l, i, rest, right})
+		parts = append(parts, m.rowParts(r.u, r.prefix, r.suffix, r.fold))
 	}
 	mt := m.metricsOf(parts, max(10, width-1))
 
@@ -646,10 +660,9 @@ func (m viewModel) sectionLines(width int) ([]string, int) {
 		if len(rows) == 0 {
 			continue
 		}
-		var parts [][5]string
+		var parts []rowCells
 		for _, u := range rows {
-			h, l, i, rest, right := m.rowParts(u, "", "", "")
-			parts = append(parts, [5]string{h, l, i, rest, right})
+			parts = append(parts, m.rowParts(u, "", "", ""))
 		}
 		mt := m.metricsOf(parts, max(10, width-1))
 
@@ -689,28 +702,6 @@ func (m viewModel) statusText(u UnitRow) string {
 	return u.Status
 }
 
-// rowParts splits a row into the two columns' worth of text. The left column is
-// the connectors, the fold mark, the id, the join count, the lane and the goal;
-// the right column is the status.
-func (m viewModel) rowParts(u UnitRow, prefix, suffix, fold string) (head, lead, id, rest, right string) {
-	join := ""
-	if len(u.Inputs) > 1 {
-		join = fmt.Sprintf(" ∧%d", len(u.Inputs))
-	}
-	where := u.Minion
-	if u.Pane != "" {
-		where += " " + u.Pane
-	}
-	head = prefix + fold
-	if head != "" {
-		lead = " " // air between the fold mark and the id
-	}
-	id = pad(u.ID, idWidth(m.snap))
-	rest = strings.TrimLeft(join+" "+pad(truncate(where, 22), whereWidth(m.snap))+" "+u.Goal, " ")
-	right = linkMark(u) + m.statusText(u) + suffix
-	return head, lead, id, rest, right
-}
-
 // rowMetrics sizes the two columns for the rows that are about to be drawn: the
 // left column as wide as its longest line, the right column as wide as its
 // longest status, and a small fixed gap between them. The pair then sits at the
@@ -722,75 +713,13 @@ type rowMetrics struct {
 	pad   int
 }
 
-func (m viewModel) metricsOf(rows [][5]string, avail int) rowMetrics {
-	const pad = 2
-	left, right := 0, 0
-	for _, parts := range rows {
-		head, lead, id, rest, status := parts[0], parts[1], parts[2], parts[3], parts[4]
-		left = max(left, runeLen(head+lead+id+" "+rest))
-		right = max(right, runeLen(status))
-	}
-	// Keep the gap at pad and let the left column shrink instead.
-	left = min(left, max(20, avail-right-pad))
-	return rowMetrics{left: left, right: right, pad: pad}
-}
-
-// rowLine draws one row against those columns: the left text padded to the
-// column, the gap, then the status right aligned inside its own column.
-func (m viewModel) rowLine(u UnitRow, width int, prefix, suffix, fold string, mt rowMetrics) string {
-	head, lead, id, rest, right := m.rowParts(u, prefix, suffix, fold)
-
-	fixed := runeLen(head) + runeLen(lead) + runeLen(id) + 1
-	if mt.left < fixed {
-		plain := truncate(head+lead+id, max(4, mt.left))
-		return m.paintRow(u, plain, "", "", "")
-	}
-	// The padding belongs to the rest of the row, not to the line: paintRow
-	// rebuilds the row from its parts, so spaces added to the assembled string
-	// would be dropped and the status would drift left on short rows.
-	rest = truncate(rest, max(0, mt.left-fixed))
-	rest += strings.Repeat(" ", max(0, mt.left-fixed-runeLen(rest)))
-	plain := head + lead + id + " " + rest
-
-	right = truncate(right, mt.right)
-	if mt.right > runeLen(right) {
-		right = strings.Repeat(" ", mt.right-runeLen(right)) + right
-	}
-	return m.paintRow(u, plain, head+lead, id, rest) + strings.Repeat(" ", mt.pad) + m.paintRight(u, right)
-}
-
-// paintRow styles the left side. The selected row is plain text inside reverse
-// video, so nesting colours inside the highlight cannot fight it.
-func (m viewModel) paintRow(u UnitRow, plain, head, id, rest string) string {
-	if u.ID == m.selectedID() {
-		return selectedStyle.Render(plain)
-	}
-	if head == "" && id == "" {
-		return plain
-	}
-	style := statusStyles[u.Status]
-	settled := u.Status == "done" || u.Status == "canceled"
-	idStyle := style.Bold(true)
-	if settled {
-		idStyle = dimStyle
-	}
-	// The middle is context, not the headline: the id and the status column
-	// should win the eye. Faint keeps the goal readable without competing.
-	restStyle := dimStyle
-	return dimStyle.Render(head) + idStyle.Render(id) + " " + restStyle.Render(rest)
-}
-
 func (m viewModel) paintRight(u UnitRow, right string) string {
 	if u.ID == m.selectedID() {
 		return selectedStyle.Render(right)
 	}
-	switch u.Status {
-	case "blocked", "working":
-		return statusStyles[u.Status].Render(right)
-	case "done", "canceled":
-		return dimStyle.Render(right)
-	}
-	return right
+	// The right column uses the same palette as the header counts and the
+	// detail bar, so a done unit is green everywhere it is named.
+	return statusStyles[u.Status].Render(right)
 }
 
 func (m viewModel) detailBox(width, height int) string {
@@ -853,9 +782,9 @@ func (m viewModel) detailBox(width, height int) string {
 }
 
 func (m viewModel) footerView() string {
-	keys := "j/k move · d detail · space fold · ctrl+d actions"
+	keys := "j/k move · enter detail · space actions"
 	if m.prefix {
-		keys = "ctrl+d: choose an action · esc cancels"
+		keys = "space: choose an action · esc cancels"
 	}
 	if m.state.UpdatedAt == "" && !m.prefix {
 		keys = "no state yet · " + keys

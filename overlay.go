@@ -143,7 +143,7 @@ func (m viewModel) detailOverlay() string {
 		Padding(0, 1).
 		Width(inner).
 		Render(b.String())
-	hint := dimStyle.Render("tab file · enter read · d close")
+	hint := dimStyle.Render("j/k file · enter read · d close")
 	return lipgloss.Place(m.width, max(4, m.height-5), lipgloss.Center, lipgloss.Center, box) + "\n" + hint
 }
 
@@ -231,11 +231,11 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 			m.overlay = ""
 		case "esc":
 			m.overlay = ""
-		case "tab", "l", "right":
+		case "j", "down", "tab", "l", "right":
 			if n := len(m.artifacts(m.mustSelected())); n > 0 {
 				m.artIdx = (m.artIdx + 1) % n
 			}
-		case "shift+tab", "h", "left":
+		case "k", "up", "shift+tab", "h", "left":
 			if n := len(m.artifacts(m.mustSelected())); n > 0 {
 				m.artIdx = (m.artIdx + n - 1) % n
 			}
