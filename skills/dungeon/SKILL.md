@@ -58,9 +58,9 @@ base: main
 concurrency: 3
 
 minions:
-  - {id: scout, role: scout}                        # facts. no writes
+  - {id: scout, role: scout, tools: "read,bash,grep,find,ls"}  # facts. no writes
   - {id: w1, role: worker, worktree: w1}            # writes. own worktree
-  - {id: r1, role: reviewer, of: w1}                # verdict. no writes
+  - {id: r1, role: reviewer, of: w1}                # reads w1. gives a verdict
   - {id: land, role: integrator, worktree: int}     # merges. own worktree
 
 units:
@@ -73,7 +73,10 @@ units:
     deps: [recon]
     goal: Make the read timeout injectable.
     accept: go test ./apps/api/...    # the only path to done
-  - {id: review-api, minion: r1, deps: [api-timeout]}
+  - id: review-api
+    minion: r1
+    deps: [api-timeout]
+    verdict: "Verdict: PASS"          # the exact report line that proves it
   - id: land
     minion: land
     deps: [review-api]
@@ -83,14 +86,29 @@ units:
 `dungeon check` must pass before anything runs. A plan that does not validate is
 a plan that cannot dispatch.
 
+A minion's `tools` list replaces the role default. The default is `read,bash`
+for staff and `read,bash,edit,write` for writers. Leave the field out to keep
+the default. List lowercase tool names, comma separated, with no empty items
+and no duplicates.
+
+A reviewer with `of: w1` reads `w1`'s worktree, so it reviews the branch that
+was written. A staff minion with no pair reads the base checkout. `of` names
+the writer whose worktree the reviewer reads.
+
+A `verdict` line proves a reviewer unit without an accept command. Any report
+line whose trimmed text equals the verdict marks the unit `done`. A report
+without that line marks it `rejected`. A missing report marks it `blocked`. A
+verdict unit cannot also set `accept`.
+
 Good units, in the order that matters:
 
 - **One concern.** If the goal needs an "and", it is two units.
 - **Disjoint paths.** Two units that touch one file are one unit, or they are
   ordered with `deps`.
-- **A real acceptance command.** It runs in the lane's worktree. Exit 0 is the
-  only thing that makes a unit done. No command means `unproven`, which blocks
-  every dependent.
+- **A real acceptance command.** It runs in the lane's worktree. Exit 0 makes
+  the unit done. A reviewer may give a `verdict` line instead, and that exact
+  report line makes its unit done. No accept and no verdict means `unproven`,
+  which blocks every dependent.
 - **A small unit.** A unit a lane can finish in one sitting gets a report worth
   reading.
 
@@ -98,6 +116,38 @@ More than one encounter under `.dungeon`: `dungeon view` opens a picker, and
 every other command needs `--plan`. Extra encounters live at
 `.dungeon/<name>/plan.yaml` with their own state, briefs and reports. A lane
 passes the full path; there is no picker outside the view.
+
+## Loops
+
+A loop: one review and fix cycle, declared once and expanded into units. Use it
+when a fix needs more than one pass and the reviewer decides when the work is
+good enough.
+
+```yaml
+loops:
+  - id: auth
+    reviewer: r1
+    fixer: w1
+    rounds: 2
+    focus: timeout handling and error paths
+    pass: "Verdict: PASS"
+    paths: [apps/api/**]
+    review_goal: Review the auth timeout fix. Cite file:line.
+    fix_goal: Fix what the review found. Read its report.
+```
+
+That loop expands to `auth-review-1`, `auth-fix-1`, `auth-review-2` and
+`auth-fix-2`. The first review has no deps. Each fix depends on its review. Each
+later review depends on the fix before it.
+
+`rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
+a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
+`review_goal` and `fix_goal` are optional. Without them the generated goals name
+the round, the focus and the report to read.
+
+A passing review cancels every later planned unit in the same loop. The state
+note says `loop <id> satisfied at round <n>`. A failing review rejects and the
+next fix is dispatched. A fix that finishes proves nothing and cancels nothing.
 
 ## The loop
 
@@ -126,7 +176,12 @@ from `$HERDR_PANE_ID` at dispatch, so run dungeon from the pane that should
 receive the ping.
 
 A ping is a wake-up, not a verdict. Run `dungeon next` to settle the unit: the
-report and the accept command still decide. Then read the report.
+report and the unit's accept command or verdict still decide. Then read the
+report.
+
+Every brief lists the reports from the unit's deps under `reports from deps`,
+one absolute path per dep. Point the lane at those files instead of asking it
+to search. A fix unit's report path is the review report it must read.
 
 `space f` jumps to the selected unit's lane. Use it on a `blocked` row: the
 lane is asking the operator something, and the answer needs their eyes on that
@@ -148,9 +203,9 @@ so a stale plan never blocks a run.
 | `waiting` | deps not landed | nothing. `next` handles it |
 | `working` | a lane is on it | nothing. Do not help |
 | `blocked` | needs a human, or the plan is wrong | read the note, then act |
-| `done` | its accept command exited 0 | nothing |
-| `unproven` | finished, and there is no accept command | add an `accept`, re-plan the unit |
-| `rejected` | the accept command failed | send it back, see below |
+| `done` | proved: accept exited 0, or the verdict line was found | nothing |
+| `unproven` | finished, and there is no accept command or verdict | add an `accept` or a `verdict`, re-plan the unit |
+| `rejected` | the accept command failed, or the verdict line was absent | send it back, see below |
 | `canceled` | withdrawn | nothing |
 
 Only `done` releases dependents. Nothing upgrades a claim to a pass.
