@@ -178,12 +178,15 @@ rendered as markdown, so the headings, lists and code blocks a lane wrote
 survive the trip. Anything else is shown as plain text. A missing brief is shown
 as missing, not hidden.
 
-Markdown is rendered **once**, when the file is opened and again only when the
-pane's width changes. Rendering it in the frame path made every keystroke pay for
-a full parse, which is why scrolling a long report crawled. The style is
-`notty`: structure without per-word colour, which cut a 400 line report from
-520KB of escape codes to 40KB, and its render from 51ms to 10ms. The reader
-scrolls at about 1.3ms a frame.
+Markdown is rendered **once**, when the file is opened and again only when
+the pane's width changes. Rendering happens at open, never per frame; rendering
+it in the frame path made every keystroke pay for a full parse, which is why
+scrolling a long report crawled. The style is sparse: reports and briefs keep
+colour on headings, links and code, while prose stays plain. It leaves out the
+document colour that made the dark style wrap every prose run in an escape
+sequence. On a 400 line report that is 45KB and 680 escapes, against 521KB and
+64,143 for the dark style, and a render of about 7ms. The reader scrolls at
+about 1.3ms a frame.
 
 `link` pins a pull request, a review, or any http(s) url to a unit. The tool
 never parses it, so no forge gets special treatment. The row is marked `↗`,
