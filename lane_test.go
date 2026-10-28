@@ -261,3 +261,44 @@ func TestPanesGetEqualShares(t *testing.T) {
 		t.Fatalf("third lane should keep 1/2 of the root:\n%s", calls)
 	}
 }
+
+// The argv pi receives is the contract: a minion's tools list replaces the role
+// default, and a minion with no list keeps the default.
+func TestLaneToolsOverrideAndFallBack(t *testing.T) {
+	repo := gitRepo(t)
+	log := fakeHerdr(t, "")
+	plan := strings.Replace(planFor(repo),
+		"  - {id: w1, role: worker, worktree: w1}",
+		"  - {id: s1, role: scout, tools: \"read,grep,find,ls\"}\n  - {id: w1, role: worker, worktree: w1}", 1)
+	planPath, _, _ := encounter(t, repo, plan)
+
+	code, stdout, stderr := runCLI("up", "--no-dispatch", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	calls, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scout, worker string
+	for _, line := range strings.Split(string(calls), "\n") {
+		switch {
+		case strings.HasPrefix(line, "agent start s1 "):
+			scout = line
+		case strings.HasPrefix(line, "agent start w1 "):
+			worker = line
+		}
+	}
+	if scout == "" || worker == "" {
+		t.Fatalf("both lanes should start:\n%s", calls)
+	}
+	if !strings.Contains(scout, "--tools read,grep,find,ls") {
+		t.Fatalf("a scout must get its own tools, got %q", scout)
+	}
+	if strings.Contains(scout, "bash") {
+		t.Fatalf("a scout that did not list bash must not get it: %q", scout)
+	}
+	if !strings.Contains(worker, "--tools read,bash,edit,write") {
+		t.Fatalf("a worker with no tools must get the role default, got %q", worker)
+	}
+}

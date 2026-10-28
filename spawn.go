@@ -168,7 +168,7 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 			return res, err
 		}
-		if err := h.startAgent(ctx, m.ID, pane, laneArgs(m.Role, sessionDir)); err != nil {
+		if err := h.startAgent(ctx, m.ID, pane, laneArgs(m.Role, m.Tools, sessionDir)); err != nil {
 			res.Failed = append(res.Failed, m.ID)
 			fmt.Fprintf(out, "%s: %v\n", m.ID, err)
 			continue
