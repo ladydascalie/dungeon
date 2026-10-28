@@ -203,6 +203,36 @@ the plan says `split: down`, and they are equal shares of the tab.
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
 
+## Agent names
+
+The minion id is your handle. Briefs, reports, worktrees, sessions, state keys
+and every instruction you write use it. herdr sees the derived agent name
+instead: `<minion>-<token>`.
+
+The token is exactly two characters from `[0-9a-z]`. `dungeon up` generates it
+on the first spawn and stores it as `token` in the run's `state.json`. The agent
+name is the minion id truncated to 29 characters, a hyphen, then the token, so
+it stays inside herdr's 32 character limit. herdr names are lowercase only, and
+the minion id alphabet is already lowercase.
+
+herdr names are global. `up` checks every derived name against the live fleet
+and re-rolls the whole token when one is taken, up to 64 draws, then fails with
+a finding that names the live agent. Two encounters may declare the same minion
+ids; the token is what keeps them on separate agents.
+
+Consequences for you:
+
+- Never hardcode an agent name in a plan, a brief or a command. Write the
+  minion id; dungeon derives the rest.
+- To reach a lane, use `space f`, `dungeon status`, or the pane recorded in the
+  state. Do not call `herdr` with a name you guessed.
+- A run already in flight without a token keeps the bare minion id. `up` leaves
+  its live bare agents alone instead of renaming the fleet under it, so do not
+  expect a token on an old run.
+
+Two minion ids that collide after truncation fail `dungeon check` with
+`E_DUPLICATE_AGENT`. Shorten one id.
+
 ## Lanes ping you
 
 Every brief tells the lane to write its report and then run `herdr pane run

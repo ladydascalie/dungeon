@@ -133,6 +133,36 @@ the lane really stopped.
 lane asking for approval are all one keypress away, and the pane it lands on is
 the one `up` recorded or the one the plan pinned.
 
+### Agent names
+
+The plan's minion id is the human handle: `minion: w1`, briefs, reports,
+worktrees, sessions, state and `dungeon status` all use it. herdr is the one
+place that sees a different string.
+
+A run carries a token of exactly two characters from `[0-9a-z]`. It lives as
+`token` in `.dungeon/state.json` and is generated on the first `dungeon up`.
+Every agent the run starts is named `<minion>-<token>`, so a plan that declares
+`w1` appears in herdr as `w1-7f`. The agent name is derived from the state and
+the minion: the minion id truncated to 29 characters, a hyphen, then the token,
+which keeps it inside herdr's 32 character limit. herdr names are lowercase
+only, and the minion id is already restricted to that alphabet.
+
+`up`, `next`, `status`, `view` and `down` all derive the same name from the
+state, so a run keeps one identity from spawn to teardown. herdr names are
+global: before it starts anything, `up` checks every derived name against
+`herdr agent list` and re-rolls the whole token when one is already live, up to
+64 draws, then fails with a finding that names the live agent. Two encounters
+that both declare `w1` therefore get two agents, `w1-7f` and `w1-k2`, instead of
+sharing one.
+
+Truncation is the only way two names in one plan can collide. `dungeon check`
+reports it as `E_DUPLICATE_AGENT` and names both ids, so shorten one of them.
+
+A state with no token, written by an older dungeon or by a run already in
+flight, keeps using the bare minion id. `up` leaves such a run alone when its
+bare agents are already live rather than renaming the fleet under it; the token
+arrives on the first `up` that starts a fleet from scratch.
+
 Keys are modal. `space` opens a prefix and a which-key pane bottom right, listing
 every action the prefix can take: fold, focus, open link, reload, layout, hide,
 fold all, help, quit. Motion, `d`/`enter` and the overlay keys stay direct.
@@ -209,7 +239,8 @@ is provisional.
 One encounter is one directory: `.dungeon/` holds `plan.yaml`, `state.json`,
 `briefs/` and `reports/`. Nothing goes to `$XDG_STATE_HOME`, so a brief survives
 until the encounter is archived and `dungeon down` cannot lose it. The pane column comes from
-`herdr agent list` at read time, matched by agent name, so it cannot go stale.
+`herdr agent list` at read time, matched by the run's derived agent name, so it
+cannot go stale and cannot pick up another run's lane.
 
 Exit codes: `0` clean, `1` findings, `2` could not run (missing file, bad usage).
 
