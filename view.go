@@ -115,6 +115,11 @@ type viewModel struct {
 	readerTop      int
 	readerRendered []string // markdown, rendered once per width, never per frame
 	readerWidth    int
+	searching      bool            // the reader's search prompt is open
+	query          string          // the live search, kept after enter so n and N work
+	searchTop      int             // readerTop when the search opened, restored on esc
+	matches        []int           // display line indices holding the query
+	matchIdx       int             // the match n and N move from
 	folded         map[string]bool // explicit operator folds
 	foldExplicit   map[string]bool // the operator set this fold, so auto-fold must not win
 	order          []string        // unit and loop ids in display order
@@ -175,6 +180,7 @@ func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		if m.overlay == "reader" {
 			m.renderReader()
+			m.reflowSearch()
 		}
 		return m, nil
 

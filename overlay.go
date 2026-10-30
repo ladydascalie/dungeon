@@ -4,16 +4,27 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // The overlay is the per-unit detail pane: what the unit is, what it waits for,
 // and the files kept with it. The list can only show a row; a brief or a report
 // needs somewhere to be read.
+
+var (
+	// matchStyle is every other hit on screen: the reader must show why a line
+	// matched without hiding the current one.
+	matchStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0"))
+	// currentMatchStyle is the hit n and N sit on, so a cycle lands somewhere
+	// the eye can find.
+	currentMatchStyle = lipgloss.NewStyle().Background(lipgloss.Color("39")).Foreground(lipgloss.Color("0")).Bold(true)
+)
 
 type artifact struct {
 	Path  string
@@ -187,7 +198,7 @@ func (m viewModel) readerView() string {
 		body = dimStyle.Render("empty file")
 	} else {
 		end := min(len(lines), m.readerTop+rows)
-		body = strings.Join(lines[m.readerTop:end], "\n")
+		body = strings.Join(m.paintedLines(lines, end), "\n")
 	}
 	title := fmt.Sprintf("%s  %d lines", filepath.Base(m.reader), len(lines))
 	box := lipgloss.NewStyle().
@@ -196,8 +207,227 @@ func (m viewModel) readerView() string {
 		Width(inner).
 		Height(rows).
 		Render(titleStyle.Render(title) + "\n" + body)
-	hint := dimStyle.Render("j/k scroll · esc back · d close")
-	return lipgloss.Place(m.width, max(4, m.height-5), lipgloss.Center, lipgloss.Center, box) + "\n" + hint
+	return lipgloss.Place(m.width, max(4, m.height-5), lipgloss.Center, lipgloss.Center, box) + "\n" +
+		dimStyle.Render(m.readerHint())
+}
+
+// readerHint is the reader footer. The search prompt takes it over while the
+// operator types, and the match count stays after enter so n and N make sense.
+func (m viewModel) readerHint() string {
+	count := "no match"
+	if len(m.matches) > 0 {
+		count = fmt.Sprintf("%d/%d", m.matchIdx+1, len(m.matches))
+	}
+	switch {
+	case m.searching:
+		return "/" + m.query + "▏  " + count + " · enter keep · esc cancel"
+	case m.query != "":
+		return "/" + m.query + "  " + count + " · n next · N prev · esc back"
+	}
+	return "j/k scroll · esc back · d close"
+}
+
+// paintedLines is the visible slice of the reader, with the search painted in.
+// A hit is painted on the display line the matches point at, so what the
+// operator scrolls to and what lights up are the same line.
+func (m viewModel) paintedLines(lines []string, end int) []string {
+	out := append([]string(nil), lines[m.readerTop:end]...)
+	if m.query == "" || len(m.matches) == 0 {
+		return out
+	}
+	current := -1
+	if m.matchIdx >= 0 && m.matchIdx < len(m.matches) {
+		current = m.matches[m.matchIdx]
+	}
+	for i := range out {
+		line := m.readerTop + i
+		if !holdsLine(m.matches, line) {
+			continue
+		}
+		style := matchStyle
+		if line == current {
+			style = currentMatchStyle
+		}
+		out[i] = highlightANSI(out[i], m.query, style)
+	}
+	return out
+}
+
+// holdsLine reports whether line is one of the sorted match lines.
+func holdsLine(matches []int, line int) bool {
+	i := sort.SearchInts(matches, line)
+	return i < len(matches) && matches[i] == line
+}
+
+// highlightANSI paints every case-insensitive occurrence of query in style. It
+// matches the visible text only: an escape sequence is never a hit, so a query
+// such as "m" cannot land inside a colour code.
+func highlightANSI(line, query string, style lipgloss.Style) string {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return line
+	}
+	// plain is the visible text and at maps each of its bytes to the byte it
+	// starts at in line, escapes included.
+	var plain strings.Builder
+	var at []int
+	for i := 0; i < len(line); {
+		if n := escapeLen(line[i:]); n > 0 {
+			i += n
+			continue
+		}
+		at = append(at, i)
+		plain.WriteByte(line[i])
+		i++
+	}
+	vis := plain.String()
+	lower := strings.ToLower(vis)
+	if len(lower) != len(vis) {
+		// Case folding changed the byte count, so offsets no longer map. Leave
+		// the line alone rather than paint the wrong span.
+		return line
+	}
+	var b strings.Builder
+	from, prev := 0, 0
+	for {
+		j := strings.Index(lower[from:], q)
+		if j < 0 {
+			break
+		}
+		start, finish := from+j, from+j+len(q)
+		rawStart := at[start]
+		rawEnd := len(line)
+		if finish < len(at) {
+			rawEnd = at[finish]
+		}
+		b.WriteString(line[prev:rawStart])
+		b.WriteString(style.Render(vis[start:finish]))
+		prev = rawEnd
+		from = finish
+	}
+	if prev == 0 {
+		return line
+	}
+	b.WriteString(line[prev:])
+	return b.String()
+}
+
+// escapeLen is the byte length of the escape sequence line starts with, or 0
+// when it starts with none. Glamour emits SGR, and the reader must not read a
+// parameter as text.
+func escapeLen(line string) int {
+	if len(line) == 0 || line[0] != 0x1b {
+		return 0
+	}
+	if len(line) == 1 {
+		return 1
+	}
+	switch line[1] {
+	case '[': // CSI: parameters, then one final byte in @ to ~
+		for i := 2; i < len(line); i++ {
+			if line[i] >= 0x40 && line[i] <= 0x7e {
+				return i + 1
+			}
+		}
+		return len(line)
+	case ']': // OSC ends at BEL or ST
+		for i := 2; i < len(line); i++ {
+			if line[i] == 0x07 {
+				return i + 1
+			}
+			if line[i] == 0x1b && i+1 < len(line) && line[i+1] == '\\' {
+				return i + 2
+			}
+		}
+		return len(line)
+	}
+	return 2
+}
+
+// readerMatches lists the display lines holding the query, case folded. The
+// display is what the operator sees, so a hit is a line on screen, not a source
+// line: the rendered line numbers are the ones the reader scrolls by.
+func readerMatches(lines []string, query string) []int {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
+	}
+	var out []int
+	for i, line := range lines {
+		if strings.Contains(strings.ToLower(ansi.Strip(line)), q) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+// searchReader recomputes the matches and jumps to the first one at or after
+// the line the search started on, so refining a query keeps its place in the
+// file instead of snapping back to the top.
+func (m *viewModel) searchReader() {
+	m.matches = readerMatches(m.readerDisplay(), m.query)
+	if len(m.matches) == 0 {
+		m.matchIdx = 0
+		return
+	}
+	m.matchIdx = 0
+	for i, line := range m.matches {
+		if line >= m.searchTop {
+			m.matchIdx = i
+			break
+		}
+	}
+	m.readerTop = m.matches[m.matchIdx]
+}
+
+// jumpMatch moves to a match and wraps at either end.
+func (m *viewModel) jumpMatch(i int) {
+	if len(m.matches) == 0 {
+		return
+	}
+	n := len(m.matches)
+	m.matchIdx = ((i % n) + n) % n
+	m.readerTop = m.matches[m.matchIdx]
+}
+
+// reflowSearch re-finds the query after a re-render, which changes the display
+// lines the matches point into. The match index survives.
+func (m *viewModel) reflowSearch() {
+	if m.query == "" {
+		return
+	}
+	m.matches = readerMatches(m.readerDisplay(), m.query)
+	m.jumpMatch(m.matchIdx)
+}
+
+// searchKey drives the reader's search prompt. Typing refines the query and
+// previews the first hit; enter keeps it, esc puts the reader back where the
+// search started.
+func (m *viewModel) searchKey(key string) {
+	switch key {
+	case "esc":
+		m.searching = false
+		m.query, m.matches, m.matchIdx = "", nil, 0
+		m.readerTop = m.searchTop
+	case "enter":
+		m.searching = false
+		if len(m.matches) == 0 && m.query != "" {
+			m.notice = "no match for " + m.query
+		}
+	case "ctrl+u":
+		m.query, m.matches, m.matchIdx = "", nil, 0
+		m.readerTop = m.searchTop
+	case "backspace":
+		if r := []rune(m.query); len(r) > 0 {
+			m.query = string(r[:len(r)-1])
+			m.searchReader()
+		}
+	default:
+		if len([]rune(key)) == 1 {
+			m.query += key
+			m.searchReader()
+		}
+	}
 }
 
 func (m *viewModel) openArtifact() {
@@ -224,6 +454,7 @@ func (m *viewModel) openArtifact() {
 		}
 	}
 	m.readerTop = 0
+	m.searching, m.query, m.matches, m.matchIdx = false, "", nil, 0
 	m.overlay = "reader"
 	m.renderReader()
 }
@@ -276,7 +507,18 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 		}
 		return true
 	case "reader":
+		if m.searching {
+			m.searchKey(key)
+			return true
+		}
 		switch key {
+		case "/":
+			m.searching = true
+			m.searchTop = m.readerTop
+		case "n":
+			m.jumpMatch(m.matchIdx + 1)
+		case "N":
+			m.jumpMatch(m.matchIdx - 1)
 		case "j", "down":
 			if m.readerTop+1 < len(m.readerDisplay()) {
 				m.readerTop++
@@ -290,6 +532,7 @@ func (m *viewModel) handleOverlayKey(key string) bool {
 		case "G", "end":
 			m.readerTop = max(0, len(m.readerDisplay())-1)
 		case "esc", "d", "enter":
+			m.query, m.matches, m.matchIdx = "", nil, 0
 			m.overlay = "detail"
 		default:
 			return false

@@ -178,6 +178,15 @@ rendered as markdown, so the headings, lists and code blocks a lane wrote
 survive the trip. Anything else is shown as plain text. A missing brief is shown
 as missing, not hidden.
 
+`/` in the reader starts a case-insensitive search over the lines on screen.
+Typing jumps to the first match at or after the line the search started on, the
+footer counts the hits (`1/7`), `enter` keeps the search, and `n`/`N` step
+through the matches, wrapping at either end. `esc` cancels and puts the reader
+back where the search began. Every hit is painted, and the one `n` and `N` sit
+on takes a second colour. Matches follow the rendered lines, so a phrase that
+word wrap splits across two lines will not be found; search a word. A hit is
+found in the visible text, never in the colour codes around it.
+
 Markdown is rendered **once**, when the file is opened and again only when
 the pane's width changes. Rendering happens at open, never per frame; rendering
 it in the frame path made every keystroke pay for a full parse, which is why
