@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeEncounter(t *testing.T, path, name string) {
@@ -18,18 +19,31 @@ func writeEncounter(t *testing.T, path, name string) {
 	}
 }
 
-func TestDiscoverPlansListsDefaultAndFolds(t *testing.T) {
+// touchEncounter sets a plan's mtime so ordering by last touch is not left to
+// the filesystem's timestamp resolution.
+func touchEncounter(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiscoverPlansListsNewestTouchFirst(t *testing.T) {
 	root := t.TempDir()
 	writeEncounter(t, filepath.Join(root, ".dungeon", "plan.yaml"), "root")
 	writeEncounter(t, filepath.Join(root, ".dungeon", "auth", "plan.yaml"), "auth")
 	writeEncounter(t, filepath.Join(root, ".dungeon", "web", "plan.yaml"), "web")
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	touchEncounter(t, filepath.Join(root, ".dungeon", "auth", "plan.yaml"), base.Add(2*time.Hour))
+	touchEncounter(t, filepath.Join(root, ".dungeon", "web", "plan.yaml"), base.Add(time.Hour))
+	touchEncounter(t, filepath.Join(root, ".dungeon", "plan.yaml"), base)
 	t.Chdir(root)
 
 	found := discoverPlans()
 	if len(found) != 3 {
 		t.Fatalf("found %d plans, want 3: %+v", len(found), found)
 	}
-	for i, want := range []string{"root", "auth", "web"} {
+	for i, want := range []string{"auth", "web", "root"} {
 		if found[i].Name != want {
 			t.Fatalf("plan %d is %q, want %q", i, found[i].Name, want)
 		}
@@ -55,11 +69,35 @@ func TestDiscoverPlansListsAnUnreadablePlan(t *testing.T) {
 	if len(found) != 2 {
 		t.Fatalf("found %d plans, want 2", len(found))
 	}
-	if found[1].Err == nil {
+	badPlan := found[0]
+	if badPlan.Name != "bad" {
+		badPlan = found[1]
+	}
+	if badPlan.Err == nil {
 		t.Fatal("a broken plan should be listed with its error")
 	}
-	if found[1].Name != "bad" {
-		t.Fatalf("unreadable plan name %q, want bad", found[1].Name)
+	if badPlan.Name != "bad" {
+		t.Fatalf("unreadable plan name %q, want bad", badPlan.Name)
+	}
+}
+
+func TestDiscoverPlansRanksAStateWriteAsATouch(t *testing.T) {
+	root := t.TempDir()
+	writeEncounter(t, filepath.Join(root, ".dungeon", "plan.yaml"), "root")
+	writeEncounter(t, filepath.Join(root, ".dungeon", "auth", "plan.yaml"), "auth")
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	touchEncounter(t, filepath.Join(root, ".dungeon", "plan.yaml"), base)
+	touchEncounter(t, filepath.Join(root, ".dungeon", "auth", "plan.yaml"), base)
+	state := filepath.Join(root, ".dungeon", "auth", "state.json")
+	if err := os.WriteFile(state, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	touchEncounter(t, state, base.Add(time.Hour))
+	t.Chdir(root)
+
+	found := discoverPlans()
+	if len(found) != 2 || found[0].Name != "auth" {
+		t.Fatalf("a state write should lift the encounter: %+v", found)
 	}
 }
 

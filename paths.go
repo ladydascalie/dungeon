@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // encounterDir is absolute, always. A lane runs in a worktree where a relative
@@ -69,8 +70,9 @@ func encounterRoot() (string, bool) {
 }
 
 // discoverPlans lists every encounter under the nearest .dungeon directory: the
-// default plan.yaml first, then one plan.yaml per subdirectory. Extra encounters
-// live in their own fold, so each keeps its own state, briefs and reports.
+// default plan.yaml and one plan.yaml per subdirectory, newest touch first so the
+// picker opens on the plan the operator last worked. Extra encounters live in
+// their own fold, so each keeps its own state, briefs and reports.
 func discoverPlans() []Encounter {
 	root, ok := encounterRoot()
 	if !ok {
@@ -101,7 +103,30 @@ func discoverPlans() []Encounter {
 	for _, path := range plans {
 		add(path)
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, tj := lastTouched(out[i].Path), lastTouched(out[j].Path)
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return out[i].Path < out[j].Path
+	})
 	return out
+}
+
+// lastTouched is when the encounter last moved: the newest of its plan and its
+// state, so a running encounter outranks one that was only edited once.
+func lastTouched(planPath string) time.Time {
+	var newest time.Time
+	for _, path := range []string{planPath, StatePath(planPath)} {
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	return newest
 }
 
 // shortPath names a plan relative to the working directory when it can, so a

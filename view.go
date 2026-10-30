@@ -402,7 +402,7 @@ func (m *viewModel) choose(key string) tea.Cmd {
 	return nil
 }
 
-// choiceView is the encounter picker: one line per plan, default first.
+// choiceView is the encounter picker: one line per plan, most recently touched first.
 func (m viewModel) choiceView() string {
 	width := 0
 	for _, e := range m.choosing {
