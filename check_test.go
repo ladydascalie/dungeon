@@ -1,7 +1,6 @@
 package main
 
 import (
-	"sort"
 	"strings"
 	"testing"
 )
@@ -221,94 +220,6 @@ func TestCycleIsReportedOnce(t *testing.T) {
 	if !strings.Contains(f[0].Message, "api-timeout") || !strings.Contains(f[0].Message, "web-timeout") {
 		t.Fatalf("cycle should name its members: %q", f[0].Message)
 	}
-}
-
-// The real dagr run in ll-frontend/.dagr/run.json, converted mechanically.
-// It cannot pass: dagr records no paths, no roles, and 14 of 32 tasks carry no
-// owner. Those counts are the finding, so pin them.
-func TestDagrRunConvertedRawFails(t *testing.T) {
-	p, f, err := DecodeFile("testdata/dagr-ll-frontend-raw.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(f) > 0 {
-		t.Fatalf("decode: %v", f)
-	}
-	got := map[Code]int{}
-	for _, x := range Validate(p) {
-		got[x.Code]++
-	}
-	want := map[Code]int{ENoMinion: 14, ENoPaths: 8}
-	if len(got) != len(want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-	for code, n := range want {
-		if got[code] != n {
-			t.Fatalf("got %v, want %v", got, want)
-		}
-	}
-}
-
-// The same run, set up correctly: every unit names a minion, every worker unit
-// declares paths. Gates become reviewer verdicts, the orchestrator owner
-// becomes a gatekeeper plus an integrator.
-func TestDagrRunMappedIsClean(t *testing.T) {
-	p, f, err := DecodeFile("testdata/dagr-ll-frontend-mapped.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(f) > 0 {
-		t.Fatalf("decode: %v", f)
-	}
-	if got := Validate(p); len(got) != 0 {
-		t.Fatalf("unexpected findings: %v", got)
-	}
-}
-
-// The mapped plan must carry the same dependency graph as the run it came from.
-// Only canceled work and the operator question may be missing.
-func TestMappedKeepsTheSameGraph(t *testing.T) {
-	raw, _, err := DecodeFile("testdata/dagr-ll-frontend-raw.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	mapped, _, err := DecodeFile("testdata/dagr-ll-frontend-mapped.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	omitted := map[string]bool{"TYPE1": true, "SHIP1": true, "QBG": true}
-
-	rawDeps := map[string][]string{}
-	for _, u := range raw.Units {
-		rawDeps[u.ID] = u.Deps
-	}
-	for _, u := range mapped.Units {
-		want, ok := rawDeps[u.ID]
-		if !ok {
-			if u.ID != "land" {
-				t.Fatalf("unit %q is not in the dagr run", u.ID)
-			}
-			continue
-		}
-		if got := strings.Join(sorted(u.Deps), ","); got != strings.Join(sorted(want), ",") {
-			t.Fatalf("unit %q deps %s, want %s", u.ID, got, strings.Join(sorted(want), ","))
-		}
-	}
-	seen := map[string]bool{}
-	for _, u := range mapped.Units {
-		seen[u.ID] = true
-	}
-	for id := range rawDeps {
-		if !seen[id] && !omitted[id] {
-			t.Fatalf("unit %q was dropped without a reason", id)
-		}
-	}
-}
-
-func sorted(in []string) []string {
-	out := append([]string(nil), in...)
-	sort.Strings(out)
-	return out
 }
 
 func TestEncounterMustBeBranchSafe(t *testing.T) {

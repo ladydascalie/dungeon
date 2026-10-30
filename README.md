@@ -344,24 +344,6 @@ opens it directly.
 id, focus, `round N/cap` and state. `status --json` carries the same rows under
 `loops`.
 
-## Tested against a real dagr run
-
-`testdata/dagr-ll-frontend-raw.json` is `ll-frontend/.dagr/run.json` (dagr v3,
-32 tasks, 6 projects) converted mechanically. It produces 22 findings, and
-those findings are the point:
-
-- 14 of 32 tasks carry no owner at all, so they name no minion.
-- 8 tasks have an owner but no ownership paths, so nothing says what they own.
-
-dagr cannot express either fact, which is why an orchestrator is free to pick
-the work up.
-
-`testdata/dagr-ll-frontend-mapped.yaml` is the same run set up correctly: 30
-units, 16 minions, every unit assigned, every worker unit owning paths, and the
-dependency graph unchanged. It validates clean. Gates become reviewer verdicts;
-the single `orchestrator` owner becomes one gatekeeper plus one integrator. A
-test compares the two plans unit by unit, so the graph cannot drift.
-
 ## More than one encounter
 
 The default encounter is `.dungeon/plan.yaml`. A second one lives in its own
