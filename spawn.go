@@ -37,12 +37,13 @@ func ensureWorktree(repo, base, encounter, minion, path string) error {
 }
 
 // cutWorktree cuts a worktree at path. Worktrunk does the work when it is
-// installed, so the operator's layout, hooks and ignored-file copies apply.
-// Plain git is the fallback, and only when wt is missing.
+// installed, so its own config decides the layout, hooks and ignored-file
+// copies. The path argument is where worktreePath expects the lane to land:
+// worktrunk's config must produce the same place. Plain git is the fallback,
+// and only when wt is missing.
 func cutWorktree(repo, base, branch, path string, create bool) error {
 	if _, err := exec.LookPath("wt"); err == nil {
 		args := []string{
-			"--config-set", fmt.Sprintf("worktree-path=%q", path),
 			"-C", repo, "-y", "switch", "--no-cd", "--format", "json",
 		}
 		if create {
@@ -75,10 +76,12 @@ func cutWorktree(repo, base, branch, path string, create bool) error {
 	return nil
 }
 
-// worktreePath keeps lanes beside the repo, never inside it: a worktree nested
-// in its own repository confuses every tool that walks the tree.
+// worktreePath uses the project's worktree convention, ../<repo>.worktrees/<name>,
+// so dungeon's lanes sit where worktrunk puts every other worktree. A worktree
+// nested in its own repository confuses every tool that walks the tree.
 func worktreePath(repo, encounter, minion string) string {
-	return filepath.Join(filepath.Dir(repo), encounter+"-"+minion)
+	root := filepath.Base(repo) + ".worktrees"
+	return filepath.Join(filepath.Dir(repo), root, encounter+"-"+minion)
 }
 
 // ensureToken gives the run its own herdr names on the first up. The state is

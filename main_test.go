@@ -10,10 +10,9 @@ import (
 	"testing"
 )
 
-// TestMain isolates the suite from the operator's worktrunk config. A
-// post-start hook would run inside a test repo and race the temp directory
-// cleanup. dungeon passes the worktree path explicitly, so an empty config is
-// the whole setting a test needs.
+// TestMain isolates the suite from the operator's worktrunk config. The
+// config keeps dungeon's own worktree convention and adds no hooks: a post-start
+// hook would run inside a test repo and race the temp directory cleanup.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "dungeon-wt")
 	if err != nil {
@@ -21,7 +20,10 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	cfg := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(cfg, nil, 0o644); err != nil {
+	isolated := `skip-shell-integration-prompt = true
+worktree-path = "{{ repo_path }}/../{{ repo }}.worktrees/{{ branch | sanitize }}"
+`
+	if err := os.WriteFile(cfg, []byte(isolated), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
