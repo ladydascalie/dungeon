@@ -6,7 +6,7 @@ import (
 )
 
 const goodPlan = `encounter: fix-auth-timeouts
-repo: ~/Code/Personal/api
+repo: ~/src/api
 base: main
 concurrency: 3
 minions:
