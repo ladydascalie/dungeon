@@ -66,15 +66,10 @@ git -C "$FAKE_WT_REPO" worktree add -b "$FAKE_WT_BRANCH" "$FAKE_WT_PATH" "$FAKE_
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"switch", "--create", "--base main", "enc/w1"} {
+	for _, want := range []string{"--config-set", "worktree-path=", "switch", "--create", "--base main", "enc/w1"} {
 		if !strings.Contains(string(calls), want) {
 			t.Fatalf("wt was not asked for %q:\n%s", want, calls)
 		}
-	}
-	// Worktrunk owns the layout. An override here would ignore the project's
-	// own worktree-path and break the <repo>.worktrees convention.
-	if strings.Contains(string(calls), "--config-set") {
-		t.Fatalf("wt was given a layout override:\n%s", calls)
 	}
 	if _, err := os.Stat(filepath.Join(path, "README.md")); err != nil {
 		t.Fatalf("worktree not at %s: %v", path, err)
