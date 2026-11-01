@@ -8,7 +8,6 @@ minions:
   - {id: w2, role: worker, worktree: fix-auth-w2}
   - {id: r1, role: reviewer, of: w1}
   - {id: r2, role: reviewer, of: w2}
-  - {id: land, role: integrator, worktree: fix-auth-int}
 units:
   - id: recon
     minion: scout
@@ -27,7 +26,3 @@ units:
     accept: bun test
   - {id: review-api, minion: r1, deps: [api-timeout]}
   - {id: review-web, minion: r2, deps: [web-timeout]}
-  - id: land
-    minion: land
-    deps: [review-api, review-web]
-    accept: mise run gate

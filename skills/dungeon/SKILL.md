@@ -62,7 +62,6 @@ minions:
   - {id: scout, role: scout, tools: "read,bash,grep,find,ls"}  # facts. no writes
   - {id: w1, role: worker, worktree: w1}            # writes. own worktree
   - {id: r1, role: reviewer, of: w1}                # reads w1. gives a verdict
-  - {id: land, role: integrator, worktree: int}     # merges. own worktree
 
 units:
   - id: recon
@@ -78,11 +77,12 @@ units:
     minion: r1
     deps: [api-timeout]
     verdict: "Verdict: PASS"          # the exact report line that proves it
-  - id: land
-    minion: land
-    deps: [review-api]
-    accept: mise run gate
 ```
+
+Do not add an integrator unit with an `accept` command. Its worktree is cut
+from base and does not contain the other writers' work, so the gate can never pass.
+`dungeon land` merges the done units and re-runs their accepts against the
+merged result. It is the merge gate.
 
 `dungeon check` must pass before anything runs. A plan that does not validate is
 a plan that cannot dispatch.
@@ -370,9 +370,9 @@ A task that reads like "fix the auth timeouts across the API and the web app":
 2. `api-timeout` on a worker, `deps: [recon]`, `paths: [apps/api/**]`.
 3. `web-timeout` on a second worker, `deps: [recon]`, `paths: [apps/web/**]`.
 4. `review-api` and `review-web` on two reviewers, each paired with its worker.
-5. `land` on the integrator, `deps: [review-api, review-web]`, with the repo gate.
+5. `dungeon land` after both verdicts: it merges the workers' branches and re-runs the repo gate.
 
-Four writing lanes, two verdicts, one merge. You dispatch it and read it. The
+Two writing lanes, two verdicts, one merge gate. You dispatch it and read it. The
 parent's only edit in that whole run is the plan.
 
 ## One-off delegation

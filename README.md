@@ -261,6 +261,10 @@ Exit codes: `0` clean, `1` findings, `2` could not run (missing file, bad usage)
 See `testdata/plan.yaml`. Roles: `scout` and `reviewer` produce facts and
 verdicts; `worker` and `integrator` own a worktree and write.
 
+An integrator unit must not set `accept`: its worktree is cut from base and
+does not contain the other writers' work, so the gate can never pass. `dungeon land`
+merges and re-gates.
+
 ## Loops
 
 A loop declares a review and fix cycle once. `dungeon` expands it into ordinary

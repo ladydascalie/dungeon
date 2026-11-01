@@ -54,7 +54,7 @@ func TestCheckClean(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, want 0", code)
 	}
-	if !strings.Contains(stdout, "ok: fix-auth-timeouts, 6 minions, 6 units") {
+	if !strings.Contains(stdout, "ok: fix-auth-timeouts, 5 minions, 5 units") {
 		t.Fatalf("unexpected output: %q", stdout)
 	}
 }

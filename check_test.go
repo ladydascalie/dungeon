@@ -15,7 +15,6 @@ minions:
   - {id: w2, role: worker, worktree: fix-auth-w2}
   - {id: r1, role: reviewer, of: w1}
   - {id: r2, role: reviewer, of: w2}
-  - {id: land, role: integrator, worktree: fix-auth-int}
 units:
   - id: recon
     minion: scout
@@ -34,10 +33,6 @@ units:
     accept: bun test
   - {id: review-api, minion: r1, deps: [api-timeout]}
   - {id: review-web, minion: r2, deps: [web-timeout]}
-  - id: land
-    minion: land
-    deps: [review-api, review-web]
-    accept: mise run gate
 `
 
 func decodeOK(t *testing.T, src string) Plan {
@@ -134,7 +129,7 @@ func TestFindings(t *testing.T) {
 		{
 			name: "duplicate unit id",
 			plan: edit(t, "{id: review-api, minion: r1", "{id: api-timeout, minion: r1"),
-			want: []Code{EDuplicateID, ECycle, EMissingDep},
+			want: []Code{EDuplicateID, ECycle},
 		},
 		{
 			name: "minion id is not a herdr name",
@@ -173,6 +168,14 @@ func TestFindings(t *testing.T) {
 			plan: edit(t, "    minion: w1\n    paths: [apps/api/**]",
 				"    minion: w1\n    split: {role: worker, count: 2}\n    paths: [apps/api/**]"),
 			want: []Code{ESplitInvalid},
+		},
+		{
+			name: "an integrator cannot gate its own worktree",
+			plan: edit(t,
+				"minions:\n", "minions:\n  - {id: land, role: integrator, worktree: int}\n",
+				"  - {id: review-web, minion: r2, deps: [web-timeout]}\n",
+				"  - {id: review-web, minion: r2, deps: [web-timeout]}\n  - {id: land, minion: land, deps: [review-web], accept: mise run gate}\n"),
+			want: []Code{EIntegratorAccept},
 		},
 		{
 			name: "no encounter",
@@ -234,7 +237,7 @@ const aLoop = `loops:
 
 func withLoop(t *testing.T, loop string) Plan {
 	t.Helper()
-	return edit(t, "    accept: mise run gate\n", "    accept: mise run gate\n"+loop)
+	return edit(t, "  - {id: review-web, minion: r2, deps: [web-timeout]}\n", "  - {id: review-web, minion: r2, deps: [web-timeout]}\n"+loop)
 }
 
 func TestGoodLoopIsClean(t *testing.T) {
@@ -341,8 +344,8 @@ func TestLoopReviewGoalIsOptional(t *testing.T) {
 }
 
 func TestDecodeRejectsUnknownLoopField(t *testing.T) {
-	_, f := Decode([]byte(strings.Replace(goodPlan, "    accept: mise run gate\n",
-		"    accept: mise run gate\n"+strings.Replace(aLoop, "rounds: 2", "round: 2", 1), 1)))
+	_, f := Decode([]byte(strings.Replace(goodPlan, "  - {id: review-web, minion: r2, deps: [web-timeout]}\n",
+		"  - {id: review-web, minion: r2, deps: [web-timeout]}\n"+strings.Replace(aLoop, "rounds: 2", "round: 2", 1), 1)))
 	wantCodes(t, f, EParse)
 	if !strings.Contains(f[0].Message, "round") {
 		t.Fatalf("parse error should name the key: %q", f[0].Message)

@@ -10,33 +10,34 @@ import (
 type Code string
 
 const (
-	EParse          Code = "E_PARSE"
-	ENoEncounter    Code = "E_NO_ENCOUNTER"
-	EBadEncounter   Code = "E_BAD_ENCOUNTER"
-	ENoMinion       Code = "E_NO_MINION"
-	EUnknownMinion  Code = "E_UNKNOWN_MINION"
-	EUnknownRole    Code = "E_UNKNOWN_ROLE"
-	EDuplicateID    Code = "E_DUPLICATE_ID"
-	EDuplicatePane  Code = "E_DUPLICATE_PANE"
-	EDuplicateAgent Code = "E_DUPLICATE_AGENT"
-	EBadMinionID    Code = "E_BAD_MINION_ID"
-	ENoID           Code = "E_NO_ID"
-	ENoWorktree     Code = "E_NO_WORKTREE"
-	EDMPlaysMinion  Code = "E_DM_PLAYS_MINION"
-	ENoPaths        Code = "E_NO_PATHS"
-	EMissingDep     Code = "E_MISSING_DEP"
-	ECycle          Code = "E_CYCLE"
-	ESplitInvalid   Code = "E_SPLIT_INVALID"
-	ESplitNoMinion  Code = "E_SPLIT_NO_MINION"
-	EUnknownSplit   Code = "E_UNKNOWN_SPLIT"
-	EBadTools       Code = "E_BAD_TOOLS"
-	EVerdictRole    Code = "E_VERDICT_ROLE"
-	EVerdictAccept  Code = "E_VERDICT_ACCEPT"
-	ELoopRole       Code = "E_LOOP_ROLE"
-	ELoopRounds     Code = "E_LOOP_ROUNDS"
-	ELoopPass       Code = "E_LOOP_PASS"
-	ELoopFocus      Code = "E_LOOP_FOCUS"
-	EOfNotWriter    Code = "E_OF_NOT_WRITER"
+	EParse            Code = "E_PARSE"
+	ENoEncounter      Code = "E_NO_ENCOUNTER"
+	EBadEncounter     Code = "E_BAD_ENCOUNTER"
+	ENoMinion         Code = "E_NO_MINION"
+	EUnknownMinion    Code = "E_UNKNOWN_MINION"
+	EUnknownRole      Code = "E_UNKNOWN_ROLE"
+	EDuplicateID      Code = "E_DUPLICATE_ID"
+	EDuplicatePane    Code = "E_DUPLICATE_PANE"
+	EDuplicateAgent   Code = "E_DUPLICATE_AGENT"
+	EBadMinionID      Code = "E_BAD_MINION_ID"
+	ENoID             Code = "E_NO_ID"
+	ENoWorktree       Code = "E_NO_WORKTREE"
+	EDMPlaysMinion    Code = "E_DM_PLAYS_MINION"
+	ENoPaths          Code = "E_NO_PATHS"
+	EMissingDep       Code = "E_MISSING_DEP"
+	ECycle            Code = "E_CYCLE"
+	ESplitInvalid     Code = "E_SPLIT_INVALID"
+	ESplitNoMinion    Code = "E_SPLIT_NO_MINION"
+	EUnknownSplit     Code = "E_UNKNOWN_SPLIT"
+	EBadTools         Code = "E_BAD_TOOLS"
+	EVerdictRole      Code = "E_VERDICT_ROLE"
+	EVerdictAccept    Code = "E_VERDICT_ACCEPT"
+	EIntegratorAccept Code = "E_INTEGRATOR_ACCEPT"
+	ELoopRole         Code = "E_LOOP_ROLE"
+	ELoopRounds       Code = "E_LOOP_ROUNDS"
+	ELoopPass         Code = "E_LOOP_PASS"
+	ELoopFocus        Code = "E_LOOP_FOCUS"
+	EOfNotWriter      Code = "E_OF_NOT_WRITER"
 )
 
 type Finding struct {
@@ -228,6 +229,13 @@ func Validate(p Plan) []Finding {
 					"a verdict unit is proven by the reviewer's report line, so it cannot also set accept",
 				})
 			}
+		}
+
+		if role == RoleIntegrator && u.Accept != "" {
+			f = append(f, Finding{
+				EIntegratorAccept, at + ".accept",
+				fmt.Sprintf("integrator unit %q cannot set accept: its worktree is cut from base and does not contain the other writers' work. Drop the accept; dungeon land merges and re-gates", u.ID),
+			})
 		}
 
 		for j, d := range u.Deps {
