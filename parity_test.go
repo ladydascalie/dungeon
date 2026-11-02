@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,6 +20,9 @@ type parityLeg struct {
 	available func() bool
 	open      func(t *testing.T) mux
 	inside    func() bool
+	// ready blocks until pane's shell can accept input. A backend that cannot
+	// tell leaves it nil; the caller then pastes without waiting.
+	ready func(t *testing.T, m mux, pane string)
 }
 
 var parityLegs = []parityLeg{
@@ -35,6 +39,7 @@ var parityLegs = []parityLeg{
 		available: func() bool { _, err := exec.LookPath("tmux"); return err == nil },
 		open:      parityTmux,
 		inside:    func() bool { return os.Getenv("TMUX_PANE") != "" },
+		ready:     parityTmuxReady,
 	},
 }
 
@@ -57,6 +62,50 @@ func parityTmux(t *testing.T) mux {
 		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
 	})
 	return tmux{socket: socket}
+}
+
+// parityTmuxReady polls a fresh pane until its foreground command is a shell
+// and that shell has drawn a prompt. A new pane can be mapped before its shell
+// is reading input, so a paste sent too early disappears. On deadline it fails
+// with the pane's content, because a lost paste is not visible anywhere else.
+func parityTmuxReady(t *testing.T, m mux, pane string) {
+	t.Helper()
+	tp, ok := m.(tmux)
+	if !ok {
+		return
+	}
+	read := func(args ...string) (string, error) {
+		full := append([]string{"-L", tp.socket, "-f", "/dev/null"}, args...)
+		out, err := exec.Command("tmux", full...).CombinedOutput()
+		return string(out), err
+	}
+	const deadline = 10 * time.Second
+	start := time.Now()
+	for {
+		command, commandErr := read("display-message", "-p", "-t", pane, "#{pane_current_command}")
+		content, contentErr := read("capture-pane", "-p", "-t", pane)
+		if commandErr == nil && contentErr == nil &&
+			parityIsShell(strings.TrimSpace(command)) && strings.TrimSpace(content) != "" {
+			return
+		}
+		if time.Since(start) > deadline {
+			content, _ = read("capture-pane", "-p", "-t", pane)
+			t.Fatalf("pane %s shell did not become ready in %s: command %q, content:\n%s",
+				pane, deadline, strings.TrimSpace(command), content)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// parityIsShell reports whether name is a shell that reads a prompt from its
+// tty. tmux reports the foreground process, which is the shell only after it has
+// replaced the placeholder and started reading.
+func parityIsShell(name string) bool {
+	switch filepath.Base(name) {
+	case "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "ash", "yash":
+		return true
+	}
+	return false
 }
 
 // parityShell runs one PingCommand line exactly as a lane would.
@@ -157,6 +206,9 @@ func TestParity(t *testing.T) {
 			}
 
 			file := filepath.Join(t.TempDir(), "ping.txt")
+			if leg.ready != nil {
+				leg.ready(t, h, pane2)
+			}
 			parityShell(t, h.PingCommand(pane2, "cat > "+shellQuote(file)))
 			parityWait(t, "the cat pane", func() bool {
 				_, err := os.Stat(file)
