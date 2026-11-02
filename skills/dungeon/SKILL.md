@@ -368,6 +368,45 @@ two column gap, so a wide terminal shows a block rather than a stretched line.
 Tell the operator to look there when a unit is `blocked`; do not paste pane
 output into chat.
 
+## The fleet view
+
+`dungeon fleet` shows every encounter under `.dungeon` in one window, newest
+touch first. It takes no plan and needs no argument.
+
+Open it instead of `dungeon view` in two cases:
+
+- More than one encounter is live or parked. One window shows them all.
+- The work runs on tmux. A tmux lane is detached, and dungeon reports every
+  lane status `unknown`. The fleet preview reads the pane itself, so it still
+  says what the lane is doing.
+
+Keys:
+
+| key | action |
+| --- | --- |
+| `j`/`k`, down/up | move |
+| `g`/`home`, `G`/`end` | first row, last row |
+| `enter`, `d` | detail for the selected row |
+| `space` | actions |
+| `q`, `ctrl+c` | quit |
+| `esc` | close the open overlay, never quit |
+
+The actions pane has four moves: `j` jumps to the lane, `h` opens the hunk
+session on its worktree, `c` copies the pane id, and `e` expands or folds the
+settled units.
+
+Rows sit under BLOCKED, WORKING, READY and SETTLED. A broken plan is named
+under BLOCKED with its error. Settled rows fold to one summary row per
+encounter until you expand them.
+
+The preview under the list has two sources. It reads the selected lane's pane
+once per refresh tick. When the pane is gone or unreadable it shows the lane's
+report, `.dungeon/reports/<unit>.md`, and the header names the source it read.
+
+The fleet view never writes. It reads plans, state, reports and panes. A jump
+moves the multiplexer's focus and nothing else: no key on this screen
+dispatches, settles or edits a lane.
+
 ## Finishing
 
 ```bash

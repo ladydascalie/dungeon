@@ -9,8 +9,8 @@ that owns a worktree. Anything else fails validation.
 
 ## Status
 
-Every command is built: `init`, `check`, `status`, `set`, `view`, `attach`, `up`,
-`next`, `land` and `down`.
+Every command is built: `init`, `check`, `status`, `set`, `view`, `fleet`,
+`attach`, `up`, `next`, `land` and `down`.
 
 The loop: `dungeon up` spawns one pi lane per minion, `dungeon next` dispatches
 what is ready and settles what landed, `dungeon view` shows the graph while it
@@ -366,6 +366,39 @@ move, `enter` opens, `q` quits. Every other command refuses to guess, prints the
 list and requires `--plan`. With exactly one encounter no flag is needed.
 `--once` and piped output refuse too, because a frame cannot answer a prompt.
 
+## The fleet view
+
+`dungeon fleet` shows every encounter under `.dungeon` in one window, newest
+touch first. It takes no plan and needs no argument, because it discovers the
+encounters itself.
+
+```sh
+dungeon fleet                 # live view, refreshes every 2s
+dungeon fleet --interval 5s   # a slower tick
+dungeon fleet --once          # print one frame and exit
+dungeon fleet --json          # print the fleet model
+```
+
+Rows sit under BLOCKED, WORKING, READY and SETTLED. A plan that will not read is
+named under BLOCKED with its error instead of disappearing. Settled rows fold to
+one summary row per encounter. `j`/`k` move, `g`/`G` jump to the ends, `enter`
+or `d` opens the detail, and `space` opens the actions: jump to the lane, open
+its hunk session, copy the pane id, expand or fold settled units. `q` quits.
+`esc` only closes an overlay and never quits, so a detached fleet is never lost
+to one keystroke.
+
+The preview under the list reads the selected lane's pane once per refresh tick.
+When the pane is gone or unreadable it shows the lane's report instead, from
+`.dungeon/reports/<unit>.md`, and the header names which of the two it read.
+
+The fleet view never writes. It reads plans, state, reports and panes. No key
+starts a lane, settles a unit, or changes the run.
+
+The tmux case is why it exists. A tmux lane is a detached pane, and dungeon
+cannot classify it, so every tmux lane reports status `unknown`. The preview
+does not need the agent protocol: it captures the pane, so the last lines of the
+lane are visible even when its status is not. `--once` and `--json` are the same
+snapshot for a pipe or a script.
 
 ## In herdr
 
