@@ -402,24 +402,79 @@ func (t tmux) PingCommand(pane, message string) string {
 		bin, shellQuote(pane), shellQuote(message), bin, shellQuote(pane))
 }
 
-// FocusAgent moves the operator to the pane hosting the named agent. An agent
-// that is not live is an error.
-func (t tmux) FocusAgent(ctx context.Context, name string) error {
-	pane, err := t.agentPane(ctx, name)
-	if err != nil {
-		return err
+// focusArgv is the tmux command sequence that lands the operator on a pane.
+//
+// select-window comes before select-pane because select-pane only changes the
+// active pane of a window; it does not change which window is active, so the
+// operator would land in the right pane of the wrong window.
+//
+// A client is switched only when it is attached to another session, which is
+// where switch-client belongs. A pane in a detached session is the normal case,
+// so an empty clientSession is not an error: the window and pane are still
+// selected on that session, and the next attach lands on them. Nothing here
+// steals focus from a caller that did not ask: this helper is reachable only
+// through FocusAgent and FocusTab.
+func focusArgv(paneSession, paneWindow, pane, clientSession string) []string {
+	argv := []string{}
+	if clientSession != "" && clientSession != paneSession {
+		argv = append(argv, "switch-client", "-t", paneSession)
 	}
-	_, err = t.call(ctx, "select-pane", "-t", pane)
+	return append(argv,
+		"select-window", "-t", paneWindow,
+		";",
+		"select-pane", "-t", pane)
+}
+
+// clientSession is the session of the client a focus move acts on, which is the
+// client tmux resolves for this process. An empty answer means no client is
+// attached; display-message prints nothing then, which is an answer, not an
+// error, so a focus call still runs.
+func (t tmux) clientSession(ctx context.Context) string {
+	out, err := t.call(ctx, "display-message", "-p", "#{client_session}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// focus selects window and pane on the pane's session, moving the client to
+// that session first when the client watches another one.
+func (t tmux) focus(ctx context.Context, at pane) error {
+	_, err := t.call(ctx, focusArgv(at.Workspace, at.Tab, at.ID, t.clientSession(ctx))...)
 	return err
 }
 
-// FocusTab moves the operator to a window.
+// FocusAgent moves the operator to the pane hosting the named agent, switching
+// the client's session when the agent lives in another one. An agent that is
+// not live is an error.
+func (t tmux) FocusAgent(ctx context.Context, name string) error {
+	id, err := t.agentPane(ctx, name)
+	if err != nil {
+		return err
+	}
+	at, err := t.Pane(ctx, id)
+	if err != nil {
+		return err
+	}
+	return t.focus(ctx, at)
+}
+
+// FocusTab moves the operator to a window, and to the pane active in it, on the
+// window's own session.
 func (t tmux) FocusTab(ctx context.Context, tab string) error {
 	if err := requireTarget("tab", tab); err != nil {
 		return err
 	}
-	_, err := t.call(ctx, "select-window", "-t", tab)
-	return err
+	out, err := t.call(ctx, "display-message", "-p", "-t", tab,
+		"#{pane_id}\t#{window_id}\t#{session_id}")
+	if err != nil {
+		return err
+	}
+	fields := strings.Split(strings.TrimSpace(string(out)), "\t")
+	if len(fields) != 3 || fields[0] == "" {
+		return fmt.Errorf("tmux: window %s is gone", tab)
+	}
+	return t.focus(ctx, pane{ID: fields[0], Tab: fields[1], Workspace: fields[2]})
 }
 
 // ClosePane kills one pane dungeon created. It kills whatever runs in it.
