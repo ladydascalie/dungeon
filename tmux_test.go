@@ -1221,3 +1221,32 @@ func isShell(name string) bool {
 	}
 	return false
 }
+
+func TestTmuxReadReturnsThePaneText(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "read", "read", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	waitForShell(t, h, root)
+	runInTestServer(t, testSocket, "send-keys", "-t", root, "printf 'readable pane text\\n'", "Enter")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		text, err := h.Read(ctx, root)
+		if err == nil && strings.Contains(text, "readable pane text") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Read never returned the pane text: %q, %v", text, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTmuxReadRefusesAGonePane(t *testing.T) {
+	h := tmuxTest(t)
+	if _, err := h.Read(context.Background(), "%999999"); err == nil {
+		t.Fatal("Read accepted a pane that does not exist")
+	}
+}

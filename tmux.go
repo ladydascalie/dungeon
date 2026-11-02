@@ -44,6 +44,7 @@ var _ mux = tmux{}
 const (
 	paneAgentOption    = "@dungeon_agent"
 	paneOwnerOption    = "@dungeon_pane"
+	paneRailOption     = "@agent_rail"
 	sessionOwnerOption = "@dungeon_encounter"
 )
 
@@ -361,6 +362,20 @@ func (t tmux) Pane(ctx context.Context, id string) (pane, error) {
 		return pane{}, fmt.Errorf("tmux: pane %s is gone", id)
 	}
 	return pane{ID: fields[0], Tab: fields[1], Workspace: fields[2]}, nil
+}
+
+// Read returns one pane's rendered text, joined so a wrapped line reads as the
+// one line it was. It is the preview: a read, never a write, and a pane that is
+// gone is an error.
+func (t tmux) Read(ctx context.Context, id string) (string, error) {
+	if err := requireTarget("pane", id); err != nil {
+		return "", err
+	}
+	out, err := t.call(ctx, "capture-pane", "-p", "-J", "-t", id)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // StartAgent records the name on the pane, runs pi with args, and waits until
@@ -966,4 +981,210 @@ func (t tmux) CloseWorkspace(ctx context.Context, ws string) error {
 	}
 	_, err = t.call(ctx, "kill-session", "-t", ws)
 	return err
+}
+
+// railPanes reads the panes the agent rail shows. It is deliberately tmux-only:
+// the rail exists for lanes that herdr cannot see, so it reads tmux directly
+// instead of widening the mux interface for one view.
+func (t tmux) railPanes(ctx context.Context) ([]railPaneInfo, error) {
+	const delim = "\x1f"
+	out, err := t.call(ctx, "list-panes", "-a", "-F",
+		"#{pane_id}"+delim+"#{session_name}"+delim+"#{window_id}"+delim+
+			"#{window_index}"+delim+"#{pane_index}"+delim+
+			"#{pane_current_command}"+delim+"#{pane_title}"+delim+
+			"#{@dungeon_agent}"+delim+"#{@agent_rail}"+delim+"#{pane_pid}"+delim+
+			"#{pane_current_path}"+delim+"#{pane_active}")
+	if err != nil {
+		return nil, err
+	}
+	procs := loadRailProcs(ctx)
+	statusCache := map[string]map[string]railStatus{}
+	var panes []railPaneInfo
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		f := strings.Split(line, delim)
+		if len(f) != 12 || f[0] == "" {
+			continue
+		}
+		if f[8] == "1" {
+			continue // the rail itself
+		}
+		pid, _ := strconv.Atoi(f[9])
+		kind := railAgentKind(f[5], f[6], f[7], pid, procs)
+		if kind == "" {
+			if !isRailShell(f[5]) {
+				continue
+			}
+			kind = "shell"
+		}
+		label := railAgentLabel(f[5], f[6], f[7])
+		if kind == "shell" {
+			label = f[5]
+		}
+		row := railPaneInfo{
+			Pane:        f[0],
+			Session:     f[1],
+			WindowID:    f[2],
+			WindowIndex: f[3],
+			PaneIndex:   f[4],
+			Command:     f[5],
+			Title:       f[6],
+			Agent:       f[7],
+			Kind:        kind,
+			Active:      f[11] == "1",
+			Label:       label,
+		}
+		if root, ok := railEncounterRoot(f[10]); ok {
+			statuses, cached := statusCache[root]
+			if !cached {
+				statuses = loadRailStatuses(root)
+				statusCache[root] = statuses
+			}
+			if status, found := statuses[row.Pane]; found {
+				row.Status, row.Unit, row.Encounter = status.Status, status.Unit, status.Encounter
+			}
+		}
+		if osc, found := readOSCStatus(row.Pane); found {
+			row.Harness = osc.State
+			row.HarnessApp = osc.App
+			row.HarnessKind = osc.Kind
+			row.HarnessMsg = osc.Msg
+			row.HarnessTitle = osc.Title
+			row.HarnessProgress = osc.Progress
+		}
+		panes = append(panes, row)
+	}
+	return panes, nil
+}
+
+// railToggle opens, focuses, or closes the rail in the target's window. It
+// splits the leftmost pane, not the focused one, so the rail stays on the edge
+// after a split in the middle of a window.
+func (t tmux) railToggle(ctx context.Context, target string, width int, command string) (string, error) {
+	if err := requireTarget("pane", target); err != nil {
+		return "", err
+	}
+	window, err := t.call(ctx, "display-message", "-p", "-t", target, "#{window_id}")
+	if err != nil {
+		return "", err
+	}
+	win := strings.TrimSpace(string(window))
+	if win == "" {
+		return "", fmt.Errorf("tmux: pane %s has no window", target)
+	}
+	const delim = "\x1f"
+	out, err := t.call(ctx, "list-panes", "-t", win, "-F",
+		"#{pane_id}"+delim+"#{@agent_rail}"+delim+"#{pane_left}")
+	if err != nil {
+		return "", err
+	}
+	rail, left, haveLeft := "", 0, false
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Split(line, delim)
+		if len(f) != 3 {
+			continue
+		}
+		if f[1] == "1" {
+			rail = f[0]
+		}
+		if n, err := strconv.Atoi(f[2]); err == nil && (!haveLeft || n < left) {
+			left, haveLeft = n, true
+		}
+	}
+	if rail != "" {
+		if target == rail {
+			return "", t.callNoOutput(ctx, "kill-pane", "-t", rail)
+		}
+		return rail, t.callNoOutput(ctx, "select-pane", "-t", rail)
+	}
+	if !haveLeft {
+		return "", fmt.Errorf("tmux: window %s has no panes", win)
+	}
+	// Resolve the leftmost pane id from the same list.
+	leftPane := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Split(line, delim)
+		if len(f) != 3 {
+			continue
+		}
+		if n, err := strconv.Atoi(f[2]); err == nil && n == left {
+			leftPane = f[0]
+			break
+		}
+	}
+	if leftPane == "" {
+		return "", fmt.Errorf("tmux: window %s has no left pane", win)
+	}
+	cwd, err := t.call(ctx, "display-message", "-p", "-t", target, "#{pane_current_path}")
+	if err != nil {
+		return "", err
+	}
+	if width < 12 {
+		width = 12
+	}
+	w, err := t.call(ctx, "display-message", "-p", "-t", win, "#{window_width}")
+	if err == nil {
+		if total := strings.TrimSpace(string(w)); total != "" {
+			var n int
+			if _, scanErr := fmt.Sscan(total, &n); scanErr == nil && n < width*2 {
+				width = n / 3
+				if width < 12 {
+					width = 12
+				}
+			}
+		}
+	}
+	railOut, err := t.call(ctx, "split-window", "-hb", "-l", strconv.Itoa(width),
+		"-t", leftPane, "-c", strings.TrimSpace(string(cwd)),
+		"-P", "-F", "#{pane_id}", command)
+	if err != nil {
+		return "", err
+	}
+	rail = strings.TrimSpace(string(railOut))
+	if rail == "" {
+		return "", fmt.Errorf("tmux split-window returned no rail pane")
+	}
+	if err := t.callNoOutput(ctx, "set-option", "-p", "-t", rail, paneRailOption, "1"); err != nil {
+		return "", err
+	}
+	if err := t.callNoOutput(ctx, "select-pane", "-t", rail); err != nil {
+		return "", err
+	}
+	return rail, nil
+}
+
+// callNoOutput runs one tmux command and discards stdout.
+func (t tmux) callNoOutput(ctx context.Context, args ...string) error {
+	_, err := t.call(ctx, args...)
+	return err
+}
+
+// railFocus moves the operator to a rail target, following the same session
+// and window rules as FocusAgent.
+func (t tmux) railFocus(ctx context.Context, id string) error {
+	at, err := t.Pane(ctx, id)
+	if err != nil {
+		return err
+	}
+	return t.focus(ctx, at)
+}
+
+// ensureRailOSC attaches one raw-output parser to each agent pane. pipe-pane
+// -o never replaces a pipe the operator already opened, so a pane with its own
+// pipe simply contributes no OSC 7501 record.
+func (t tmux) ensureRailOSC(ctx context.Context, panes []railPaneInfo) {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	server := oscServerKey()
+	for _, p := range panes {
+		if p.Pane == "" || p.Kind == "shell" {
+			continue
+		}
+		command := shellQuote(exe) + " osc-sink " + shellQuote(server) + " " + shellQuote(p.Pane)
+		_, _ = t.call(ctx, "pipe-pane", "-o", "-t", p.Pane, command)
+	}
 }

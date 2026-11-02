@@ -34,6 +34,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return setCmd(ctx, args[1:], stdout, stderr)
 	case "view":
 		return viewCmd(ctx, args[1:], stdout, stderr)
+	case "fleet":
+		return fleetCmd(ctx, args[1:], stdout, stderr)
+	case "rail":
+		return railCmd(ctx, args[1:], stdout, stderr)
+	case "osc-sink":
+		return oscSinkCmd(args[1:], stderr)
 	case "link":
 		return linkCmd(args[1:], stdout, stderr)
 	case "attach":
@@ -112,6 +118,17 @@ func usage(w io.Writer) {
       The live table. j/k move, g/G ends, d detail, space actions.
       Piped output and --once print one frame instead. With more than one
       encounter under .dungeon and no --plan, view opens a picker.
+
+  dungeon fleet  [--once] [--json] [--interval 2s] [--mux backend]
+      Every encounter in one pane, newest first, with the selected lane's live
+      output. j/k move, enter detail, space actions, q quits, esc backs out.
+      Piped output and --once print one frame instead.
+
+  dungeon rail   [--once] [--json] [--interval 1s] [--mux backend]
+  dungeon rail toggle [--width 32]
+      A compact tmux pane listing every pane running an agent, including
+      dungeon lanes in detached sessions. enter switches to the agent. toggle
+      opens, focuses or closes the rail in the current window.
 
 The plan defaults to `+defaultPlanPath+`. Extra encounters live at
 .dungeon/<name>/plan.yaml, each with its own state. With more than one,

@@ -32,6 +32,8 @@ dungeon set minion w-atom1 busy
 dungeon view                       # the live table, refreshes every 2s
 dungeon view --once --width 120    # one frame, for a screenshot or a pipe
 dungeon view --detail MOL1         # open the detail pane on one unit
+dungeon rail                       # a compact rail of every pane running an agent
+dungeon rail toggle                # open, focus or close that rail in this window
 
 dungeon attach MOL1 /tmp/brief-mol1.md
 
@@ -403,6 +405,35 @@ Agent names, briefs, reports, worktrees, accepts and `land` behave the same on
 both. To compare the two backends, run one plan with `--mux herdr` and then
 with `--mux tmux`: the difference you see is the lane status herdr reports and
 tmux cannot.
+
+### The agent rail
+
+`dungeon rail toggle` opens a pane on the left of the current window running
+`dungeon rail`. The rail lists every live pane except itself, including dungeon
+lanes in detached sessions that herdr cannot see. `j`/`k` move, `enter`
+switches to the pane, `1` to `9` jump, `r` reloads, and `q` closes the rail.
+A click on a tile switches to that pane too, and the mouse wheel moves the
+selection. Agent panes get their own icon and kind; plain terminals appear as
+`zsh`, `bash`, or whatever shell is in front. The rail sees a dungeon lane by
+its `@dungeon_agent` option, then a known agent command, or an agent process
+below the pane's shell. A title alone is not proof: a stale `π - ...` title
+does not keep a shell in the agent list. The rail marks its own pane with
+`@agent_rail`, so it never lists itself.
+
+When a pane's worktree belongs to an encounter, the rail reads that encounter's
+state and shows the unit and its status beside the agent. A lane in a worktree
+uses the repo's `.dungeon`, not a copy inside the worktree.
+
+The rail also reads OSC 7501, the Program Status Protocol, straight from each
+agent pane's raw output. A pane with its own `pipe-pane` keeps it. The rail
+starts a `dungeon osc-sink` parser only when the pane has no pipe, and shows the
+last root record as the harness state, with its message in the footer. Working
+and blocked records die with the process that reported them. `done` and `error`
+survive.
+
+The renderer is bubbletea over a tmux snapshot. A refresh diffs cells instead
+of clearing and repainting the pane, which is why it does not flicker. A
+launcher only needs to bind `prefix+a` to `dungeon rail toggle`.
 
 ## The skill
 
