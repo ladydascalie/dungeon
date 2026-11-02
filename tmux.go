@@ -746,8 +746,8 @@ func (t tmux) landPrompt(ctx context.Context, pane, needle, text string) error {
 	return nil
 }
 
-// waitShown polls until needle is visible anywhere on the pane, or until within
-// has passed.
+// waitShown polls until needle ends at the pane's cursor, or until within has
+// passed.
 func (t tmux) waitShown(ctx context.Context, pane, needle string, within time.Duration) (bool, error) {
 	deadline := time.Now().Add(within)
 	for {
@@ -808,8 +808,9 @@ func (t tmux) submitPrompt(ctx context.Context, pane, needle string) error {
 }
 
 // inputNeedle is the tail of the prompt's last line: the visible part of the
-// text that the terminal echoes under the cursor. A wrapped prompt still ends
-// with it on the cursor's line.
+// text that a TUI echoes as input. It is the confirmation needle, not a claim
+// about the cursor's line: a terminal wraps at any column, so the tail can
+// straddle two rows and is never contiguous in a raw capture.
 func inputNeedle(text string) string {
 	last := text
 	if i := strings.LastIndexByte(last, '\n'); i >= 0 {
@@ -827,11 +828,12 @@ func inputNeedle(text string) string {
 	return string(runes)
 }
 
-// promptShown reports whether needle is on the pane at all, which proves a paste
-// landed, and whether it is on the cursor's line, which is where a TUI echoes
-// input it has not submitted. The second answer is a hint, not a proof: a TUI
-// that hides the cursor reports a row unrelated to the input, so the caller
-// treats a needle gone from the whole pane as submitted too.
+// promptShown reports whether needle ends at the pane's cursor, which proves a
+// paste landed and is the input a TUI has not submitted. The pasted tail sits
+// under the cursor, so a match elsewhere is not that paste: a transcript line or
+// a resubmitted prompt can spell the same characters. Both answers are the same
+// anchored match. A TUI that hides the cursor reports a row unrelated to the
+// input, so the caller also treats a needle gone from the pane as submitted.
 func (t tmux) promptShown(ctx context.Context, pane, needle string) (shown, pending bool, err error) {
 	out, err := t.call(ctx, "display-message", "-p", "-t", pane, "#{cursor_y}")
 	if err != nil {
@@ -845,9 +847,45 @@ func (t tmux) promptShown(ctx context.Context, pane, needle string) (shown, pend
 	if err != nil {
 		return false, false, err
 	}
+	shown = needleAtCursor(screen, row, needle)
+	return shown, shown, nil
+}
+
+// needleAtCursor reports whether needle ends on the cursor's row: wholly on that
+// row, or begun on the row above and ended on it. The terminal wraps a pasted
+// tail at any column, so a two-row match is a landed paste; a match on any other
+// rows is not. Pinning the match to the cursor also stops two unrelated rows
+// from spelling a needle the pane never echoed as input.
+func needleAtCursor(screen string, row int, needle string) bool {
+	if needle == "" {
+		return false
+	}
 	lines := strings.Split(screen, "\n")
-	pending = row >= 0 && row < len(lines) && strings.Contains(lines[row], needle)
-	return strings.Contains(screen, needle), pending, nil
+	if row < 0 || row >= len(lines) {
+		return false
+	}
+	// Fast path: the whole needle on the cursor's row.
+	if strings.Contains(lines[row], needle) {
+		return true
+	}
+	if row == 0 {
+		return false
+	}
+	// Slow path: the needle straddles the boundary with the row above. The match
+	// must end past it, so a needle that ends on the row above does not count.
+	prev := lines[row-1]
+	joined := prev + lines[row]
+	for i := 0; ; {
+		j := strings.Index(joined[i:], needle)
+		if j < 0 {
+			return false
+		}
+		end := i + j + len(needle)
+		if end > len(prev) {
+			return true
+		}
+		i += j + 1
+	}
 }
 
 func (t tmux) agentPane(ctx context.Context, name string) (string, error) {
