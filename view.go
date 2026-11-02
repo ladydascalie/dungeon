@@ -72,6 +72,28 @@ func (m viewModel) focusCmd() tea.Cmd {
 	}
 }
 
+// openReport is the focus fallback for a dead lane: a finished unit keeps its
+// report after the agent and pane are gone. A missing report says so, so the
+// key never looks like it did nothing.
+func (m *viewModel) openReport(u UnitRow) {
+	path := filepath.Join(filepath.Dir(m.statePath), "reports", u.ID+".md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		m.notice = "no live lane and no report"
+		return
+	}
+	m.reader = path
+	m.readerLines = strings.Split(strings.ReplaceAll(string(data), "\t", "    "), "\n")
+	if len(m.readerLines) > 5000 {
+		m.readerLines = m.readerLines[:5000]
+	}
+	m.readerTop = 0
+	m.searching, m.query, m.matches, m.matchIdx = false, "", nil, 0
+	m.overlay = "reader"
+	m.renderReader()
+	m.notice = "no live lane, opened the report"
+}
+
 // focusTarget is the unit the operator means when they press space f. In the
 // loop timeline that is the selected round's live unit; in a card opened from
 // one it is that card's unit; on a loop summary row it is the loop's live unit.
@@ -303,6 +325,14 @@ func (m *viewModel) runPrefix(key string) tea.Cmd {
 		}
 		return nil
 	case "f":
+		u, ok := m.focusTarget()
+		if !ok {
+			return nil
+		}
+		if u.Agent == "" {
+			m.openReport(u)
+			return nil
+		}
 		return m.focusCmd()
 	case "r":
 		return m.refresh()
@@ -635,6 +665,13 @@ func (m viewModel) render() string {
 		body = m.detailOverlay()
 	case m.overlay == "reader":
 		body = m.readerView()
+		// The reader carries its own hint line, and the frame clamp can hide the
+		// footer. Put a notice where the hint was, so the operator still sees it.
+		if m.notice != "" {
+			if i := strings.LastIndex(body, "\n"); i >= 0 {
+				body = body[:i+1] + dimStyle.Render(m.notice)
+			}
+		}
 	default:
 		body = m.bodyView()
 	}
