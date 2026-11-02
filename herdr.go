@@ -5,29 +5,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Agent is one live herdr agent, keyed by the name its lane was given.
-type Agent struct {
+// herdrAgent is herdr's wire shape for one agent. It stays private so no other
+// file has to know herdr's JSON.
+type herdrAgent struct {
 	Name   string `json:"name"`
 	Pane   string `json:"pane_id"`
 	Status string `json:"agent_status"`
-	Cwd    string `json:"cwd"`
 }
 
-type herdrClient struct {
+// herdr is the herdr backend: the only file that speaks herdr's command line.
+// Everything above it speaks mux.
+type herdr struct {
 	bin string
 }
 
-func newHerdrClient() herdrClient { return herdrClient{bin: "herdr"} }
+func newHerdr() herdr { return herdr{bin: "herdr"} }
 
-// run executes one herdr command and returns its stdout. Errors carry stderr,
+var _ mux = herdr{}
+
+// call executes one herdr command and returns its stdout. Errors carry stderr,
 // because a silent herdr failure is the hardest kind to debug.
-func (h herdrClient) run(ctx context.Context, args ...string) ([]byte, error) {
+func (h herdr) call(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.bin, args...)
@@ -43,65 +48,126 @@ func (h herdrClient) run(ctx context.Context, args ...string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// probeAgents reads herdr's own view of the fleet. It is the only source of
-// pane and liveness truth: dungeon never caches a pane id.
-//
-// A missing or failing herdr is not an error for the caller. A plan can be
-// checked and a state edited on a machine with no session; the pane column
-// then reads "-".
-func (h herdrClient) agents(ctx context.Context) map[string]Agent {
-	out, err := h.run(ctx, "agent", "list")
+// Agents reads herdr's own view of the fleet. It is the only source of pane and
+// liveness truth: dungeon never caches a pane id. An error means herdr could
+// not be read, which is not the same as an empty fleet.
+func (h herdr) Agents(ctx context.Context) (map[string]Agent, error) {
+	out, err := h.call(ctx, "agent", "list")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var payload struct {
 		Result struct {
-			Agents []Agent `json:"agents"`
+			Agents []herdrAgent `json:"agents"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil
+		return nil, fmt.Errorf("herdr agent list: %w", err)
 	}
 	byName := make(map[string]Agent, len(payload.Result.Agents))
 	for _, a := range payload.Result.Agents {
 		if a.Name == "" {
 			continue
 		}
-		byName[a.Name] = a
+		byName[a.Name] = Agent{Name: a.Name, Pane: a.Pane, Status: parseAgentState(a.Status)}
 	}
-	return byName
+	return byName, nil
 }
 
-func probeAgents(ctx context.Context) map[string]Agent {
-	return newHerdrClient().agents(ctx)
+// parseAgentState maps herdr's status words onto the boundary's vocabulary. A
+// word dungeon does not know is not guessed at.
+func parseAgentState(s string) AgentState {
+	switch AgentState(s) {
+	case AgentWorking:
+		return AgentWorking
+	case AgentIdle:
+		return AgentIdle
+	case AgentBlocked:
+		return AgentBlocked
+	case AgentDone:
+		return AgentDone
+	}
+	return AgentUnknown
 }
 
-// createTab opens the encounter's tab and returns its root pane.
-func (h herdrClient) createTab(ctx context.Context, label, cwd string) (string, error) {
-	out, err := h.run(ctx, "tab", "create", "--label", label, "--cwd", cwd, "--no-focus")
+// SelfPane is the pane dungeon runs in, which is where a lane pings its parent.
+func (h herdr) SelfPane(ctx context.Context) string {
+	return os.Getenv("HERDR_PANE_ID")
+}
+
+// StartAgent launches pi in a prepared pane and waits for it to be ready.
+// name is the derived agent name, not the plan's minion id.
+func (h herdr) StartAgent(ctx context.Context, name, pane string, args []string) error {
+	full := append([]string{"agent", "start", name, "--kind", "pi", "--pane", pane, "--"}, args...)
+	_, err := h.call(ctx, full...)
+	return err
+}
+
+// Prompt submits text to a lane by its derived name and returns as soon as it
+// is submitted. The caller decides when to look again; a blocking wait would
+// make the scheduler single file.
+func (h herdr) Prompt(ctx context.Context, name, text string) error {
+	_, err := h.call(ctx, "agent", "prompt", name, text)
+	return err
+}
+
+func (h herdr) SendKeys(ctx context.Context, name string, keys ...string) error {
+	_, err := h.call(ctx, append([]string{"agent", "send-keys", name}, keys...)...)
+	return err
+}
+
+// PingCommand is the command a shell runs to deliver a message to pane. Quoting
+// is herdr's, so the caller passes the message and gets a finished line.
+func (h herdr) PingCommand(pane, message string) string {
+	return fmt.Sprintf("%s pane run %s %s", h.bin, pane, shellQuote(message))
+}
+
+// shellQuote wraps s in single quotes, where a POSIX shell expands nothing. An
+// embedded quote is closed, escaped and reopened, so $, a backtick or a newline
+// arrives at the pane as written.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// FocusAgent moves the operator to the pane hosting the agent.
+func (h herdr) FocusAgent(ctx context.Context, name string) error {
+	_, err := h.call(ctx, "agent", "focus", name)
+	return err
+}
+
+// Pane reports one pane, and whether herdr still knows it.
+func (h herdr) Pane(ctx context.Context, id string) (pane, error) {
+	out, err := h.call(ctx, "pane", "get", id)
 	if err != nil {
-		return "", err
+		return pane{}, err
 	}
 	var payload struct {
 		Result struct {
-			RootPane struct {
-				PaneID string `json:"pane_id"`
-			} `json:"root_pane"`
+			Pane struct {
+				ID        string `json:"pane_id"`
+				Tab       string `json:"tab_id"`
+				Workspace string `json:"workspace_id"`
+			} `json:"pane"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return "", fmt.Errorf("herdr tab create: %w", err)
+		return pane{}, fmt.Errorf("herdr pane get: %w", err)
 	}
-	if payload.Result.RootPane.PaneID == "" {
-		return "", fmt.Errorf("herdr tab create returned no root pane")
+	p := pane{
+		ID:        payload.Result.Pane.ID,
+		Tab:       payload.Result.Pane.Tab,
+		Workspace: payload.Result.Pane.Workspace,
 	}
-	return payload.Result.RootPane.PaneID, nil
+	if p.ID == "" {
+		p.ID = id
+	}
+	return p, nil
 }
 
-// splitPane carves one lane pane out of target. The ratio makes repeated splits
-// of the same pane produce equal shares instead of halving the remainder.
-func (h herdrClient) splitPane(ctx context.Context, target, direction, cwd string, ratio float64) (string, error) {
-	out, err := h.run(ctx, "pane", "split", target,
+// SplitPane carves one pane out of target. The ratio makes repeated splits of
+// the same pane produce equal shares instead of halving the remainder.
+func (h herdr) SplitPane(ctx context.Context, target, direction, cwd string, ratio float64) (string, error) {
+	out, err := h.call(ctx, "pane", "split", target,
 		"--direction", direction, "--cwd", cwd,
 		"--ratio", strconv.FormatFloat(ratio, 'f', 4, 64), "--no-focus")
 	if err != nil {
@@ -123,19 +189,8 @@ func (h herdrClient) splitPane(ctx context.Context, target, direction, cwd strin
 	return payload.Result.Pane.PaneID, nil
 }
 
-// startAgent launches pi in a prepared pane and waits for it to be ready.
-// name is the derived agent name, not the plan's minion id.
-func (h herdrClient) startAgent(ctx context.Context, name, pane string, args []string) error {
-	full := append([]string{"agent", "start", name, "--kind", "pi", "--pane", pane, "--"}, args...)
-	_, err := h.run(ctx, full...)
-	return err
-}
-
-// prompt submits text to a lane by its derived name and returns as soon as it
-// is submitted. The caller decides when to look again; a blocking wait would
-// make the scheduler single file.
-func (h herdrClient) prompt(ctx context.Context, name, text string) error {
-	_, err := h.run(ctx, "agent", "prompt", name, text)
+func (h herdr) ClosePane(ctx context.Context, pane string) error {
+	_, err := h.call(ctx, "pane", "close", pane)
 	return err
 }
 

@@ -233,7 +233,7 @@ func TestReviewOutcomeDrivesTheLoop(t *testing.T) {
 			st.SetUnit("polish-review-1", "working", "")
 
 			o := dispatchOpts{planPath: planPath, statePath: filepath.Join(dir, "state.json")}
-			reconcile(t.Context(), newHerdrClient(), o, p, st, &digest{})
+			reconcile(t.Context(), newHerdr(), o, p, st, &digest{})
 
 			if got := st.UnitStatus("polish-review-1"); got != "done" && got != "failed" {
 				t.Fatalf("review-1 is %q, want done or failed: %s", got, st.Units["polish-review-1"].Note)

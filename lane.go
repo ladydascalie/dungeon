@@ -2,56 +2,64 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"time"
 )
 
 // A pin is a request. The plan may name the pane a minion should run in, because
 // a pane the operator chose is where their attention already is. The pin is
-// checked against herdr at spawn time and abandoned if the pane is gone, so a
-// stale plan degrades to a fresh split instead of a failure.
+// checked against the multiplexer at spawn time and abandoned if the pane is
+// gone, so a stale plan degrades to a fresh split instead of a failure.
 
 var errNoPane = errors.New("no live agent and no known pane for this minion")
 
-func (h herdrClient) paneExists(ctx context.Context, pane string) bool {
-	_, err := h.run(ctx, "pane", "get", pane)
+func paneExists(ctx context.Context, h mux, pane string) bool {
+	_, err := h.Pane(ctx, pane)
 	return err == nil
 }
 
 // lanePane returns the pane a minion should run in. It creates the encounter tab
 // once, on the first minion that needs one, and records it through root.
-func (h herdrClient) lanePane(ctx context.Context, encounter, pinned string, root *string, cwd string, ratio float64) (string, error) {
-	if pinned != "" && h.paneExists(ctx, pinned) {
+func lanePane(ctx context.Context, h mux, encounter, pinned string, root *string, cwd string, ratio float64) (string, error) {
+	if pinned != "" && paneExists(ctx, h, pinned) {
 		return pinned, nil
 	}
 	if *root == "" {
-		created, err := h.createTab(ctx, encounter, cwd)
+		_, rootPane, err := h.CreateTab(ctx, "", encounter, cwd)
 		if err != nil {
 			return "", err
 		}
-		*root = created
+		*root = rootPane
 	}
-	return h.splitPane(ctx, *root, "down", cwd, ratio)
+	return h.SplitPane(ctx, *root, "down", cwd, ratio)
 }
 
 // stopPinned exits the agent and leaves the shell. The two interrupts must be
 // separate writes with a gap: sent together, the agent coalesces them and keeps
 // running, which down would then have to report as a lie.
-func (h herdrClient) stopPinned(ctx context.Context, agent string) error {
-	if err := h.sendKeys(ctx, agent, "ctrl+c"); err != nil {
+func stopPinned(ctx context.Context, h mux, agent string) error {
+	if err := h.SendKeys(ctx, agent, "ctrl+c"); err != nil {
 		return err
 	}
 	time.Sleep(400 * time.Millisecond)
-	return h.sendKeys(ctx, agent, "ctrl+c")
+	return h.SendKeys(ctx, agent, "ctrl+c")
 }
 
 // verifyDown re-reads the fleet before down reports. A lane that ignores the
 // interrupt is still running, and counting it as stopped would be the kind of
 // claim this tool refuses everywhere else.
-func verifyDown(ctx context.Context, h herdrClient, st *State, stopped, refused []string) ([]string, []string) {
+func verifyDown(ctx context.Context, h mux, st *State, stopped, refused []string) ([]string, []string) {
 	time.Sleep(500 * time.Millisecond)
-	after := h.agents(ctx)
+	after, err := h.Agents(ctx)
+	if err != nil {
+		// Without the fleet there is no proof anything stopped, so nothing is
+		// called stopped.
+		for _, id := range stopped {
+			st.SetMinion(id, "lost", "could not read the fleet, so it cannot be called stopped")
+			refused = append(refused, id)
+		}
+		return nil, refused
+	}
 	var done []string
 	for _, id := range stopped {
 		if _, live := after[st.AgentName(id)]; live {
@@ -64,55 +72,32 @@ func verifyDown(ctx context.Context, h herdrClient, st *State, stopped, refused 
 	return done, refused
 }
 
-// focus jumps the operator to a unit's lane. A live agent is the exact answer:
-// herdr focuses the pane hosting it. With no live agent, the pane hint recorded
-// at spawn is all there is, and the best move is to focus its tab.
-func (h herdrClient) focus(ctx context.Context, minion, pinned string) error {
-	if _, err := h.run(ctx, "agent", "focus", minion); err == nil {
+// focusLane jumps the operator to a lane. A live agent is the exact answer: the
+// multiplexer focuses the pane hosting it. With no live agent, the pane hint
+// recorded at spawn is all there is, and the best move is to focus its tab.
+func focusLane(ctx context.Context, h mux, agent, hint string) error {
+	if err := h.FocusAgent(ctx, agent); err == nil {
 		return nil
 	}
-	if pinned == "" {
+	if hint == "" {
 		return errNoPane
 	}
-	tab, err := h.paneTab(ctx, pinned)
+	info, err := h.Pane(ctx, hint)
 	if err != nil {
 		return err
 	}
-	_, err = h.run(ctx, "tab", "focus", tab)
-	return err
-}
-
-func (h herdrClient) sendKeys(ctx context.Context, target string, keys ...string) error {
-	_, err := h.run(ctx, append([]string{"agent", "send-keys", target}, keys...)...)
-	return err
+	if info.Tab == "" {
+		return errNoPane
+	}
+	return h.FocusTab(ctx, info.Tab)
 }
 
 // stopLane ends a lane. A pane the operator pinned is theirs, so the agent is
 // interrupted twice and its shell survives: one ctrl+c interrupts a turn, two
-func (h herdrClient) stopLane(ctx context.Context, agent, pane string, pinned bool) error {
+// exits the agent. A pane dungeon created is dungeon's to close.
+func stopLane(ctx context.Context, h mux, agent, pane string, pinned bool) error {
 	if pinned {
-		return h.stopPinned(ctx, agent)
+		return stopPinned(ctx, h, agent)
 	}
-	return h.closePane(ctx, pane)
-}
-
-func (h herdrClient) paneTab(ctx context.Context, pane string) (string, error) {
-	out, err := h.run(ctx, "pane", "get", pane)
-	if err != nil {
-		return "", err
-	}
-	var payload struct {
-		Result struct {
-			Pane struct {
-				Tab string `json:"tab_id"`
-			} `json:"pane"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return "", err
-	}
-	if payload.Result.Pane.Tab == "" {
-		return "", errNoPane
-	}
-	return payload.Result.Pane.Tab, nil
+	return h.ClosePane(ctx, pane)
 }

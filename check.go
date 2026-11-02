@@ -53,13 +53,14 @@ func (f Finding) String() string {
 	return fmt.Sprintf("%s %s: %s", f.Path, f.Code, f.Message)
 }
 
-// A minion id becomes a herdr agent name, so it obeys that alphabet.
-var minionID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+// A minion id becomes an agent name, so it obeys dungeon's own naming rule:
+// lowercase, and short enough for every backend to accept.
+var minionID = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`) // 32 characters: fits every backend
 
 // A tool name is what pi accepts after --tools.
 var toolName = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
-// The directions herdr can split a pane in.
+// The directions a pane can be split in.
 var splits = map[string]bool{"right": true, "down": true, "left": true, "up": true}
 
 // An encounter becomes a branch prefix, a tab label and a directory name, so it
@@ -273,7 +274,7 @@ func duplicateAgentNames(minions []Minion) []Finding {
 		if other, ok := first[name]; ok {
 			f = append(f, Finding{
 				EDuplicateAgent, fmt.Sprintf("minions[%d].id", i),
-				fmt.Sprintf("minions %q and %q both derive the herdr agent name %q: shorten one id",
+				fmt.Sprintf("minions %q and %q both derive the agent name %q: shorten one id",
 					other, m.ID, name),
 			})
 			continue

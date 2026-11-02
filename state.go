@@ -16,7 +16,7 @@ import (
 type State struct {
 	Encounter string                 `json:"encounter"`
 	PlanHash  string                 `json:"plan_hash,omitempty"`
-	Token     string                 `json:"token,omitempty"` // per-run suffix, so two runs never share a herdr name
+	Token     string                 `json:"token,omitempty"` // per-run suffix, so two runs never share an agent name
 	UpdatedAt string                 `json:"updated_at"`
 	Units     map[string]UnitState   `json:"units"`
 	Minions   map[string]MinionState `json:"minions"`
@@ -35,7 +35,7 @@ type MinionState struct {
 	Status    string `json:"status"`
 	Note      string `json:"note,omitempty"`
 	At        string `json:"at"`
-	Pane      string `json:"pane,omitempty"`     // a hint, refreshed from herdr whenever the lane is live
+	Pane      string `json:"pane,omitempty"`     // a hint, refreshed from the multiplexer whenever the lane is live
 	Worktree  string `json:"worktree,omitempty"` // the path that holds the branch, resolved
 	Branch    string `json:"branch,omitempty"`
 	Head      string `json:"head,omitempty"`
@@ -73,12 +73,13 @@ func toSet(in []string) map[string]bool {
 	return m
 }
 
-// A herdr agent name is global. Two encounters that both declare w1 would
+// An agent name is global. Two encounters that both declare w1 would
 // otherwise share one agent, so a run carries a two-character token and every
-// agent it starts is named <minion>-<token>.
+// agent it starts is named <minion>-<token>, within dungeon's own 32-character
+// name rule so every backend accepts it.
 const (
 	tokenLen      = 2
-	agentNameMax  = 32 // herdr's limit
+	agentNameMax  = 32 // dungeon's naming rule, not a backend's limit
 	agentIDMax    = agentNameMax - 1 - tokenLen
 	tokenTries    = 64
 	tokenAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -104,7 +105,7 @@ func randomToken() string {
 	return string(b[:])
 }
 
-// AgentName is the herdr agent name for one minion: the minion id truncated to
+// AgentName is the agent name for one minion: the minion id truncated to
 // fit, a hyphen, then the token. Without a token it is the bare id, so a run
 // that started before tokens keeps the agent it already has.
 func AgentName(token, minion string) string {
@@ -139,7 +140,7 @@ func pickToken(agents map[string]Agent, minions []Minion, gen func() string) (st
 		}
 		last = clash
 	}
-	return "", fmt.Errorf("no free herdr agent name after %d tokens: %s is already live; "+
+	return "", fmt.Errorf("no free agent name after %d tokens: %s is already live; "+
 		"stop the other run with dungeon down, or close that agent, then run dungeon up again",
 		tokenTries, last)
 }

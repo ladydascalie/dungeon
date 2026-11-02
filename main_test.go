@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -225,5 +226,77 @@ func TestStateEncounterMismatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "something-else") {
 		t.Fatalf("stderr %q", stderr)
+	}
+}
+
+// openMux is the one place a backend is chosen: --mux wins, then the
+// environment. No backend is an error that tells the operator what to pass.
+func TestOpenMuxSelectsTheBackend(t *testing.T) {
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("TMUX", "")
+
+	if h, err := openMux(t.Context(), "herdr"); err != nil || h == nil {
+		t.Fatalf("--mux herdr: %v", err)
+	}
+	if _, err := openMux(t.Context(), "tmux"); err == nil {
+		t.Fatal("--mux tmux has no backend yet, so it must fail")
+	}
+	if _, err := openMux(t.Context(), "screen"); err == nil || !strings.Contains(err.Error(), "unknown mux") {
+		t.Fatalf("unknown backend: %v", err)
+	}
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+	if h, err := openMux(t.Context(), ""); err != nil || h == nil {
+		t.Fatalf("HERDR_ENV=1: %v", err)
+	}
+
+	t.Setenv("HERDR_ENV", "")
+	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "tmux") {
+		t.Fatalf("a tmux session with no tmux backend: %v", err)
+	}
+	t.Setenv("TMUX", "")
+	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "--mux") {
+		t.Fatalf("no multiplexer: %v", err)
+	}
+	if agents := probeAgents(t.Context(), ""); agents != nil {
+		t.Fatalf("a read-only probe with no mux should see nothing, got %v", agents)
+	}
+}
+
+// A status word outside the boundary's vocabulary is unknown, never guessed.
+func TestParseAgentStateRefusesToGuess(t *testing.T) {
+	cases := map[string]AgentState{
+		"working": AgentWorking,
+		"idle":    AgentIdle,
+		"blocked": AgentBlocked,
+		"done":    AgentDone,
+		"busy":    AgentUnknown,
+		"":        AgentUnknown,
+	}
+	for in, want := range cases {
+		if got := parseAgentState(in); got != want {
+			t.Fatalf("parseAgentState(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// PingCommand owns the shell quoting, so a message arrives literally whatever
+// it carries.
+func TestPingCommandQuotesForTheShell(t *testing.T) {
+	message := "cost $5, `id`, a 'quote' and\na newline"
+	line := newHerdr().PingCommand("w9:p1", message)
+	const prefix = "herdr pane run w9:p1 "
+	if !strings.HasPrefix(line, prefix) {
+		t.Fatalf("PingCommand = %q, want the herdr pane run prefix", line)
+	}
+	// A real shell evaluates the quoting: what it delivers must be the message,
+	// byte for byte.
+	out, err := exec.Command("sh", "-c", "printf %s "+line[len(prefix):]).Output()
+	if err != nil {
+		t.Fatalf("sh: %v", err)
+	}
+	if string(out) != message {
+		t.Fatalf("the shell delivered %q, want %q", out, message)
 	}
 }

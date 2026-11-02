@@ -112,7 +112,7 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 			row.Note, row.Link = us.Note, us.Link
 		}
 		if a, ok := agents[st.AgentName(u.Minion)]; ok {
-			row.Pane, row.Agent = a.Pane, a.Status
+			row.Pane, row.Agent = a.Pane, string(a.Status)
 		} else if hint := st.Minions[u.Minion].Pane; hint != "" {
 			row.Pane = hint
 		}
@@ -156,7 +156,7 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 	for _, m := range plan.Minions {
 		row := MinionRow{ID: m.ID, Role: m.Role, Status: st.MinionStatus(m.ID)}
 		if a, ok := agents[st.AgentName(m.ID)]; ok {
-			row.Pane, row.Agent = a.Pane, a.Status
+			row.Pane, row.Agent = a.Pane, string(a.Status)
 			if row.Status == "absent" {
 				row.Status = "spawned"
 			}

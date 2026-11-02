@@ -383,7 +383,7 @@ func TestPassingReviewPromotesItsFixForLand(t *testing.T) {
 			st.SetUnit("polish-review-2", "working", "")
 
 			o := dispatchOpts{planPath: planPath, statePath: filepath.Join(dir, "state.json")}
-			reconcile(t.Context(), newHerdrClient(), o, p, st, &digest{})
+			reconcile(t.Context(), newHerdr(), o, p, st, &digest{})
 
 			landed := map[string]bool{}
 			for _, u := range landable(p, st) {

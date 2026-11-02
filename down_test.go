@@ -166,3 +166,21 @@ func TestDownInterruptsATokenizedPinnedLane(t *testing.T) {
 		t.Fatalf("a pinned lane must not be addressed by the bare id:\n%s", calls)
 	}
 }
+
+// A backend without a status protocol reports unknown, and down must not close
+// a lane it cannot classify without --force.
+func TestDownRefusesALaneItCannotClassify(t *testing.T) {
+	planPath, _, log := downSetup(t, "w1:busy\nw2:idle\n")
+
+	code, stdout, stderr := runCLI("down", "--plan", planPath)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "w1 is unknown") {
+		t.Fatalf("down should say it cannot classify the lane:\n%s", stdout)
+	}
+	calls, _ := os.ReadFile(log)
+	if n := strings.Count(string(calls), "pane close"); n != 1 {
+		t.Fatalf("only the idle lane should be closed, got %d closes:\n%s", n, calls)
+	}
+}

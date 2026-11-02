@@ -149,14 +149,19 @@ func worktreePath(repo, encounter, minion string) string {
 	return filepath.Join(filepath.Dir(repo), root, encounter+"-"+minion)
 }
 
-// ensureToken gives the run its own herdr names on the first up. The state is
+// ensureToken gives the run its own agent names on the first up. The state is
 // saved by the caller, so the token survives the spawn and every later command
 // reuses it.
-func ensureToken(ctx context.Context, h herdrClient, st *State, minions []Minion, gen func() string) error {
+func ensureToken(ctx context.Context, h mux, st *State, minions []Minion, gen func() string) error {
 	if st.Token != "" {
 		return nil
 	}
-	agents := h.agents(ctx)
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		// Without the live fleet a token could collide with a running
+		// encounter, so the run waits for a readable backend.
+		return err
+	}
 	// A tokenless state is an in-flight legacy run only when this state records
 	// the pane its bare agent is in. A bare name live anywhere else belongs to
 	// another run, so adopting it would put two encounters on one agent.
@@ -188,13 +193,26 @@ func legacyRunLive(st *State, agents map[string]Agent, minions []Minion) bool {
 	return false
 }
 
-func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, splitOverride string, out io.Writer) (spawnResult, error) {
+// spawnInput is one up: which encounter, what it looks like and where to say
+// what happened.
+type spawnInput struct {
+	planPath string
+	plan     Plan
+	state    *State
+	split    string
+	out      io.Writer
+}
+
+func spawnMinions(ctx context.Context, h mux, in spawnInput) (spawnResult, error) {
 	var res spawnResult
-	h := newHerdrClient()
+	planPath, p, st := in.planPath, in.plan, in.state
 	if err := ensureToken(ctx, h, st, p.Minions, newToken); err != nil {
 		return res, err
 	}
-	agents := h.agents(ctx)
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return res, err
+	}
 
 	if _, err := os.Stat(p.Repo); err != nil {
 		return res, fmt.Errorf("repo %s is not readable", p.Repo)
@@ -207,11 +225,11 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 	if direction == "" {
 		direction = "right"
 	}
-	if splitOverride != "" {
-		direction = splitOverride
+	if in.split != "" {
+		direction = in.split
 	}
 
-	ws := h.findWorkspace(ctx, p.Encounter)
+	ws := findWorkspace(ctx, h, p.Encounter)
 	tabs := map[string]*tabFor{}
 
 	// tab returns the tab a role runs in, creating the workspace and the tab on
@@ -225,13 +243,13 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 		label := roleLabel(m.Role, counts[m.Role])
 		t := &tabFor{total: counts[m.Role]}
 		if ws == "" {
-			id, tabID, root, err := h.openWorkspace(ctx, p.Encounter, label, cwd)
+			id, tabID, root, err := h.CreateWorkspace(ctx, p.Encounter, label, cwd)
 			if err != nil {
 				return nil, err
 			}
 			ws, t.tab, t.root = id, tabID, root
 		} else {
-			tabID, root, err := h.openTab(ctx, ws, label, cwd)
+			tabID, root, err := h.CreateTab(ctx, ws, label, cwd)
 			if err != nil {
 				return nil, err
 			}
@@ -267,22 +285,22 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 			lane, err := ensureWorktree(p.Repo, p.Base, p.Encounter, owner, cwd)
 			if err != nil {
 				res.Failed = append(res.Failed, m.ID)
-				fmt.Fprintf(out, "%s: %v\n", m.ID, err)
+				fmt.Fprintf(in.out, "%s: %v\n", m.ID, err)
 				continue
 			}
 			st.SetLane(owner, lane)
 			if lane.Resumed {
-				fmt.Fprintf(out, "%s: resumed %s at %s, ahead of %s: %d, uncommitted files: %d, %s\n",
+				fmt.Fprintf(in.out, "%s: resumed %s at %s, ahead of %s: %d, uncommitted files: %d, %s\n",
 					owner, lane.Branch, lane.Head, p.Base, lane.Ahead, lane.Dirty, lane.Path)
 			}
 			if lane.Recreated {
-				fmt.Fprintf(out, "%s: recreated %s from %s, old branch had no unique commits, %s\n",
+				fmt.Fprintf(in.out, "%s: recreated %s from %s, old branch had no unique commits, %s\n",
 					owner, lane.Branch, p.Base, lane.Path)
 			}
 		}
 
 		var pane string
-		if m.Pane != "" && h.paneExists(ctx, m.Pane) {
+		if m.Pane != "" && paneExists(ctx, h, m.Pane) {
 			pane = m.Pane // the operator's pane wins over the layout
 		} else {
 			t, err := tab(m, cwd)
@@ -295,16 +313,16 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 			}
 		}
 		if m.Pane != "" && pane != m.Pane {
-			fmt.Fprintf(out, "%s: pane %s is gone, using %s\n", m.ID, m.Pane, pane)
+			fmt.Fprintf(in.out, "%s: pane %s is gone, using %s\n", m.ID, m.Pane, pane)
 		}
 
 		sessionDir := filepath.Join(dir, "sessions", m.ID)
 		if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 			return res, err
 		}
-		if err := h.startAgent(ctx, name, pane, laneArgs(m.Role, m.Tools, sessionDir)); err != nil {
+		if err := h.StartAgent(ctx, name, pane, laneArgs(m.Role, m.Tools, sessionDir)); err != nil {
 			res.Failed = append(res.Failed, m.ID)
-			fmt.Fprintf(out, "%s: %v\n", m.ID, err)
+			fmt.Fprintf(in.out, "%s: %v\n", m.ID, err)
 			continue
 		}
 		st.SetMinion(m.ID, "spawned", "")
