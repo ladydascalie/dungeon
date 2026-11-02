@@ -36,8 +36,21 @@ func tmuxTest(t *testing.T) tmux {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
+	// A pane dungeon starts with a shell writes the command line it is given to
+	// HISTFILE. Point every shell this server starts at /dev/null before it
+	// creates any pane, so the tests never touch the operator's shell history.
+	// A plain sh is the pane shell because zsh resets HISTFILE to
+	// $HOME/.zsh_history however the environment set it. The config is how the
+	// settings exist before the first pane: a server with no sessions exits, so
+	// set-environment cannot run after start-server.
+	conf := filepath.Join(t.TempDir(), "tmux.conf")
+	config := "set-environment -g HISTFILE /dev/null\n" +
+		"set-option -g default-shell /bin/sh\n"
+	if err := os.WriteFile(conf, []byte(config), 0o600); err != nil {
+		t.Fatalf("write private tmux config: %v", err)
+	}
 	run := func(args ...string) ([]byte, error) {
-		full := append([]string{"-L", testSocket, "-f", "/dev/null"}, args...)
+		full := append([]string{"-L", testSocket, "-f", conf}, args...)
 		return exec.Command("tmux", full...).CombinedOutput()
 	}
 	_, _ = run("kill-server")
@@ -47,6 +60,11 @@ func tmuxTest(t *testing.T) tmux {
 	_ = os.Remove(socketPath())
 	if out, err := run("start-server"); err != nil {
 		t.Fatalf("start private tmux server: %v: %s", err, out)
+	}
+	// A server with no sessions exits at once, and the next client would start
+	// one without the config above. A keeper session holds it open for the test.
+	if out, err := run("new-session", "-d", "-s", "dungeon-test-server"); err != nil {
+		t.Fatalf("start keeper session: %v: %s", err, out)
 	}
 	t.Cleanup(func() {
 		_, _ = run("kill-server")
@@ -345,6 +363,131 @@ func TestTmuxEmptyTargetIsAnError(t *testing.T) {
 	}
 	if _, err := h.Pane(ctx, root); err != nil {
 		t.Fatalf("root pane %s is gone after an empty target: %v", root, err)
+	}
+}
+
+// TestTmuxStartAgentRespawnsADungeonPane proves the pane dungeon created runs
+// the agent as its own process: no shell holds it, so no shell history is
+// written.
+func TestTmuxStartAgentRespawnsADungeonPane(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	fakePi(t, "exec sleep 60")
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	waitForShell(t, h, root)
+
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, root, []string{"--no-skills"}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if a, ok := agents[name]; !ok || a.Pane != root {
+		t.Fatalf("Agents = %v, want %s on %s", agents, name, root)
+	}
+
+	command := runInTestServer(t, h.socket, "display-message", "-p", "-t", root, "#{pane_current_command}")
+	if isShell(command) {
+		t.Fatalf("dungeon pane still runs its shell %q; the agent was pasted, not respawned", command)
+	}
+	pid := runInTestServer(t, h.socket, "display-message", "-p", "-t", root, "#{pane_pid}")
+	out, err := exec.Command("ps", "-o", "comm=", "-p", pid).Output()
+	if err != nil {
+		t.Fatalf("ps %s: %v", pid, err)
+	}
+	if proc := strings.TrimSpace(string(out)); isShell(proc) {
+		t.Fatalf("pane process %s is the shell %q, want the agent", pid, proc)
+	}
+}
+
+// TestTmuxDungeonPaneDiesWithItsAgent proves a respawned pane cannot outlive
+// its agent: the pane goes away with the process, so the name option cannot
+// leave a ghost lane behind.
+func TestTmuxDungeonPaneDiesWithItsAgent(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "started")
+	fakePi(t, ": > "+shellQuote(marker)+"; sleep 1")
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	waitForShell(t, h, root)
+
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	pollAgents(t, h, name, true)
+	waitForFile(t, marker)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := h.Pane(ctx, root); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the agent exited but its dungeon pane is still there")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	pollAgents(t, h, name, false)
+}
+
+// TestTmuxStartAgentKeepsAForeignPanesShell proves the operator's own pane is
+// not respawned: the agent is pasted into the shell, the shell survives it, and
+// the name is unset when the agent exits.
+func TestTmuxStartAgentKeepsAForeignPanesShell(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	// A long enough agent for the fleet to be observed while it runs. It is a
+	// different foreground command from the shell, which StartAgent watches on
+	// this path.
+	fakePi(t, "exec sleep 3")
+
+	// A session dungeon did not create, so its pane carries no marker.
+	runInTestServer(t, h.socket, "new-session", "-d", "-s", "operator", "-c", t.TempDir())
+	pane := runInTestServer(t, h.socket, "display-message", "-p", "-t", "operator", "#{pane_id}")
+	waitForShell(t, h, pane)
+
+	// The operator's shell must not write dungeon's command lines to a real
+	// history file either.
+	histFile := filepath.Join(t.TempDir(), "histfile")
+	runInTestServer(t, h.socket, "send-keys", "-t", pane, "-l", "echo \"$HISTFILE\" > "+shellQuote(histFile))
+	runInTestServer(t, h.socket, "send-keys", "-t", pane, "Enter")
+	waitForFile(t, histFile)
+	if got, err := os.ReadFile(histFile); err != nil || strings.TrimSpace(string(got)) != "/dev/null" {
+		t.Fatalf("test pane HISTFILE = %q (%v), want /dev/null", got, err)
+	}
+
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, pane, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	pollAgents(t, h, name, true)
+	pollAgents(t, h, name, false)
+
+	// The shell is the pane's foreground command again, and the pane is alive.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		command, err := h.paneCommand(ctx, pane)
+		if err == nil && isShell(command) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the operator pane never returned to its shell: command %q, err %v", command, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, err := h.Pane(ctx, pane); err != nil {
+		t.Fatalf("the operator pane is gone after the agent ran: %v", err)
 	}
 }
 
@@ -843,8 +986,13 @@ func runFakeAgent(out string, boot time.Duration) error {
 			if err := os.WriteFile(out, []byte(string(line)+"\nsubmitted\n"), 0o644); err != nil {
 				return err
 			}
-			_, err := os.Stdout.WriteString("\r\nsubmitted\r\n")
-			return err
+			if _, err := os.Stdout.WriteString("\r\nsubmitted\r\n"); err != nil {
+				return err
+			}
+			// Stay alive after submitting. A respawned pane dies with its agent,
+			// so the test could not read the transcript back if this exited.
+			time.Sleep(time.Minute)
+			return nil
 		case 0x7f, 0x08:
 			if len(line) > 0 {
 				line = line[:len(line)-1]
@@ -888,6 +1036,59 @@ func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
 	if string(got) != want {
 		t.Fatalf("fake agent received %q, want %q", got, want)
 	}
+}
+
+// TestTmuxPromptSubmitsToARealPi is the case that failed: a fresh pi renders a
+// paste hundreds of milliseconds after it, and the Enter sent with the paste is
+// swallowed during startup. Prompt must prove delivery itself, so pi takes the
+// prompt and starts a turn with no key from this test.
+func TestTmuxPromptSubmitsToARealPi(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi is not installed")
+	}
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, root, []string{"--no-skills"}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	text := "prompt-confirm: reply with the single word ok"
+	if err := h.Prompt(ctx, name, text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// No key came from this test. pi took the prompt when it shows its working
+	// indicator, or when its status line counts tokens for the request. A fast
+	// model can finish before the first look, so poll for either.
+	deadline := time.Now().Add(20 * time.Second)
+	var screen string
+	for {
+		screen = mustCapture(t, h, root)
+		if strings.Contains(screen, "Working") || strings.Contains(screen, "↑") {
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("pi never took the prompt %q:\n%s", text, screen)
+}
+
+// mustCapture reads a pane's text or fails the test.
+func mustCapture(t *testing.T, h tmux, pane string) string {
+	t.Helper()
+	screen, err := h.capture(context.Background(), pane)
+	if err != nil {
+		t.Fatalf("capture %s: %v", pane, err)
+	}
+	return screen
 }
 
 func TestTmuxStartAgentWaitsForOutputToSettle(t *testing.T) {
