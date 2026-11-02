@@ -292,7 +292,15 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 	for i, arg := range command {
 		command[i] = shellQuote(arg)
 	}
-	if err := t.paste(ctx, pane, strings.Join(command, " ")); err != nil {
+	// The option lives in tmux, not in the agent process, so it would outlive a
+	// dead agent and make a ghost lane read live. Unset it after the agent
+	// exits, however it exits.
+	unset := append([]string{"tmux"}, t.argv("set-option", "-p", "-u", "-t", pane, paneAgentOption)...)
+	for i, arg := range unset {
+		unset[i] = shellQuote(arg)
+	}
+	line := strings.Join(command, " ") + "; " + strings.Join(unset, " ")
+	if err := t.paste(ctx, pane, line); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(30 * time.Second)

@@ -386,3 +386,82 @@ func TestTmuxStartAgentRefusesANameLiveInAnotherPane(t *testing.T) {
 		t.Fatalf("CloseWorkspace: %v", err)
 	}
 }
+
+// fakePi writes a fake pi into its own directory and puts it first on PATH.
+func fakePi(t *testing.T, body string) {
+	t.Helper()
+	bin := t.TempDir()
+	script := filepath.Join(bin, "pi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// pollAgents samples the fleet until want agrees with whether name is listed.
+func pollAgents(t *testing.T, h tmux, name string, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		agents, err := h.Agents(context.Background())
+		if err != nil {
+			t.Fatalf("Agents: %v", err)
+		}
+		_, listed := agents[name]
+		if listed == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent %s listed = %v, want %v; fleet: %v", name, listed, want, agents)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTmuxStartAgentLeavesNoGhostWhenTheAgentExits(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "started")
+	// The agent is seen to start, so the failed-start cleanup is not what
+	// unsets the name. It exits on its own a moment later.
+	fakePi(t, ": > "+shellQuote(marker)+"; sleep 1")
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	pollAgents(t, h, name, true)
+
+	waitForFile(t, marker)
+	pollAgents(t, h, name, false)
+}
+
+func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	fakePi(t, "exec sleep 60")
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	name := "w1-aa"
+	done := make(chan error, 1)
+	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartAgent: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("StartAgent did not start the agent")
+	}
+
+	pollAgents(t, h, name, true)
+}
