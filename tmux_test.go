@@ -490,7 +490,7 @@ func TestTmuxDungeonPaneDiesWithItsAgent(t *testing.T) {
 	h := tmuxTest(t)
 	ctx := context.Background()
 	marker := filepath.Join(t.TempDir(), "started")
-	fakePi(t, ": > "+shellQuote(marker)+"; sleep 1")
+	fakePi(t, ": > "+shellQuote(marker)+"; sleep 3")
 
 	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
 	if err != nil {
@@ -670,7 +670,7 @@ func TestTmuxStartAgentLeavesNoGhostWhenTheAgentExits(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	// The agent is seen to start, so the failed-start cleanup is not what
 	// unsets the name. It exits on its own a moment later.
-	fakePi(t, ": > "+shellQuote(marker)+"; sleep 1")
+	fakePi(t, ": > "+shellQuote(marker)+"; sleep 3")
 
 	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
 	if err != nil {
@@ -1332,6 +1332,57 @@ exec sleep 60`)
 	}
 	if !strings.Contains(screen, "ready") {
 		t.Fatalf("StartAgent returned before the agent's output settled:\n%s", screen)
+	}
+}
+
+// TestTmuxStartAgentWaitsForTheInputBoxDraw is the readiness case: the agent
+// draws a splash, pauses, then draws its input box. The pause looks quiet, so a
+// StartAgent that only waits for a short gap returns while the input box is
+// still missing and the first prompt is pasted into a TUI that is not ready.
+// The fake agent then takes input with dd, which writes anything it reads to a
+// file, so the test can prove that no prompt was sent during the start.
+func TestTmuxStartAgentWaitsForTheInputBoxDraw(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	input := filepath.Join(t.TempDir(), "input.txt")
+	fakePi(t, `echo "splash: loading"
+sleep 0.9
+echo "input box: ready"
+exec dd of="`+input+`" bs=1 count=1000 2>/dev/null`)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+
+	begin := time.Now()
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	elapsed := time.Since(begin)
+	if elapsed < startQuiet {
+		t.Fatalf("StartAgent returned after %s, before the %s quiet window", elapsed, startQuiet)
+	}
+
+	screen := mustCapture(t, h, root)
+	if !strings.Contains(screen, "splash: loading") {
+		t.Fatalf("StartAgent returned before the splash was drawn:\n%s", screen)
+	}
+	if !strings.Contains(screen, "input box: ready") {
+		t.Fatalf("StartAgent returned before the input box was drawn:\n%s", screen)
+	}
+
+	// dd owns the pane now and writes every byte it reads. A prompt pasted by
+	// StartAgent would land here.
+	time.Sleep(300 * time.Millisecond)
+	got, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatalf("fake agent is not taking input: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("StartAgent sent %q to the agent; readiness must not paste", got)
 	}
 }
 

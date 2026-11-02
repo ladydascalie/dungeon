@@ -418,12 +418,15 @@ func (t tmux) Read(ctx context.Context, id string) (string, error) {
 }
 
 // StartAgent records the name on the pane, runs pi with args, and waits until
-// the agent can take input: the pane's output has gone quiet, and on the
-// operator's pane the foreground command has left the shell that was there. A
-// changing foreground command is not enough on its own, because a TUI accepts a
-// pasted prompt long after it has replaced the shell. The name is the identity a
+// the agent can take input. Readiness is decided from the pane: the agent's
+// process is in the foreground, it is not the shell that was there, and the
+// pane's output has stayed unchanged for startQuiet. A changing foreground
+// command is not enough on its own, because a TUI accepts a pasted prompt long
+// after it has replaced the shell, and a splash that pauses mid-draw looks
+// quiet. Nothing is pasted to probe readiness. The name is the identity a
 // restarted dungeon reads back through Agents; nothing here keeps a map. A pane
-// that never starts the agent is an error naming the pane.
+// that never gets ready within startDeadline is an error naming the pane and
+// what it was running.
 //
 // A name already live in a different pane is refused: every later lookup is by
 // name, so two panes on one name would make it ambiguous. A name already live
@@ -477,8 +480,10 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 		if err := t.respawn(ctx, pane, command); err != nil {
 			return err
 		}
-		// No shell is left behind, so there is no foreground command to leave:
-		// an empty before disables that half of the readiness wait.
+		// No shell is left behind, so there is no foreground command to leave.
+		// An empty before disables that half of the readiness wait; the respawn
+		// itself is what proves the shell is gone, and the quiet window still
+		// requires one process to own the pane throughout.
 		if err := t.waitQuiet(ctx, pane, name, ""); err != nil {
 			return err
 		}
@@ -499,30 +504,11 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 	if err := t.paste(ctx, pane, strings.Join(line, " ")+"; "+strings.Join(unset, " ")); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-		now, err := t.paneCommand(ctx, pane)
-		if err == nil && now != "" && now != before {
-			if err := t.waitQuiet(ctx, pane, name, before); err != nil {
-				return err
-			}
-			started = true
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("tmux: pane %s did not start agent %s within 30s", pane, name)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
+	if err := t.waitQuiet(ctx, pane, name, before); err != nil {
+		return err
 	}
+	started = true
+	return nil
 }
 
 // respawn replaces the pane's process with the agent, so the pane runs no
@@ -544,23 +530,42 @@ func (t tmux) paneCommand(ctx context.Context, pane string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// readyQuiet is how long a pane's output must stay unchanged before StartAgent
-// calls the agent ready. Boot banners arrive in bursts; a quiet gap longer than
-// the burst spacing means the agent has reached its prompt.
+// readyQuiet is how long a pane's output must stay unchanged before Prompt
+// pastes into it. Boot banners arrive in bursts; a quiet gap longer than the
+// burst spacing means a TUI has reached its prompt.
 const readyQuiet = 300 * time.Millisecond
 
-// waitQuiet blocks until the pane's captured output has not changed for
-// readyQuiet, while the foreground command stays away from the shell that was
-// there before the agent. An empty shell means the pane has no shell to return
-// to, which is the respawned case. Bounded: an agent that never settles is an
-// error that names the pane.
+// startQuiet is how long an agent's output must stay unchanged, with the agent
+// still in the foreground, before StartAgent calls it ready. A TUI draws its
+// splash, pauses, then draws its input box; a gap inside the splash is not
+// readiness. The window is longer than such a pause so the input box is on the
+// pane before the first prompt is sent, which is what the retried first prompts
+// were telling us.
+const startQuiet = 1 * time.Second
+
+// startDeadline caps how long StartAgent waits for an agent to become ready.
+// A process that appears but never settles is an error, not a shorter wait.
+const startDeadline = 30 * time.Second
+
+// waitQuiet blocks until the pane is ready for input: the agent's process is in
+// the foreground, that process differs from the shell that was there before,
+// and the captured output has not changed for startQuiet.
+//
+// The process is part of the window, not a one-off check. A pane that returns
+// to the shell it came from has lost the agent and is an error at once. A pane
+// whose process changes (a wrapper execing its real interpreter) restarts the
+// window, because the output drawn by the previous process says nothing about
+// the new one. Readiness is read from the pane alone: nothing is pasted to
+// probe it. Bounded by startDeadline, and an agent that never gets there is an
+// error that names the pane and what it was running.
 func (t tmux) waitQuiet(ctx context.Context, pane, name, before string) error {
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(startDeadline)
 	last, err := t.capture(ctx, pane)
 	if err != nil {
 		return err
 	}
 	since := time.Now()
+	agentCommand := ""
 	for {
 		select {
 		case <-ctx.Done():
@@ -572,18 +577,37 @@ func (t tmux) waitQuiet(ctx context.Context, pane, name, before string) error {
 			return err
 		}
 		command, err := t.paneCommand(ctx, pane)
-		if err == nil && command == before {
+		if err != nil {
+			return err
+		}
+		if agentCommand != "" && command == before {
 			return fmt.Errorf("tmux: pane %s returned to %q before agent %s was ready", pane, command, name)
+		}
+		if command == "" || command == before {
+			// The agent's process has not appeared yet. The window starts when
+			// it does, not when this call does.
+			if time.Now().After(deadline) {
+				return fmt.Errorf("tmux: pane %s did not start agent %s within %s; it was running %q", pane, name, startDeadline, command)
+			}
+			continue
+		}
+		if command != agentCommand {
+			// A new process owns the pane: everything drawn so far may be a
+			// splash. Restart the window and require this process to stay.
+			agentCommand = command
+			last = now
+			since = time.Now()
+			continue
 		}
 		if now != last {
 			last = now
 			since = time.Now()
 		}
-		if time.Since(since) >= readyQuiet {
+		if time.Since(since) >= startQuiet {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("tmux: pane %s output did not settle for agent %s within 10s", pane, name)
+			return fmt.Errorf("tmux: pane %s: agent %s did not settle within %s; it was running %q", pane, name, startDeadline, command)
 		}
 	}
 }
