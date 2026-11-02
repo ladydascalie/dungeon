@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,31 +12,50 @@ import (
 	"time"
 )
 
+// testSocket names this process's tmux server. It is derived once, so every
+// test in the binary shares it, and two test binaries never share a server.
+var testSocket = fmt.Sprintf("dungeon-test-%d-%08x", os.Getpid(), rand.Uint32())
+
+// socketPath is the file tmux binds for testSocket.
+func socketPath() string {
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), testSocket)
+}
+
 // tmuxTest gives a test its own tmux server. It never talks to the operator's
-// default server: every command names the dungeon-test socket and the server
+// default server: every command names this process's socket and the server
 // starts with /dev/null as its config.
 func tmuxTest(t *testing.T) tmux {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
-	const socket = "dungeon-test"
 	run := func(args ...string) ([]byte, error) {
-		full := append([]string{"-L", socket, "-f", "/dev/null"}, args...)
+		full := append([]string{"-L", testSocket, "-f", "/dev/null"}, args...)
 		return exec.Command("tmux", full...).CombinedOutput()
 	}
 	_, _ = run("kill-server")
+	// tmux leaves the socket file behind after kill-server, and a later start
+	// on the same name can lose a race against that stale file. The name is
+	// ours alone, so remove it before binding.
+	_ = os.Remove(socketPath())
 	if out, err := run("start-server"); err != nil {
 		t.Fatalf("start private tmux server: %v: %s", err, out)
 	}
-	t.Cleanup(func() { _, _ = run("kill-server") })
-	return tmux{socket: socket}
+	t.Cleanup(func() {
+		_, _ = run("kill-server")
+		_ = os.Remove(socketPath())
+	})
+	return tmux{socket: testSocket}
 }
 
 // runInTestServer executes a raw tmux command on the test's private server.
 func runInTestServer(t *testing.T, socket string, args ...string) string {
 	t.Helper()
-	full := append([]string{"-L", socket}, args...)
+	full := append([]string{"-L", socket, "-f", "/dev/null"}, args...)
 	out, err := exec.Command("tmux", full...).CombinedOutput()
 	if err != nil {
 		t.Fatalf("tmux %s: %v: %s", strings.Join(args, " "), err, out)
