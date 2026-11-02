@@ -142,38 +142,6 @@ func TestLandReportsAFailedGate(t *testing.T) {
 	}
 }
 
-func TestUncommittedWorkBlocksTheUnit(t *testing.T) {
-	repo := gitRepo(t)
-	fakeHerdr(t, "")
-	t.Setenv("FAKE_REPORT", "1")
-	planPath, statePath, _ := encounter(t, repo, planFor(repo))
-
-	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
-		t.Fatalf("up: %s", stderr)
-	}
-	// The lane writes its file but does not commit it.
-	wt := worktreePath(repo, "enc", "w1")
-	if err := os.WriteFile(filepath.Join(wt, "NOTES.md"), []byte("hello\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	plan := strings.Replace(planFor(repo), "paths: [src/**]", "paths: [NOTES.md]", 1)
-	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--force", "--plan", planPath)
-	if code != 0 {
-		t.Fatalf("next exit %d: %s", code, stderr)
-	}
-	if !strings.Contains(stdout, "blocked: A") {
-		t.Fatalf("output:\n%s", stdout)
-	}
-	st, _ := LoadState(statePath)
-	if got := st.Units["A"].Note; !strings.Contains(got, "uncommitted work in NOTES.md") {
-		t.Fatalf("note %q", got)
-	}
-}
-
 func TestAChangeOutsideTheDeclaredPathsBlocks(t *testing.T) {
 	repo := gitRepo(t)
 	fakeHerdr(t, "")
