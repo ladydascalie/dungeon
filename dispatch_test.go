@@ -470,6 +470,60 @@ func TestBriefNamesThePairedWorktreeAndDepReports(t *testing.T) {
 	}
 }
 
+// TestBriefTellsALaneToResumeWhenTheDispatchArrivesAgain is the duplicate
+// dispatch guard. The brief is all the lane reads, so it must say that a
+// second arrival is the same unit in the same worktree, and that the report is
+// written once.
+func TestBriefTellsALaneToResumeWhenTheDispatchArrivesAgain(t *testing.T) {
+	p := decodeOK(t, goodPlan)
+	m, _ := findMinion(p, "w1")
+	var u Unit
+	for _, x := range p.Units {
+		if x.ID == "api-timeout" {
+			u = x
+		}
+	}
+	text := briefText(briefData{
+		minion: m,
+		unit:   u,
+		dir:    "/lane",
+		report: "/enc/reports/api-timeout.md",
+	})
+
+	again := strings.Index(text, "## If this dispatch arrives again")
+	if again < 0 {
+		t.Fatalf("brief does not say what to do when it arrives again:\n%s", text)
+	}
+	if accept := strings.Index(text, "accept: "+u.Accept); accept < 0 || again > accept {
+		t.Fatalf("the repeated-dispatch section must come before the accept line:\n%s", text)
+	}
+	for _, want := range []string{
+		"same unit and the same worktree",
+		"continue from what is already there",
+		"do not restart",
+		"write the report once",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("brief missing %q:\n%s", want, text)
+		}
+	}
+	// The instruction is a short note, not a second contract.
+	section := text[again:strings.Index(text, "accept: "+u.Accept)]
+	if lines := strings.Count(section, "\n"); lines > 4 {
+		t.Fatalf("the repeated-dispatch section is %d lines, want a short one:\n%s", lines, section)
+	}
+
+	// The rest of the brief still names what the lane owns and how it passes.
+	if !strings.Contains(text, "worktree: /lane") {
+		t.Fatalf("brief lost its worktree:\n%s", text)
+	}
+	for _, path := range u.Paths {
+		if !strings.Contains(text, "  - "+path) {
+			t.Fatalf("brief lost owned path %q:\n%s", path, text)
+		}
+	}
+}
+
 func TestOfMustNameAWriter(t *testing.T) {
 	plan := strings.Replace(goodPlan, "{id: r1, role: reviewer, of: w1}",
 		"{id: r1, role: reviewer, of: scout}", 1)

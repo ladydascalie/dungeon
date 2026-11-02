@@ -191,6 +191,8 @@ func briefText(d briefData) string {
 			fmt.Fprintf(&b, "- %s: %s\n", r.ID, r.Path)
 		}
 	}
+	b.WriteString("\n## If this dispatch arrives again\n\n")
+	b.WriteString("It is the same unit and the same worktree: continue from what is already there, do not restart, and write the report once.\n")
 	switch {
 	case u.Verdict != "":
 		fmt.Fprintf(&b, "verdict: %s\n", u.Verdict)
