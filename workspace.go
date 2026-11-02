@@ -10,40 +10,33 @@ import (
 // minion of that role. A workspace is the unit of cleanup and of attention: the
 // operator closes one thing, not sixteen.
 
-type workspaceInfo struct {
-	ID    string `json:"workspace_id"`
-	Label string `json:"label"`
-}
-
-func (h herdrClient) workspaces(ctx context.Context) []workspaceInfo {
-	out, err := h.run(ctx, "workspace", "list")
+func (h herdr) Workspaces(ctx context.Context) []workspace {
+	out, err := h.call(ctx, "workspace", "list")
 	if err != nil {
 		return nil
 	}
 	var payload struct {
 		Result struct {
-			Workspaces []workspaceInfo `json:"workspaces"`
+			Workspaces []struct {
+				ID    string `json:"workspace_id"`
+				Label string `json:"label"`
+			} `json:"workspaces"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return nil
 	}
-	return payload.Result.Workspaces
-}
-
-func (h herdrClient) findWorkspace(ctx context.Context, label string) string {
-	for _, ws := range h.workspaces(ctx) {
-		if ws.Label == label {
-			return ws.ID
-		}
+	all := make([]workspace, 0, len(payload.Result.Workspaces))
+	for _, ws := range payload.Result.Workspaces {
+		all = append(all, workspace{ID: ws.ID, Label: ws.Label})
 	}
-	return ""
+	return all
 }
 
-// openWorkspace creates the encounter workspace and returns its first tab and
+// CreateWorkspace creates the encounter workspace and returns its first tab and
 // root pane. The tab is renamed to the role it holds.
-func (h herdrClient) openWorkspace(ctx context.Context, label, tabLabel, cwd string) (ws, tab, root string, err error) {
-	out, err := h.run(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
+func (h herdr) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (wsID, tabID, rootPane string, err error) {
+	out, err := h.call(ctx, "workspace", "create", "--label", label, "--cwd", cwd, "--no-focus")
 	if err != nil {
 		return "", "", "", err
 	}
@@ -63,19 +56,24 @@ func (h herdrClient) openWorkspace(ctx context.Context, label, tabLabel, cwd str
 	if err := json.Unmarshal(out, &payload); err != nil {
 		return "", "", "", fmt.Errorf("herdr workspace create: %w", err)
 	}
-	ws, tab, root = payload.Result.Workspace.ID, payload.Result.Tab.ID, payload.Result.Root.PaneID
-	if ws == "" || tab == "" || root == "" {
+	wsID, tabID, rootPane = payload.Result.Workspace.ID, payload.Result.Tab.ID, payload.Result.Root.PaneID
+	if wsID == "" || tabID == "" || rootPane == "" {
 		return "", "", "", fmt.Errorf("herdr workspace create returned an incomplete layout")
 	}
-	if _, err := h.run(ctx, "tab", "rename", tab, tabLabel); err != nil {
+	if _, err := h.call(ctx, "tab", "rename", tabID, tabLabel); err != nil {
 		return "", "", "", err
 	}
-	return ws, tab, root, nil
+	return wsID, tabID, rootPane, nil
 }
 
-// openTab adds a tab for a role to an existing workspace.
-func (h herdrClient) openTab(ctx context.Context, ws, label, cwd string) (tab, root string, err error) {
-	out, err := h.run(ctx, "tab", "create", "--workspace", ws, "--label", label, "--cwd", cwd, "--no-focus")
+// CreateTab adds a tab for a role to an existing workspace.
+func (h herdr) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, rootPane string, err error) {
+	args := []string{"tab", "create"}
+	if ws != "" {
+		args = append(args, "--workspace", ws)
+	}
+	args = append(args, "--label", label, "--cwd", cwd, "--no-focus")
+	out, err := h.call(ctx, args...)
 	if err != nil {
 		return "", "", err
 	}
@@ -98,45 +96,70 @@ func (h herdrClient) openTab(ctx context.Context, ws, label, cwd string) (tab, r
 	return payload.Result.Tab.ID, payload.Result.Root.PaneID, nil
 }
 
-func (h herdrClient) closeWorkspace(ctx context.Context, ws string) error {
-	_, err := h.run(ctx, "workspace", "close", ws)
-	return err
-}
-
-// workspaceOfPane answers the one question down needs before closing a
-// workspace: is a pane the operator pinned inside it?
-func (h herdrClient) workspaceOfPane(ctx context.Context, pane string) string {
-	out, err := h.run(ctx, "pane", "get", pane)
+func (h herdr) Tabs(ctx context.Context, ws string) []tab {
+	if ws == "" {
+		return nil
+	}
+	out, err := h.call(ctx, "tab", "list", "--workspace", ws)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var payload struct {
 		Result struct {
-			Pane struct {
-				Workspace string `json:"workspace_id"`
-			} `json:"pane"`
+			Tabs []struct {
+				ID    string `json:"tab_id"`
+				Label string `json:"label"`
+			} `json:"tabs"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return ""
+		return nil
 	}
-	return payload.Result.Pane.Workspace
+	all := make([]tab, 0, len(payload.Result.Tabs))
+	for _, t := range payload.Result.Tabs {
+		all = append(all, tab{ID: t.ID, Label: t.Label})
+	}
+	return all
+}
+
+// FocusTab moves the operator to a tab.
+func (h herdr) FocusTab(ctx context.Context, tab string) error {
+	_, err := h.call(ctx, "tab", "focus", tab)
+	return err
+}
+
+func (h herdr) CloseWorkspace(ctx context.Context, ws string) error {
+	_, err := h.call(ctx, "workspace", "close", ws)
+	return err
+}
+
+// findWorkspace is the encounter's workspace, if it is still open.
+func findWorkspace(ctx context.Context, h mux, label string) string {
+	for _, ws := range h.Workspaces(ctx) {
+		if ws.Label == label {
+			return ws.ID
+		}
+	}
+	return ""
 }
 
 // closeEncounter closes the workspace up created, unless a pane the operator
 // pinned lives inside it. A pinned pane belongs to the operator, so the
 // workspace stays and they close it when they are done.
-func closeEncounter(ctx context.Context, h herdrClient, p Plan) {
-	ws := h.findWorkspace(ctx, p.Encounter)
+func closeEncounter(ctx context.Context, h mux, p Plan) {
+	ws := findWorkspace(ctx, h, p.Encounter)
 	if ws == "" {
 		return
 	}
 	for _, m := range p.Minions {
-		if m.Pane != "" && h.workspaceOfPane(ctx, m.Pane) == ws {
+		if m.Pane == "" {
+			continue
+		}
+		if info, err := h.Pane(ctx, m.Pane); err == nil && info.Workspace == ws {
 			return
 		}
 	}
-	h.closeWorkspace(ctx, ws)
+	h.CloseWorkspace(ctx, ws)
 }
 
 // tabFor is one role's tab: its root pane, and how many of its minions are
@@ -148,17 +171,17 @@ type tabFor struct {
 	used  int
 }
 
-func (t *tabFor) next(ctx context.Context, h herdrClient, cwd, direction string) (string, error) {
+func (t *tabFor) next(ctx context.Context, h mux, cwd, direction string) (string, error) {
 	if t.used == 0 {
 		t.used++
 		return t.root, nil
 	}
-	// herdr's ratio is the share the pane being split keeps, so the new pane
-	// gets 1/(remaining+1) of the tab. Passing the new pane's share instead
+	// The multiplexer's ratio is the share the pane being split keeps, so the
+	// new pane gets 1/(remaining+1) of the tab. Passing the new pane's share
 	// gave a 2 lane tab a 256/28 split, not two halves.
 	remaining := t.total - t.used
 	ratio := float64(remaining) / float64(remaining+1)
-	pane, err := h.splitPane(ctx, t.root, direction, cwd, ratio)
+	pane, err := h.SplitPane(ctx, t.root, direction, cwd, ratio)
 	if err != nil {
 		return "", err
 	}

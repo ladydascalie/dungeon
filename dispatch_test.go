@@ -67,6 +67,8 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The backend is chosen from the environment, and this is a herdr session.
+	t.Setenv("HERDR_ENV", "1")
 	t.Setenv("FAKE_LOG", log)
 	t.Setenv("FAKE_STARTED", startedFile)
 	t.Setenv("FAKE_WS", filepath.Join(dir, "workspace"))
@@ -440,7 +442,9 @@ func TestBriefNamesThePairedWorktreeAndDepReports(t *testing.T) {
 		}
 	}
 
-	path, err := writeBrief(dispatchOpts{planPath: planPath}, p, m, u, &State{})
+	path, err := writeBrief(newHerdr(), briefInput{
+		opts: dispatchOpts{planPath: planPath}, plan: p, minion: m, unit: u, state: &State{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

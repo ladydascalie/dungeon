@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 )
@@ -11,75 +10,50 @@ import (
 // kills the lane in it, so a working lane is refused unless the operator says
 // otherwise: stopping work silently is the one thing this tool must not do.
 
-type tabInfo struct {
-	ID    string `json:"tab_id"`
-	Label string `json:"label"`
+// downOpts is one down: what to stop, how hard, and where to say it.
+type downOpts struct {
+	plan  Plan
+	state *State
+	force bool
+	out   io.Writer
 }
 
-func (h herdrClient) listTabs(ctx context.Context, workspace string) []tabInfo {
-	if workspace == "" {
-		return nil
-	}
-	out, err := h.run(ctx, "tab", "list", "--workspace", workspace)
-	if err != nil {
-		return nil
-	}
-	var payload struct {
-		Result struct {
-			Tabs []tabInfo `json:"tabs"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil
-	}
-	return payload.Result.Tabs
-}
+func down(ctx context.Context, h mux, o downOpts) (stopped, refused []string, err error) {
+	agents := h.Agents(ctx)
 
-func (h herdrClient) closePane(ctx context.Context, pane string) error {
-	_, err := h.run(ctx, "pane", "close", pane)
-	return err
-}
-
-func (h herdrClient) closeTab(ctx context.Context, tab string) error {
-	_, err := h.run(ctx, "tab", "close", tab)
-	return err
-}
-
-func down(ctx context.Context, p Plan, st *State, force bool, out io.Writer) (stopped, refused []string, err error) {
-	h := newHerdrClient()
-	agents := h.agents(ctx)
-
-	for _, m := range p.Minions {
-		// herdr knows the lane by the run's derived name, never the bare id.
-		agent := st.AgentName(m.ID)
+	for _, m := range o.plan.Minions {
+		// The multiplexer knows the lane by the run's derived name, never the
+		// bare id.
+		agent := o.state.AgentName(m.ID)
 		a, live := agents[agent]
 		if !live {
-			st.SetMinion(m.ID, "absent", "")
+			o.state.SetMinion(m.ID, "absent", "")
 			continue
 		}
-		if a.Status == "working" && !force {
+		if a.Status == "working" && !o.force {
 			refused = append(refused, m.ID)
-			fmt.Fprintf(out, "%s is working in %s; not closing it. pass --force to stop it anyway\n", m.ID, a.Pane)
+			fmt.Fprintf(o.out, "%s is working in %s; not closing it. pass --force to stop it anyway\n", m.ID, a.Pane)
 			continue
 		}
-		if err := h.stopLane(ctx, agent, a.Pane, m.Pane != "" && m.Pane == a.Pane); err != nil {
-			fmt.Fprintf(out, "%s: %v\n", m.ID, err)
+		if err := stopLane(ctx, h, agent, a.Pane, m.Pane != "" && m.Pane == a.Pane); err != nil {
+			fmt.Fprintf(o.out, "%s: %v\n", m.ID, err)
 			continue
 		}
-		st.SetMinion(m.ID, "absent", "")
+		o.state.SetMinion(m.ID, "absent", "")
 		stopped = append(stopped, m.ID)
 	}
 
 	if len(refused) == 0 {
-		closeEncounter(ctx, h, p)
+		closeEncounter(ctx, h, o.plan)
 	}
-	stopped, refused = verifyDown(ctx, h, st, stopped, refused)
+	stopped, refused = verifyDown(ctx, h, o.state, stopped, refused)
 	return stopped, refused, nil
 }
 
 func downCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("down", stderr)
 	planPath, statePath := planFlags(fs)
+	backend := muxFlag(fs)
 	force := fs.Bool("force", false, "stop lanes that are still working")
 	rest, err := parseMixed(fs, args)
 	if err != nil {
@@ -105,8 +79,13 @@ func downCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			*statePath, st.Encounter, p.Encounter)
 		return 2
 	}
+	h, err := openMux(ctx, *backend)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
 
-	stopped, refused, err := down(ctx, p, &st, *force, stdout)
+	stopped, refused, err := down(ctx, h, downOpts{plan: p, state: &st, force: *force, out: stdout})
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2

@@ -14,7 +14,8 @@ import (
 )
 
 // The TUI is a renderer over the same Snapshot the plain table uses. It adds no
-// truth: everything on screen comes from the plan, the state, and herdr.
+// truth: everything on screen comes from the plan, the state, and the
+// multiplexer.
 
 var (
 	titleStyle    = lipgloss.NewStyle().Bold(true)
@@ -56,13 +57,18 @@ func (m viewModel) focusCmd() tea.Cmd {
 	if !ok {
 		return nil
 	}
-	// The derived name is what herdr knows the lane by; the plan keeps the id.
-	agent, hint := m.state.AgentName(u.Minion), m.state.Minions[u.Minion].Pane
+	// The derived name is what the multiplexer knows the lane by; the plan keeps
+	// the id.
+	agent, hint, backend := m.state.AgentName(u.Minion), m.state.Minions[u.Minion].Pane, m.backend
 	if u.Pane != "" {
 		hint = u.Pane
 	}
 	return func() tea.Msg {
-		return focusMsg{err: newHerdrClient().focus(context.Background(), agent, hint)}
+		h, err := openMux(context.Background(), backend)
+		if err != nil {
+			return focusMsg{err: err}
+		}
+		return focusMsg{err: focusLane(context.Background(), h, agent, hint)}
 	}
 }
 
@@ -115,6 +121,7 @@ type viewModel struct {
 	readerTop      int
 	readerRendered []string // markdown, rendered once per width, never per frame
 	readerWidth    int
+	backend        string          // the multiplexer --mux forced, or "" for the environment
 	searching      bool            // the reader's search prompt is open
 	query          string          // the live search, kept after enter so n and N work
 	searchTop      int             // readerTop when the search opened, restored on esc
@@ -153,8 +160,14 @@ func tick(d time.Duration) tea.Cmd {
 	return tea.Tick(d, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// loadSnapshot re-reads all three sources: the plan, the state, and herdr.
+// loadSnapshot re-reads the plan, the state, and the multiplexer, letting the
+// environment name the backend.
 func loadSnapshot(planPath, statePath string) refreshedMsg {
+	return loadSnapshotFor(planPath, statePath, "")
+}
+
+// loadSnapshotFor is loadSnapshot with a backend the operator forced.
+func loadSnapshotFor(planPath, statePath, backend string) refreshedMsg {
 	p, code := loadValidPlan(planPath, io.Discard)
 	if code != 0 {
 		return refreshedMsg{err: fmt.Errorf("no usable plan at %s: run dungeon init or dungeon check", planPath)}
@@ -163,15 +176,16 @@ func loadSnapshot(planPath, statePath string) refreshedMsg {
 	if err != nil {
 		return refreshedMsg{err: err}
 	}
-	snap := buildSnapshot(p, planPath, st, probeAgents(context.Background()))
+	snap := buildSnapshot(p, planPath, st, probeAgents(context.Background(), backend))
 	markPlanDrift(&snap, planPath, st)
 	return refreshedMsg{plan: p, state: st, snap: snap}
 }
 
-// refresh is a command so the UI never blocks on a file read or a herdr call.
+// refresh is a command so the UI never blocks on a file read or a multiplexer
+// call.
 func (m viewModel) refresh() tea.Cmd {
-	planPath, statePath := m.planPath, m.statePath
-	return func() tea.Msg { return loadSnapshot(planPath, statePath) }
+	planPath, statePath, backend := m.planPath, m.statePath, m.backend
+	return func() tea.Msg { return loadSnapshotFor(planPath, statePath, backend) }
 }
 
 func (m viewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -648,7 +662,7 @@ func (m viewModel) helpView() string {
 		"  space    fold the selected branch",
 		"  f        jump to the selected unit's pane",
 		"  o        open the unit's link (a pull request, a review)",
-		"  r        re-read plan, state and herdr",
+		"  r        re-read plan, state and the multiplexer",
 		"  t / s    tree and sections layouts",
 		"  h        hide done and canceled",
 		"  c / e    collapse and expand every branch",
@@ -1095,7 +1109,8 @@ func isTerminal(w io.Writer) bool {
 func viewCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("view", stderr)
 	planPath, statePath := planFlags(fs)
-	interval := fs.Duration("interval", 2*time.Second, "how often to re-read the plan, the state and herdr")
+	interval := fs.Duration("interval", 2*time.Second, "how often to re-read the plan, the state and the multiplexer")
+	backend := muxFlag(fs)
 	once := fs.Bool("once", false, "print one frame and exit")
 	width := fs.Int("width", 100, "frame width for --once")
 	height := fs.Int("height", 30, "frame height for --once")
@@ -1135,6 +1150,7 @@ func viewCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		pick := newViewModel(*planPath, *statePath, *interval)
+		pick.backend = *backend
 		pick.mode, pick.hideSettled = *mode, *hide
 		pick.width, pick.height = *width, *height
 		pick.choosing = found
@@ -1147,9 +1163,10 @@ func viewCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	m := newViewModel(*planPath, *statePath, *interval)
+	m.backend = *backend
 	m.mode, m.hideSettled = *mode, *hide
 	m.width, m.height = *width, *height
-	m = m.applyRefresh(loadSnapshot(*planPath, *statePath))
+	m = m.applyRefresh(loadSnapshotFor(*planPath, *statePath, *backend))
 	if *detail != "" {
 		for i, id := range m.order {
 			if id != *detail {

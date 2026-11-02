@@ -227,3 +227,38 @@ func TestStateEncounterMismatch(t *testing.T) {
 		t.Fatalf("stderr %q", stderr)
 	}
 }
+
+// openMux is the one place a backend is chosen: --mux wins, then the
+// environment. No backend is an error that tells the operator what to pass.
+func TestOpenMuxSelectsTheBackend(t *testing.T) {
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("TMUX", "")
+
+	if h, err := openMux(t.Context(), "herdr"); err != nil || h == nil {
+		t.Fatalf("--mux herdr: %v", err)
+	}
+	if _, err := openMux(t.Context(), "tmux"); err == nil {
+		t.Fatal("--mux tmux has no backend yet, so it must fail")
+	}
+	if _, err := openMux(t.Context(), "screen"); err == nil || !strings.Contains(err.Error(), "unknown mux") {
+		t.Fatalf("unknown backend: %v", err)
+	}
+
+	t.Setenv("HERDR_ENV", "1")
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+	if h, err := openMux(t.Context(), ""); err != nil || h == nil {
+		t.Fatalf("HERDR_ENV=1: %v", err)
+	}
+
+	t.Setenv("HERDR_ENV", "")
+	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "tmux") {
+		t.Fatalf("a tmux session with no tmux backend: %v", err)
+	}
+	t.Setenv("TMUX", "")
+	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "--mux") {
+		t.Fatalf("no multiplexer: %v", err)
+	}
+	if agents := probeAgents(t.Context(), ""); agents != nil {
+		t.Fatalf("a read-only probe with no mux should see nothing, got %v", agents)
+	}
+}

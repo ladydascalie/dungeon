@@ -55,8 +55,8 @@ func TestTwoMinionsCannotShareAPane(t *testing.T) {
 
 func TestFocusUsesTheAgentThenThePaneHint(t *testing.T) {
 	log := fakeHerdr(t, "w1:idle\n")
-	h := newHerdrClient()
-	if err := h.focus(t.Context(), "w1", "w1P:p9"); err != nil {
+	h := newHerdr()
+	if err := focusLane(t.Context(), h, "w1", "w1P:p9"); err != nil {
 		t.Fatalf("focus: %v", err)
 	}
 	calls, _ := os.ReadFile(log)
@@ -66,7 +66,7 @@ func TestFocusUsesTheAgentThenThePaneHint(t *testing.T) {
 
 	// No live agent: the hint's tab is the best available move.
 	log2 := fakeHerdr(t, "")
-	if err := h.focus(t.Context(), "w1", "w1P:p9"); err != nil {
+	if err := focusLane(t.Context(), h, "w1", "w1P:p9"); err != nil {
 		t.Fatalf("focus with a hint: %v", err)
 	}
 	calls, _ = os.ReadFile(log2)
@@ -74,7 +74,7 @@ func TestFocusUsesTheAgentThenThePaneHint(t *testing.T) {
 		t.Fatalf("with no agent the pane's tab should be focused:\n%s", calls)
 	}
 
-	if err := h.focus(t.Context(), "w1", ""); err == nil {
+	if err := focusLane(t.Context(), h, "w1", ""); err == nil {
 		t.Fatal("with no agent and no hint, focus must fail rather than guess")
 	}
 }
@@ -391,7 +391,7 @@ units:
 func TestVerifyDownUsesTheDerivedName(t *testing.T) {
 	fakeHerdr(t, "w1-7f:idle\n")
 	st := &State{Token: "7f", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
-	done, refused := verifyDown(t.Context(), newHerdrClient(), st, []string{"w1"}, nil)
+	done, refused := verifyDown(t.Context(), newHerdr(), st, []string{"w1"}, nil)
 	if len(done) != 0 || len(refused) != 1 {
 		t.Fatalf("done %v refused %v, want the live tokenized lane refused", done, refused)
 	}
@@ -401,7 +401,7 @@ func TestVerifyDownUsesTheDerivedName(t *testing.T) {
 
 	fakeHerdr(t, "w1:idle\n")
 	st = &State{Token: "7f", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
-	done, refused = verifyDown(t.Context(), newHerdrClient(), st, []string{"w1"}, nil)
+	done, refused = verifyDown(t.Context(), newHerdr(), st, []string{"w1"}, nil)
 	if len(done) != 1 || len(refused) != 0 {
 		t.Fatalf("done %v refused %v, want another run's bare lane ignored", done, refused)
 	}

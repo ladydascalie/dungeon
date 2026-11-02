@@ -160,6 +160,12 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 	return fs
 }
 
+// muxFlag lets a command force a backend. It is read through openMux, never
+// here.
+func muxFlag(fs *flag.FlagSet) *string {
+	return fs.String("mux", "", "force the multiplexer backend: herdr")
+}
+
 func planFlags(fs *flag.FlagSet) (*string, *string) {
 	plan := fs.String("plan", "", "path to the plan")
 	state := fs.String("state", "", "path to state.json (default: beside the plan)")
@@ -216,6 +222,7 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fs := newFlagSet("status", stderr)
 	asJSON := fs.Bool("json", false, "print the snapshot as JSON")
 	planPath, statePath := planFlags(fs)
+	backend := muxFlag(fs)
 	pos, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -237,7 +244,7 @@ func statusCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 
-	snap := buildSnapshot(p, *planPath, st, probeAgents(ctx))
+	snap := buildSnapshot(p, *planPath, st, probeAgents(ctx, *backend))
 	markPlanDrift(&snap, *planPath, st)
 	if *asJSON {
 		enc := json.NewEncoder(stdout)
@@ -256,6 +263,7 @@ func setCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("set", stderr)
 	note := fs.String("note", "", "why the status changed")
 	planPath, statePath := planFlags(fs)
+	backend := muxFlag(fs)
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -305,7 +313,7 @@ func setCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "%s %s (was %s)\n", id, status, before)
 		if status == "working" && u.Minion != "" {
-			if _, live := probeAgents(ctx)[u.Minion]; !live {
+			if _, live := probeAgents(ctx, *backend)[u.Minion]; !live {
 				fmt.Fprintf(stderr, "warning: minion %q has no live agent, so nothing is in that pane\n", u.Minion)
 			}
 		}
@@ -400,6 +408,7 @@ func dispatchFlags(fs *flag.FlagSet, statePath *string) (*dispatchOpts, *string)
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "how long next may wait for lanes")
 	fs.DurationVar(&o.acceptTimeout, "accept-timeout", 10*time.Minute, "how long one accept command may run")
 	fs.DurationVar(&o.poll, "poll", 2*time.Second, "how often to look at the lanes")
+	fs.StringVar(&o.backend, "mux", "", "force the multiplexer backend: herdr")
 	return o, plan
 }
 
@@ -444,7 +453,12 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	st.PlanHash = h
 
-	res, err := spawnMinions(ctx, *planPath, p, &st, *split, stdout)
+	mx, err := openMux(ctx, o.backend)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	res, err := spawnMinions(ctx, mx, spawnInput{planPath: *planPath, plan: p, state: &st, split: *split, out: stdout})
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
@@ -459,7 +473,7 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	o.planPath, o.statePath, o.out = *planPath, statePath, stdout
-	d, err := next(ctx, *o, p, &st)
+	d, err := next(ctx, mx, *o, p, &st)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
@@ -503,7 +517,12 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	d, err := next(ctx, *o, p, &st)
+	h, err := openMux(ctx, o.backend)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	d, err := next(ctx, h, *o, p, &st)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
