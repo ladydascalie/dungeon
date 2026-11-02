@@ -38,10 +38,26 @@ a branch.
 
 ```bash
 command -v dungeon          # required
-test "${HERDR_ENV:-}" = 1   # required: dungeon drives herdr panes
 ```
 
-Outside herdr, say so and stop. Dungeon cannot spawn a lane without it.
+Dungeon drives lanes through a multiplexer: herdr or tmux. It picks one in
+this order: `--mux herdr|tmux` on the command, `HERDR_ENV=1`, then `TMUX`. It
+reads your own pane from `$HERDR_PANE_ID` on herdr and `$TMUX_PANE` on tmux, so
+run dungeon from the pane that should receive the pings.
+
+With no multiplexer and no `--mux`, say so and stop. Dungeon cannot spawn a
+lane without one.
+
+On tmux, four things change:
+
+- Every lane reports status `unknown`. tmux has no agent protocol, so dungeon
+  cannot tell working from idle.
+- A unit settles on its report and its accept command, not on lane state.
+  `next` holds an unknown lane until its report lands. A verdict line still
+  decides a reviewer.
+- `down` refuses a lane it cannot classify. Pass `--force` to stop it anyway.
+- The brief's ping line is a tmux command instead of a herdr one. The lane runs
+  it as written.
 
 ## Write the plan
 
@@ -380,7 +396,8 @@ parent's only edit in that whole run is the plan.
 Use a pane for one second opinion, one fresh-context review, or one recon. If
 the work splits into units, it is an encounter, not a pane.
 
-Gate on herdr: `test "${HERDR_ENV:-}" = 1`. Outside herdr, say so and stop.
+This path is herdr-only: it needs the herdr binary and `HERDR_ENV=1`. Outside
+herdr, say so and stop.
 
 Write the handoff to `${TMPDIR:-/tmp}/herdr-handoffs/<slug>/handoff.md` before
 any pane exists, outside the checkout. It states the objective, repo and cwd,

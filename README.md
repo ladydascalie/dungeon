@@ -383,6 +383,27 @@ description = "dungeon: open the encounter view"
 Change `--direction right` for `down` or `left`. Drop `--focus` if the graph
 should open without stealing the cursor.
 
+## In tmux
+
+dungeon drives either herdr or tmux. It picks the backend from `--mux
+herdr|tmux`, then `HERDR_ENV=1`, then `TMUX`, so a tmux session needs no flag.
+A tmux session is a workspace, a window is a tab, a pane is a pane. `up`
+creates the session detached; attach with `tmux attach -t <encounter>`.
+
+tmux has no agent protocol, so the run looks different in four ways:
+
+- every lane reports status `unknown`, because dungeon cannot tell working from
+  idle;
+- a unit settles on its report and its accept command, never on lane state, and
+  `next` holds an unknown lane until that report lands;
+- `down` refuses a lane it cannot classify, so stopping it needs `down --force`;
+- a brief's ping line is a `tmux send-keys` command instead of a herdr one.
+
+Agent names, briefs, reports, worktrees, accepts and `land` behave the same on
+both. To compare the two backends, run one plan with `--mux herdr` and then
+with `--mux tmux`: the difference you see is the lane status herdr reports and
+tmux cannot.
+
 ## The skill
 
 `skills/dungeon/SKILL.md` teaches a pi agent to run this tool, and its first
