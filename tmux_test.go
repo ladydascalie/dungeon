@@ -1250,3 +1250,81 @@ func TestTmuxReadRefusesAGonePane(t *testing.T) {
 		t.Fatal("Read accepted a pane that does not exist")
 	}
 }
+
+// selfEnv points SelfPane at a test server and a pane: $TMUX names the server
+// that set $TMUX_PANE, so a test must set both.
+func selfEnv(t *testing.T, socket, pane string) {
+	t.Helper()
+	dir := filepath.Dir(socket)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create tmux socket dir: %v", err)
+	}
+	t.Setenv("TMUX", socket+",1,0")
+	t.Setenv("TMUX_PANE", pane)
+}
+
+// TestTmuxSelfPaneReturnsALivePane proves the ordinary case: a pane this
+// server has answers with its own id, which is what a brief hands to a lane.
+func TestTmuxSelfPaneReturnsALivePane(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	selfEnv(t, socketPath(), root)
+	if got := h.SelfPane(ctx); got != root {
+		t.Fatalf("SelfPane = %q, want live pane %q", got, root)
+	}
+}
+
+// TestTmuxSelfPaneIgnoresAStalePane is the failure the operator saw: the pane
+// is gone, $TMUX_PANE still names it, and the answer must be empty rather than
+// the dead id or an error.
+func TestTmuxSelfPaneIgnoresAStalePane(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if err := h.ClosePane(ctx, root); err != nil {
+		t.Fatalf("ClosePane: %v", err)
+	}
+	if _, err := h.Pane(ctx, root); err == nil {
+		t.Fatalf("pane %s is still there after ClosePane", root)
+	}
+	selfEnv(t, socketPath(), root)
+	if got := h.SelfPane(ctx); got != "" {
+		t.Fatalf("SelfPane on closed pane %s = %q, want empty", root, got)
+	}
+	// An id this server never had answers the same way.
+	t.Setenv("TMUX_PANE", "%999999")
+	if got := h.SelfPane(ctx); got != "" {
+		t.Fatalf("SelfPane on absent pane = %q, want empty", got)
+	}
+}
+
+// TestTmuxSelfPaneWithoutAServer proves an unreachable server answers empty:
+// no server can vouch for the pane, so the id is not repeated.
+func TestTmuxSelfPaneWithoutAServer(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is not installed")
+	}
+	h := tmuxTest(t)
+	absent := filepath.Join(t.TempDir(), "no-server")
+	selfEnv(t, absent, "%0")
+	if got := h.SelfPane(context.Background()); got != "" {
+		t.Fatalf("SelfPane without a server = %q, want empty", got)
+	}
+}
+
+// TestTmuxSelfPaneWithoutTheVariable proves no variable is no pane, not the
+// current one: there is nothing to resolve.
+func TestTmuxSelfPaneWithoutTheVariable(t *testing.T) {
+	h := tmuxTest(t)
+	selfEnv(t, socketPath(), "")
+	if got := h.SelfPane(context.Background()); got != "" {
+		t.Fatalf("SelfPane without $TMUX_PANE = %q, want empty", got)
+	}
+}

@@ -69,9 +69,14 @@ func (t tmux) call(ctx context.Context, args ...string) ([]byte, error) {
 
 // run is call with stdin, for load-buffer.
 func (t tmux) run(ctx context.Context, stdin []byte, args ...string) ([]byte, error) {
+	return t.execTimeout(ctx, stdin, t.argv(args...)...)
+}
+
+// execTimeout runs one tmux invocation under the backend's timeout.
+func (t tmux) execTimeout(ctx context.Context, stdin []byte, argv ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "tmux", t.argv(args...)...)
+	cmd := exec.CommandContext(ctx, "tmux", argv...)
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	if stdin != nil {
@@ -82,7 +87,7 @@ func (t tmux) run(ctx context.Context, stdin []byte, args ...string) ([]byte, er
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, fmt.Errorf("tmux %s: %s", strings.Join(args, " "), msg)
+		return nil, fmt.Errorf("tmux %s: %s", strings.Join(argv, " "), msg)
 	}
 	return out.Bytes(), nil
 }
@@ -116,8 +121,41 @@ func (t tmux) Agents(ctx context.Context) (map[string]Agent, error) {
 }
 
 // SelfPane is the pane dungeon runs in, which is where a lane pings its parent.
+// $TMUX_PANE outlives the pane it names: a session that went away leaves the
+// variable set to a dead id. A brief that carries such an id tells its lane to
+// ping a pane that is not there, which fails in the lane's face. So the id is
+// only answered when its server still has that pane. A stale id answers "",
+// exactly as no pane does, because the brief omits the ping on an empty answer.
+//
+// The variable was set by the server named in $TMUX, so that server is asked
+// first; a tmux backend with a private socket is still asking about the pane
+// this process runs in. Without $TMUX the backend's own server is asked.
 func (t tmux) SelfPane(ctx context.Context) string {
-	return os.Getenv("TMUX_PANE")
+	pane := os.Getenv("TMUX_PANE")
+	if pane == "" {
+		return ""
+	}
+	query := []string{"display-message", "-p", "-t", pane, "#{pane_id}"}
+	argv := t.argv(query...)
+	if socket := tmuxEnvSocket(os.Getenv("TMUX")); socket != "" {
+		argv = append([]string{"-S", socket}, query...)
+	}
+	out, err := t.execTimeout(ctx, nil, argv...)
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(out))
+	if id != pane {
+		return ""
+	}
+	return id
+}
+
+// tmuxEnvSocket is the socket path a $TMUX value names. The value is
+// "socket,pid,session"; an empty value names no server.
+func tmuxEnvSocket(tmuxEnv string) string {
+	socket, _, _ := strings.Cut(tmuxEnv, ",")
+	return socket
 }
 
 // Workspaces lists every session. A session dungeon created carries its
