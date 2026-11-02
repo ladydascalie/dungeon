@@ -492,20 +492,20 @@ func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
 
 func TestFocusArgv(t *testing.T) {
 	cases := []struct {
-		name                                      string
-		paneSession, paneWindow, pane, clientSess string
-		want                                      []string
+		name                                           string
+		paneSession, paneWindow, pane, clientSessionID string
+		want                                           []string
 	}{
 		{
 			// The client already watches the pane's session: no switch.
 			name:        "same session",
-			paneSession: "$1", paneWindow: "@2", pane: "%3", clientSess: "$1",
+			paneSession: "$1", paneWindow: "@2", pane: "%3", clientSessionID: "$1",
 			want: []string{"select-window", "-t", "@2", ";", "select-pane", "-t", "%3"},
 		},
 		{
 			// The pane lives in another session: switch the client first.
 			name:        "different session",
-			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSess: "$1",
+			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSessionID: "$1",
 			want: []string{
 				"switch-client", "-t", "$4",
 				"select-window", "-t", "@5",
@@ -516,17 +516,35 @@ func TestFocusArgv(t *testing.T) {
 		{
 			// Nobody is attached: no client to switch, and no error.
 			name:        "no client",
-			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSess: "",
+			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSessionID: "",
 			want: []string{"select-window", "-t", "@5", ";", "select-pane", "-t", "%6"},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := focusArgv(c.paneSession, c.paneWindow, c.pane, c.clientSess)
+			got := focusArgv(c.paneSession, c.paneWindow, c.pane, c.clientSessionID)
 			if !slices.Equal(got, c.want) {
 				t.Fatalf("focusArgv = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// sessionID must turn the name #{client_session} reports into the id a pane
+// carries. Comparing the name to a pane's session id would always be false.
+func TestTmuxSessionIDResolvesName(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	ws, _, _, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	got, err := h.sessionID(ctx, "enc")
+	if err != nil {
+		t.Fatalf("sessionID: %v", err)
+	}
+	if got != ws {
+		t.Fatalf("sessionID(enc) = %q, want %q", got, ws)
 	}
 }
 

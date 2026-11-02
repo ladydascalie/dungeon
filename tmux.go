@@ -572,22 +572,47 @@ func focusArgv(paneSession, paneWindow, pane, clientSession string) []string {
 		"select-pane", "-t", pane)
 }
 
-// clientSession is the session of the client a focus move acts on, which is the
-// client tmux resolves for this process. An empty answer means no client is
-// attached; display-message prints nothing then, which is an answer, not an
-// error, so a focus call still runs.
-func (t tmux) clientSession(ctx context.Context) string {
+// clientSessionID is the id of the session the client a focus move acts on
+// watches, which is the client tmux resolves for this process. #{client_session}
+// is a name, so it is resolved to an id before any comparison: a name never
+// equals a pane's session id. An empty answer means no client is attached;
+// display-message prints nothing then, which is an answer, not an error, so a
+// focus call still runs.
+func (t tmux) clientSessionID(ctx context.Context) string {
 	out, err := t.call(ctx, "display-message", "-p", "#{client_session}")
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return ""
+	}
+	id, err := t.sessionID(ctx, name)
+	if err != nil {
+		return ""
+	}
+	return id
+}
+
+// sessionID resolves a session name to its id. tmux tries an exact session
+// name before a prefix, so a name that is also another session's prefix still
+// resolves to itself.
+func (t tmux) sessionID(ctx context.Context, name string) (string, error) {
+	out, err := t.call(ctx, "display-message", "-p", "-t", name, "#{session_id}")
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" {
+		return "", fmt.Errorf("tmux: session %s has no id", name)
+	}
+	return id, nil
 }
 
 // focus selects window and pane on the pane's session, moving the client to
 // that session first when the client watches another one.
 func (t tmux) focus(ctx context.Context, at pane) error {
-	_, err := t.call(ctx, focusArgv(at.Workspace, at.Tab, at.ID, t.clientSession(ctx))...)
+	_, err := t.call(ctx, focusArgv(at.Workspace, at.Tab, at.ID, t.clientSessionID(ctx))...)
 	return err
 }
 
