@@ -508,6 +508,7 @@ func TestFocusArgv(t *testing.T) {
 			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSessionID: "$1",
 			want: []string{
 				"switch-client", "-t", "$4",
+				";",
 				"select-window", "-t", "@5",
 				";",
 				"select-pane", "-t", "%6",
@@ -526,7 +527,89 @@ func TestFocusArgv(t *testing.T) {
 			if !slices.Equal(got, c.want) {
 				t.Fatalf("focusArgv = %q, want %q", got, c.want)
 			}
+			assertFocusSeparators(t, got)
 		})
+	}
+}
+
+// assertFocusSeparators fails unless every focus command after the first has a
+// ";" immediately before it. A missing separator makes tmux read the next
+// command as the previous one's arguments.
+func assertFocusSeparators(t *testing.T, argv []string) {
+	t.Helper()
+	seen := false
+	for i, tok := range argv {
+		switch tok {
+		case "switch-client", "select-window", "select-pane":
+			if !seen {
+				seen = true
+				continue
+			}
+			if argv[i-1] != ";" {
+				t.Fatalf("focus argv has no separator before %s: %q", tok, argv)
+			}
+		}
+	}
+	if !seen {
+		t.Fatalf("focus argv has no command: %q", argv)
+	}
+}
+
+// focusEnv is the environment for a tmux command run against the test server.
+// A non-empty clientTMUX points the command at an attached client; an empty one
+// strips TMUX so the command runs with no current client.
+func focusEnv(clientTMUX string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	if clientTMUX != "" {
+		env = append(env, "TMUX="+clientTMUX)
+	}
+	return env
+}
+
+// runFocusArgv runs the emitted sequence the way focus does, not as a string.
+func runFocusArgv(t *testing.T, h tmux, argv, env []string) {
+	t.Helper()
+	cmd := exec.Command("tmux", h.argv(argv...)...)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tmux %q: %v: %s", argv, err, out)
+	}
+}
+
+// attachControlClient attaches a scriptable tmux client to session and waits
+// until tmux lists it. The test cleanup kills it.
+func attachControlClient(t *testing.T, h tmux, session string) {
+	t.Helper()
+	cmd := exec.Command("tmux", h.argv("-C", "attach-session", "-t", session)...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("control client stdin: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start control client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := h.call(ctx, "list-clients", "-F", "#{client_session}")
+		if err == nil && strings.TrimSpace(string(out)) == session {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("control client did not attach to session %s", session)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -545,6 +628,64 @@ func TestTmuxSessionIDResolvesName(t *testing.T) {
 	}
 	if got != ws {
 		t.Fatalf("sessionID(enc) = %q, want %q", got, ws)
+	}
+}
+
+// The emitted argv must actually run. A string-only assertion missed a missing
+// ";" after switch-client: tmux read select-window as switch-client's argument.
+func TestFocusArgvRunsAgainstALiveServer(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	if _, _, _, err := h.CreateWorkspace(ctx, "one", "worker", t.TempDir()); err != nil {
+		t.Fatalf("CreateWorkspace one: %v", err)
+	}
+	target, targetTab, targetPane, err := h.CreateWorkspace(ctx, "two", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace two: %v", err)
+	}
+	at, err := h.Pane(ctx, targetPane)
+	if err != nil {
+		t.Fatalf("Pane: %v", err)
+	}
+
+	// No client: no switch, and window and pane are still selected.
+	argv := focusArgv(at.Workspace, at.Tab, at.ID, "")
+	assertFocusSeparators(t, argv)
+	runFocusArgv(t, h, argv, focusEnv(""))
+	if got := runInTestServer(t, h.socket, "display-message", "-p", "-t", target, "#{window_id}"); got != targetTab {
+		t.Fatalf("active window = %s, want %s", got, targetTab)
+	}
+	if got := runInTestServer(t, h.socket, "display-message", "-p", "-t", target, "#{pane_id}"); got != targetPane {
+		t.Fatalf("active pane = %s, want %s", got, targetPane)
+	}
+
+	// A client on another session: the emitted sequence switches it, then
+	// selects the window and pane.
+	attachControlClient(t, h, "one")
+	source, err := h.sessionID(ctx, "one")
+	if err != nil {
+		t.Fatalf("sessionID one: %v", err)
+	}
+	argv = focusArgv(at.Workspace, at.Tab, at.ID, source)
+	assertFocusSeparators(t, argv)
+	serverPID, err := h.call(ctx, "display-message", "-p", "#{pid}")
+	if err != nil {
+		t.Fatalf("server pid: %v", err)
+	}
+	clientTMUX := socketPath() + "," + strings.TrimSpace(string(serverPID)) + ",0"
+	runFocusArgv(t, h, argv, focusEnv(clientTMUX))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := h.call(ctx, "list-clients", "-F", "#{client_session}")
+		if err == nil && strings.TrimSpace(string(out)) == "two" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client did not end on session two; list-clients: %s", out)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

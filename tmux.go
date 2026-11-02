@@ -555,6 +555,9 @@ func (t tmux) PingCommand(pane, message string) string {
 // active pane of a window; it does not change which window is active, so the
 // operator would land in the right pane of the wrong window.
 //
+// Every command is separated by ";" so tmux does not read the next command as
+// the previous one's arguments.
+//
 // A client is switched only when it is attached to another session, which is
 // where switch-client belongs. A pane in a detached session is the normal case,
 // so an empty clientSession is not an error: the window and pane are still
@@ -564,7 +567,7 @@ func (t tmux) PingCommand(pane, message string) string {
 func focusArgv(paneSession, paneWindow, pane, clientSession string) []string {
 	argv := []string{}
 	if clientSession != "" && clientSession != paneSession {
-		argv = append(argv, "switch-client", "-t", paneSession)
+		argv = append(argv, "switch-client", "-t", paneSession, ";")
 	}
 	return append(argv,
 		"select-window", "-t", paneWindow,
