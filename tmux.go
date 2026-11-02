@@ -1156,6 +1156,16 @@ func readRailOSC(server, pane string) (oscStatus, bool, error) {
 	return st, true, nil
 }
 
+// markRailPane records the rail on the pane it runs in. `rail restart` finds
+// rails by this option, so the rail marks itself rather than trusting whoever
+// opened it: a manual split or a launcher binding never sets it.
+func (t tmux) markRailPane(ctx context.Context, pane string) error {
+	if pane == "" {
+		return fmt.Errorf("no pane to mark as the rail")
+	}
+	return t.callNoOutput(ctx, "set-option", "-p", "-t", pane, paneRailOption, "1")
+}
+
 // railRestart replaces open rails with fresh ones running command, keeping the
 // width each rail had. A rail is one process per window, so a new binary or new
 // flags reach the open rails only by replacing them. The scope is the target's
@@ -1324,7 +1334,7 @@ func (t tmux) railToggle(ctx context.Context, target string, width int, command 
 	if rail == "" {
 		return "", fmt.Errorf("tmux split-window returned no rail pane")
 	}
-	if err := t.callNoOutput(ctx, "set-option", "-p", "-t", rail, paneRailOption, "1"); err != nil {
+	if err := t.markRailPane(ctx, rail); err != nil {
 		return "", err
 	}
 	if err := t.callNoOutput(ctx, "select-pane", "-t", rail); err != nil {

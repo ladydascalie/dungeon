@@ -1043,3 +1043,25 @@ func TestRailReexecsWhenItsBinaryChanges(t *testing.T) {
 		t.Fatal("a re-exec must stop the running program")
 	}
 }
+
+func TestRailMarksThePaneItRunsOn(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "railmark", "workers", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if err := h.markRailPane(ctx, root); err != nil {
+		t.Fatalf("markRailPane: %v", err)
+	}
+	out, err := h.call(ctx, "display-message", "-p", "-t", root, "#{@agent_rail}")
+	if err != nil {
+		t.Fatalf("display-message: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "1" {
+		t.Fatalf("the pane is marked %q, want 1", got)
+	}
+	if err := h.markRailPane(ctx, ""); err == nil {
+		t.Fatal("markRailPane accepted an empty pane")
+	}
+}

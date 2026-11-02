@@ -456,8 +456,9 @@ selection. The window holds its place while the selection stays inside it. Agent
 `zsh`, `bash`, or whatever shell is in front. The rail sees a dungeon lane by
 its `@dungeon_agent` option, a known agent command, or an OSC report that names
 the app; it does not walk the process tree. A title alone is not proof: a stale
-`π - ...` title does not keep a shell in the agent list. The rail marks its own
-pane with `@agent_rail`, so it never lists itself.
+`π - ...` title does not keep a shell in the agent list. The rail marks the
+pane it runs in with `@agent_rail` before its first read, so it never lists
+itself and `rail restart` finds it whatever opened it.
 
 The rail groups its tiles by tmux session, then by encounter inside that
 session, and names each group with a header. Panes no encounter owns follow

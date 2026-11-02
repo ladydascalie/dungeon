@@ -1299,6 +1299,13 @@ func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 	m.exe, _ = os.Executable()
 	m.stamp = railStamp(m.exe)
+	// Mark the pane this rail runs in before the first read, so it never lists
+	// itself and `rail restart` can find it whatever opened it.
+	if pane := t.SelfPane(ctx); pane != "" {
+		if err := t.markRailPane(ctx, pane); err != nil {
+			m.notice = "rail: " + err.Error()
+		}
+	}
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(runCtx))
 	final, err := prog.Run()
 	if err != nil {
