@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -119,5 +120,100 @@ func TestUnderEncounterAcceptsAnySpelling(t *testing.T) {
 		if got := underEncounter(c.plan, c.file); got != c.want {
 			t.Errorf("%s: underEncounter(%q, %q) = %v, want %v", c.name, c.plan, c.file, got, c.want)
 		}
+	}
+}
+
+// commitAll stages everything and commits in repo with a fixed identity, so a
+// porcelain test starts from a clean worktree.
+func commitAll(t *testing.T, repo, message string) {
+	t.Helper()
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", message}} {
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// Two modified files must both be reported, including one with a space: the
+// first entry starts with a leading space status, the byte that used to be lost.
+func TestChangedFilesReportsEveryModifiedFile(t *testing.T) {
+	repo := gitRepo(t)
+	for _, name := range []string{"tmux.go", "paths.go", "notes with space.md"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commitAll(t, repo, "tracked")
+	for _, name := range []string{"tmux.go", "paths.go", "notes with space.md"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := changedFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"notes with space.md", "paths.go", "tmux.go"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("changedFiles = %q, want %q", got, want)
+	}
+}
+
+// The first porcelain entry is owned and the second is not. Both must be
+// classified against their own paths, not shifted by a lost leading space.
+func TestChangedFilesFirstOwnedSecondOutside(t *testing.T) {
+	repo := gitRepo(t)
+	for _, name := range []string{"aaa.go", "zzz.txt"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("one\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	commitAll(t, repo, "tracked")
+	for _, name := range []string{"aaa.go", "zzz.txt"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("two\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := changedFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != "aaa.go" || got[1] != "zzz.txt" {
+		t.Fatalf("changedFiles = %q, want [aaa.go zzz.txt]", got)
+	}
+	paths := []string{"aaa.go"}
+	if !ownedBy(paths, got[0]) {
+		t.Errorf("%q classified outside its owner", got[0])
+	}
+	if ownedBy(paths, got[1]) {
+		t.Errorf("%q classified as owned", got[1])
+	}
+}
+
+// A rename reports its destination and carries the source as the next NUL
+// entry. Only the destination is a changed file.
+func TestChangedFilesRenameTakesDestination(t *testing.T) {
+	repo := gitRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "old name.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, repo, "tracked")
+	cmd := exec.Command("git", "-C", repo, "mv", "old name.go", "new name.go")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git mv: %v\n%s", err, out)
+	}
+
+	got, err := changedFiles(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "new name.go" {
+		t.Fatalf("changedFiles = %q, want [new name.go]", got)
 	}
 }
