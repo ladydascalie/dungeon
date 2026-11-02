@@ -124,11 +124,13 @@ func usage(w io.Writer) {
       output. j/k move, enter detail, space actions, q quits, esc backs out.
       Piped output and --once print one frame instead.
 
-  dungeon rail   [--once] [--json] [--interval 1s] [--mux backend]
+  dungeon rail   [--once] [--json] [--backstop 10s] [--mux backend]
   dungeon rail toggle [--width 32]
       A compact tmux pane listing every pane running an agent, including
-      dungeon lanes in detached sessions. enter switches to the agent. toggle
-      opens, focuses or closes the rail in the current window.
+      dungeon lanes in detached sessions. A control-mode client wakes it on
+      tmux topology changes, fsnotify wakes it on .dungeon writes, and a slow
+      backstop re-reads in case a wake-up was missed. enter switches to the
+      agent. toggle opens, focuses or closes the rail in the current window.
 
 The plan defaults to `+defaultPlanPath+`. Extra encounters live at
 .dungeon/<name>/plan.yaml, each with its own state. With more than one,

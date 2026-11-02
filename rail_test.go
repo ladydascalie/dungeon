@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +32,11 @@ func TestRailPanesFindsDungeonAgentsAndSkipsTheRail(t *testing.T) {
 		t.Fatalf("mark other agent: %v", err)
 	}
 
-	agents, err := h.railPanes(ctx)
+	read, err := h.railPanes(ctx)
 	if err != nil {
 		t.Fatalf("railPanes: %v", err)
 	}
+	agents := read.agents
 	labels := map[string]bool{}
 	for _, a := range agents {
 		labels[a.Label] = true
@@ -44,11 +49,11 @@ func TestRailPanesFindsDungeonAgentsAndSkipsTheRail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("railToggle: %v", err)
 	}
-	agents, err = h.railPanes(ctx)
+	read, err = h.railPanes(ctx)
 	if err != nil {
 		t.Fatalf("railPanes after toggle: %v", err)
 	}
-	for _, a := range agents {
+	for _, a := range read.agents {
 		if a.Pane == rail {
 			t.Fatalf("the rail listed itself: %+v", agents)
 		}
@@ -127,42 +132,42 @@ func TestRailWithoutAgentsSaysSo(t *testing.T) {
 
 func TestRailRefreshKeepsTheSelectedPane(t *testing.T) {
 	m := railModel{
-		interval: time.Second,
+		backstop: time.Second,
 		agents: []railPaneInfo{
 			{Label: "a", Pane: "%1"},
 			{Label: "b", Pane: "%2"},
 		},
 		cursor: 1,
 	}
-	next, _ := m.Update(railSnapshotMsg{agents: []railPaneInfo{
+	next, _ := m.Update(railSnapshotMsg{read: railRead{agents: []railPaneInfo{
 		{Label: "c", Pane: "%3"},
 		{Label: "b", Pane: "%2"},
-	}})
+	}}})
 	got := next.(railModel)
 	if got.selectedPane() != "%2" {
 		t.Fatalf("cursor moved off the selected pane: %+v", got.agents)
 	}
 }
 
-func TestRailAgentKindFindsPiUnderAShellAndNode(t *testing.T) {
-	procs := map[int][]railProc{
-		100: {{pid: 101, ppid: 100, comm: "zsh", args: "/usr/bin/zsh -l"}},
-		101: {{pid: 102, ppid: 101, comm: "node", args: "node /usr/local/bin/pi --no-mcp"}},
+func TestRailAgentKindUsesTheReportAsIdentity(t *testing.T) {
+	report := oscStatus{State: "working", App: "pi"}
+	if got := railAgentKind("zsh", "", report, true); got != "pi" {
+		t.Fatalf("the report must win over a shell command, got %q", got)
 	}
-	if got := railAgentKind("zsh", "daemonking", "", 100, procs); got != "pi" {
-		t.Fatalf("agent kind %q, want pi", got)
+	if got := railAgentKind("bash", "w1-qg", oscStatus{State: "blocked"}, true); got != "agent" {
+		t.Fatalf("a report without an app is still an agent, got %q", got)
 	}
-	if got := railAgentKind("bash", "daemonking", "w1-qg", 999, nil); got != "pi" {
-		t.Fatalf("the dungeon option must win, got %q", got)
+	if got := railAgentKind("bash", "w1-qg", oscStatus{}, false); got != "pi" {
+		t.Fatalf("the dungeon option must win without a report, got %q", got)
 	}
-	if got := railAgentKind("zsh", "π - fleet-w1", "", 999, nil); got != "pi" {
-		t.Fatalf("the pi title must be enough when ps is unavailable, got %q", got)
-	}
-	if got := railAgentKind("zsh", "π - stale", "", 999, map[int][]railProc{}); got != "" {
-		t.Fatalf("a stale pi title must not keep a shell in the rail, got %q", got)
-	}
-	if got := railAgentKind("pi", "daemonking", "", 999, map[int][]railProc{}); got != "pi" {
+	if got := railAgentKind("pi", "", oscStatus{}, false); got != "pi" {
 		t.Fatalf("a terminal-only pi must be seen by its command, got %q", got)
+	}
+	if got := railAgentKind("node", "", oscStatus{}, false); got != "" {
+		t.Fatalf("a node without a report must not be guessed at, got %q", got)
+	}
+	if got := railAgentKind("zsh", "", oscStatus{State: "clear"}, true); got != "" {
+		t.Fatalf("a cleared report must not identify a shell, got %q", got)
 	}
 }
 
@@ -195,7 +200,10 @@ func TestRailStatusComesFromThePaneEncounter(t *testing.T) {
 	if !ok {
 		t.Fatal("no encounter root for the worktree")
 	}
-	statuses := loadRailStatuses(dir)
+	statuses, issues := loadRailStatuses(dir)
+	if len(issues) > 0 {
+		t.Fatalf("fixture state unread: %+v", issues)
+	}
 	got, ok := statuses["%1"]
 	if !ok {
 		t.Fatalf("no status for the fleet lane: %+v", statuses)
@@ -226,17 +234,320 @@ func TestRailViewShowsHarnessStatusAndMessage(t *testing.T) {
 
 func TestRailKeepsTheLastActivePaneWhileFocused(t *testing.T) {
 	m := railModel{width: 40, height: 10}
-	next, _ := m.Update(railSnapshotMsg{agents: []railPaneInfo{
+	next, _ := m.Update(railSnapshotMsg{read: railRead{agents: []railPaneInfo{
 		{Label: "a", Pane: "%1", Active: true},
 		{Label: "b", Pane: "%2"},
-	}})
+	}}})
 	m = next.(railModel)
-	next, _ = m.Update(railSnapshotMsg{agents: []railPaneInfo{
+	next, _ = m.Update(railSnapshotMsg{read: railRead{agents: []railPaneInfo{
 		{Label: "a", Pane: "%1"},
 		{Label: "b", Pane: "%2"},
-	}})
+	}}})
 	m = next.(railModel)
 	if !m.agents[0].Active || m.agents[1].Active {
 		t.Fatalf("the last active mark moved: %+v", m.agents)
+	}
+}
+
+// railProbe runs the rail's real event loop without a terminal, so a test can
+// prove which wake-up produced a refresh.
+type railProbe struct {
+	rail      railModel
+	snapshots chan railSnapshotMsg
+}
+
+func (p *railProbe) Init() tea.Cmd { return p.rail.Init() }
+
+func (p *railProbe) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if snap, ok := msg.(railSnapshotMsg); ok {
+		// The model takes ownership of the slice and mutates the active mark.
+		// Copy it for the test so the probe does not race the event loop.
+		snap.read.agents = append([]railPaneInfo(nil), snap.read.agents...)
+		select {
+		case p.snapshots <- snap:
+		default:
+		}
+	}
+	next, cmd := p.rail.Update(msg)
+	p.rail = next.(railModel)
+	return p, cmd
+}
+
+func (p *railProbe) View() string { return p.rail.View() }
+
+func startRailProbe(t *testing.T, ctx context.Context, m railModel) (*railProbe, func()) {
+	t.Helper()
+	probe := &railProbe{rail: m, snapshots: make(chan railSnapshotMsg, 256)}
+	prog := tea.NewProgram(probe,
+		tea.WithInput(nil), tea.WithOutput(io.Discard),
+		tea.WithoutRenderer(), tea.WithContext(ctx))
+	done := make(chan error, 1)
+	go func() {
+		_, err := prog.Run()
+		done <- err
+	}()
+	stop := func() {
+		prog.Quit()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Log("rail program did not stop")
+		}
+	}
+	return probe, stop
+}
+
+func waitRailSnapshot(t *testing.T, ch <-chan railSnapshotMsg, within time.Duration, what string, ok func(railSnapshotMsg) bool) railSnapshotMsg {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		select {
+		case snap := <-ch:
+			if snap.err != nil {
+				continue
+			}
+			if ok(snap) {
+				return snap
+			}
+		case <-time.After(time.Until(deadline)):
+			t.Fatalf("the rail did not refresh after %s within %s", what, within)
+		}
+	}
+}
+
+// waitPaneCommand waits for a freshly created pane to exec its command. tmux
+// reports the client's own name for the first instant of a new window.
+func waitPaneCommand(t *testing.T, h tmux, pane, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		got := runInTestServer(t, h.socket, "display-message", "-p", "-t", pane, "#{pane_current_command}")
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s command %q, want %q", pane, got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func drainSnapshots(ch <-chan railSnapshotMsg) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+func railHasPane(pane string) func(railSnapshotMsg) bool {
+	return func(snap railSnapshotMsg) bool {
+		for _, a := range snap.read.agents {
+			if a.Pane == pane {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// The backstop is set to half a minute. Only the control-mode topology event
+// can explain a refresh inside two seconds.
+func TestRailWakesOnTmuxTopologyNotTheBackstop(t *testing.T) {
+	h := tmuxTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events := make(chan controlEvent, 256)
+	control := startTmuxControl(ctx, h, events)
+	waitControlConnected(t, control)
+	files := make(chan watchEvent, 16)
+
+	m := newRailModel(h, 30*time.Second, railSources{events: events, files: files, control: control})
+	probe, stop := startRailProbe(t, ctx, m)
+	defer stop()
+
+	waitRailSnapshot(t, probe.snapshots, 3*time.Second, "the first read", func(railSnapshotMsg) bool { return true })
+
+	pane := runInTestServer(t, h.socket, "new-window", "-d", "-P", "-F", "#{pane_id}",
+		"-t", "dungeon-test-server", "sh")
+	waitPaneCommand(t, h, pane, "sh")
+	drainSnapshots(probe.snapshots)
+
+	started := time.Now()
+	runInTestServer(t, h.socket, "rename-window", "-t", pane, "woken")
+	waitRailSnapshot(t, probe.snapshots, 2*time.Second, "a window rename", railHasPane(pane))
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("the rail refreshed only after %s", elapsed)
+	}
+}
+
+// The same proof for a file: a state write must wake the rail long before the
+// backstop fires.
+func TestRailWakesOnStateWriteNotTheBackstop(t *testing.T) {
+	h := tmuxTest(t)
+	root := t.TempDir()
+	dungeon := filepath.Join(root, ".dungeon")
+	if err := os.MkdirAll(dungeon, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan := `encounter: alpha
+repo: /repo/alpha
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+units:
+  - id: model
+    minion: w1
+    paths: [model.go]
+    goal: Build the model.
+    accept: go test ./...
+`
+	if err := os.WriteFile(filepath.Join(dungeon, "plan.yaml"), []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pane := runInTestServer(t, h.socket, "new-window", "-d", "-P", "-F", "#{pane_id}",
+		"-t", "dungeon-test-server", "-c", root, "sh")
+	waitPaneCommand(t, h, pane, "sh")
+	if err := os.WriteFile(filepath.Join(dungeon, "state.json.tmp"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(dungeon, "state.json")
+	if err := SaveState(statePath, State{
+		Encounter: "alpha",
+		Units:     map[string]UnitState{"model": {Status: "planned"}},
+		Minions:   map[string]MinionState{"w1": {Status: "spawned", Pane: pane}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	files := make(chan watchEvent, 256)
+	if _, err := startWatch(ctx, files, watchTreeDirs(dungeon), nil); err != nil {
+		t.Fatalf("startWatch: %v", err)
+	}
+
+	m := newRailModel(h, 30*time.Second, railSources{files: files})
+	probe, stop := startRailProbe(t, ctx, m)
+	defer stop()
+
+	planned := func(snap railSnapshotMsg) bool {
+		for _, a := range snap.read.agents {
+			if a.Pane == pane && a.Status == "planned" {
+				return true
+			}
+		}
+		return false
+	}
+	waitRailSnapshot(t, probe.snapshots, 3*time.Second, "the first read", planned)
+
+	if err := SaveState(statePath, State{
+		Encounter: "alpha",
+		Units:     map[string]UnitState{"model": {Status: "working"}},
+		Minions:   map[string]MinionState{"w1": {Status: "spawned", Pane: pane}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	waitRailSnapshot(t, probe.snapshots, 2*time.Second, "a state write", func(snap railSnapshotMsg) bool {
+		for _, a := range snap.read.agents {
+			if a.Pane == pane && a.Status == "working" {
+				return true
+			}
+		}
+		return false
+	})
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("the rail refreshed only after %s", elapsed)
+	}
+}
+
+func TestRailPanesUsesTheStatusReportAsIdentity(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, _, root, err := h.CreateWorkspace(ctx, "railreport", "workers", dir)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	t.Setenv("TMUX", "rail-report-test")
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	pane := root
+	if err := writeOSCStatus(oscStatus{Server: oscServerKey(), Pane: pane, State: "working", App: "claude", Msg: "reading"}); err != nil {
+		t.Fatalf("write OSC record: %v", err)
+	}
+	defer removeOSCStatus(oscServerKey(), pane)
+
+	read, err := h.railPanes(ctx)
+	if err != nil {
+		t.Fatalf("railPanes: %v", err)
+	}
+	for _, a := range read.agents {
+		if a.Pane != pane {
+			continue
+		}
+		if a.Kind != "claude" || a.Harness != "working" || a.HarnessMsg != "reading" {
+			t.Fatalf("the report did not identify the pane: %+v", a)
+		}
+		return
+	}
+	t.Fatalf("the reporting pane was not listed: %+v", read.agents)
+}
+
+func TestRailNamesAnUnreadableState(t *testing.T) {
+	dungeon := filepath.Join(t.TempDir(), ".dungeon")
+	encounter := filepath.Join(dungeon, "alpha")
+	if err := os.MkdirAll(encounter, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan := "encounter: alpha\nminions:\n  - {id: w1, role: worker, worktree: w1}\nunits:\n  - id: model\n    minion: w1\n    goal: Build it.\n"
+	if err := os.WriteFile(filepath.Join(encounter, "plan.yaml"), []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(encounter, "state.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statuses, issues := loadRailStatuses(dungeon)
+	if len(statuses) != 0 {
+		t.Fatalf("a broken state produced statuses: %+v", statuses)
+	}
+	if len(issues) != 1 || issues[0].kind != "state" {
+		t.Fatalf("issues %+v, want one unread state", issues)
+	}
+}
+
+func TestRailSaysASourceCouldNotBeReadWithItsAge(t *testing.T) {
+	m := railModel{
+		agents: []railPaneInfo{{Label: "w1", Kind: "pi", Pane: "%1"}},
+		width:  72, height: 10,
+		readAt:    time.Now().Add(-2 * time.Minute),
+		readErr:   errors.New("no server running"),
+		readErrAt: time.Now(),
+	}
+	out := m.View()
+	for _, want := range []string{"tmux read failed", "just now", "no server running", "rows 2m ago"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+
+	m = railModel{
+		agents: []railPaneInfo{{Label: "w1", Kind: "pi", Pane: "%1"}},
+		width:  84, height: 10,
+		issues: []railSourceIssue{{
+			kind: "state",
+			path: filepath.Join("alpha", "state.json"),
+			err:  errors.New("permission denied"),
+			at:   time.Now(),
+		}},
+	}
+	out = m.View()
+	for _, want := range []string{"state state.json", "just now", "permission denied"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
 }
