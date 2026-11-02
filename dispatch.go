@@ -296,12 +296,24 @@ func dispatchUnit(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State,
 		fmt.Fprintf(o.out, "would dispatch %s to %s\n", u.ID, m.ID)
 		return nil
 	}
+	// The unit is marked working with its prompt unconfirmed before the prompt
+	// is sent. A killed process or a crash between the paste and the confirm
+	// then leaves the evidence reconcile needs to deliver the brief again,
+	// instead of a lane that looks busy and never was. A retry keeps the
+	// existing status and its history: only the first dispatch changes it.
+	if st.UnitStatus(u.ID) != "working" {
+		if err := st.SetUnit(u.ID, "working", "brief "+brief); err != nil {
+			return err
+		}
+	}
+	st.SetPromptPending(u.ID, true)
+	if err := SaveState(o.statePath, *st); err != nil {
+		return err
+	}
 	if err := h.Prompt(ctx, st.AgentName(m.ID), text); err != nil {
 		return err
 	}
-	if err := st.SetUnit(u.ID, "working", "brief "+brief); err != nil {
-		return err
-	}
+	st.SetPromptPending(u.ID, false)
 	return SaveState(o.statePath, *st)
 }
 
@@ -380,6 +392,11 @@ func lastLine(s string) string {
 // work that is still running. A lane the multiplexer cannot classify is held
 // until its report exists, then judged by its accept command, because with no
 // status protocol the report is the only finish signal there is.
+//
+// A working unit whose prompt was never confirmed is delivered again instead of
+// being settled or left alone: the paste may never have landed, and a lane that
+// was never told to work cannot finish. A lane that already wrote its report
+// did get the brief, so the marker is cleared and the unit settles as usual.
 func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d *digest) bool {
 	// An unreadable fleet settles nothing: calling a working lane blocked
 	// because the backend blinked would be a false claim.
@@ -402,6 +419,22 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			d.Blocked = append(d.Blocked, u.ID)
 			progressed = true
 			continue
+		}
+		if st.PromptIsPending(u.ID) {
+			if _, err := os.Stat(reportPath(o.planPath, u.ID)); err != nil {
+				if err := dispatchUnit(ctx, h, o, p, st, u, m); err != nil {
+					// The state still says unconfirmed, so the next pass tries
+					// again. Reporting it keeps the failure visible.
+					fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
+				} else {
+					d.Dispatched = append(d.Dispatched, u.ID)
+				}
+				progressed = true
+				continue
+			}
+			// A report proves the lane was told its brief, whatever the marker
+			// says, so the unit settles below rather than prompt a second time.
+			st.SetPromptPending(u.ID, false)
 		}
 		switch a.Status {
 		case AgentBlocked:

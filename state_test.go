@@ -244,3 +244,55 @@ func TestEnsureTokenKeepsALegacyRunWithItsPane(t *testing.T) {
 		t.Fatalf("the legacy lane should be adopted:\n%s", stdout)
 	}
 }
+
+func TestPromptPendingRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	st := State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := st.SetUnit("A", "working", "brief"); err != nil {
+		t.Fatal(err)
+	}
+	st.SetPromptPending("A", true)
+	if err := SaveState(path, st); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.PromptIsPending("A") {
+		t.Fatal("the marker did not survive the round trip")
+	}
+}
+
+// A state written before the field existed has no prompt_pending key. It must
+// read as confirmed, so an old encounter does not re-prompt a live fleet.
+func TestOldWorkingStateReadsAsConfirmed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	old := `{"encounter":"x","units":{"A":{"status":"working","at":"2025-01-01T00:00:00Z"}},"minions":{}}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PromptIsPending("A") {
+		t.Fatal("a state without prompt_pending must read as confirmed")
+	}
+}
+
+// The marker only means something on a working unit. Settling the unit clears
+// it, so a later run does not re-prompt a lane that has moved on.
+func TestSetUnitClearsPromptPendingOnSettle(t *testing.T) {
+	st := State{Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := st.SetUnit("A", "working", "brief"); err != nil {
+		t.Fatal(err)
+	}
+	st.SetPromptPending("A", true)
+	if err := st.SetUnit("A", "done", "accept passed"); err != nil {
+		t.Fatal(err)
+	}
+	if st.PromptIsPending("A") {
+		t.Fatal("a settled unit must not keep the marker")
+	}
+}
