@@ -926,6 +926,7 @@ func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 func railToggleCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("rail toggle", stderr)
 	width := fs.Int("width", 32, "rail width in columns")
+	printPane := fs.Bool("print-pane", false, "print the rail pane id on success")
 	backend := muxFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -962,7 +963,7 @@ func railToggleCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
 	}
-	if rail != "" {
+	if *printPane && rail != "" {
 		fmt.Fprintln(stdout, rail)
 	}
 	return 0
