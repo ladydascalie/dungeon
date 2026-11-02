@@ -982,10 +982,12 @@ func TestTmuxFocusAcrossSessionsWithNoClientAttached(t *testing.T) {
 	}
 }
 
-// fakeSlowAgent writes a fake pi that boots slowly, echoes the prompt it is
-// given, ignores the first Enter after boot, and submits on the next one. It is
-// the process behind TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter.
-func fakeSlowAgent(t *testing.T, out string) {
+// fakeSlowAgent writes a fake pi that boots slowly and runs
+// TestFakeAgentHelper. render is how long the agent waits after the last input
+// byte before it draws the input line; zero echoes each byte as it arrives. A
+// fresh agent behaves like a render of a few hundred milliseconds: the paste
+// lands in the terminal long before the TUI shows it.
+func fakeSlowAgent(t *testing.T, out string, render time.Duration) {
 	t.Helper()
 	bin, err := os.Executable()
 	if err != nil {
@@ -995,6 +997,8 @@ func fakeSlowAgent(t *testing.T, out string) {
 		"export DUNGEON_FAKE_AGENT_OUT\n" +
 		"DUNGEON_FAKE_AGENT_DELAY=1s\n" +
 		"export DUNGEON_FAKE_AGENT_DELAY\n" +
+		"DUNGEON_FAKE_AGENT_RENDER=" + shellQuote(render.String()) + "\n" +
+		"export DUNGEON_FAKE_AGENT_RENDER\n" +
 		"exec " + shellQuote(bin) + " -test.run '^TestFakeAgentHelper$'\n"
 	binDir := t.TempDir()
 	script := filepath.Join(binDir, "pi")
@@ -1015,15 +1019,28 @@ func TestFakeAgentHelper(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fake agent delay: %v", err)
 	}
-	if err := runFakeAgent(out, delay); err != nil {
+	render, err := time.ParseDuration(os.Getenv("DUNGEON_FAKE_AGENT_RENDER"))
+	if err != nil {
+		t.Fatalf("fake agent render delay: %v", err)
+	}
+	if err := runFakeAgent(out, delay, render); err != nil {
 		t.Fatalf("fake agent: %v", err)
 	}
 }
 
-// runFakeAgent reads the terminal in raw mode, echoes what it is given so the
-// text is visibly on the input line, ignores every Enter during boot and the
-// first Enter after it, then writes the submitted line to out.
-func runFakeAgent(out string, boot time.Duration) error {
+// fakeRenderPoll is how often the fake agent checks whether its input has
+// settled enough to draw.
+const fakeRenderPoll = 20 * time.Millisecond
+
+// runFakeAgent reads the terminal in raw mode, draws the input line, ignores
+// every Enter during boot and the first Enter after it, then writes the
+// submitted line to out.
+//
+// A render delay of zero echoes each byte as it arrives. A longer delay draws
+// the whole accumulated line once, that long after the last byte, which is what
+// a TUI does with one paste: the delay proves Prompt waits for the paste to
+// show instead of pasting again.
+func runFakeAgent(out string, boot, render time.Duration) error {
 	fd := int(os.Stdin.Fd())
 	old, err := term.MakeRaw(fd)
 	if err != nil {
@@ -1037,47 +1054,94 @@ func runFakeAgent(out string, boot time.Duration) error {
 	ready := time.Now().Add(boot)
 	bootKey := true
 	line := make([]byte, 0, 256)
-	buf := make([]byte, 1)
+	drawn := 0
+	var lastInput time.Time
+
+	// The reader owns stdin, so the loop below can also look at the render
+	// clock. A channel close means stdin went away.
+	input := make(chan byte, 4096)
+	go func() {
+		buf := make([]byte, 1)
+		for {
+			n, readErr := os.Stdin.Read(buf)
+			if n > 0 {
+				input <- buf[0]
+			}
+			if readErr != nil {
+				close(input)
+				return
+			}
+		}
+	}()
+
+	// draw writes every byte the line has gained, once it has settled.
+	draw := func(now time.Time) error {
+		if len(line) == drawn {
+			return nil
+		}
+		if render > 0 && now.Sub(lastInput) < render {
+			return nil
+		}
+		if _, err := os.Stdout.Write(line[drawn:]); err != nil {
+			return err
+		}
+		drawn = len(line)
+		return nil
+	}
+
+	tick := time.NewTicker(fakeRenderPoll)
+	defer tick.Stop()
 	for {
-		n, err := os.Stdin.Read(buf)
-		if n == 0 {
-			if err != nil {
+		select {
+		case b, ok := <-input:
+			if !ok {
 				return nil
 			}
-			continue
-		}
-		switch buf[0] {
-		case '\r', '\n':
-			if time.Now().Before(ready) {
-				continue
+			lastInput = time.Now()
+			switch b {
+			case '\r', '\n':
+				if time.Now().Before(ready) {
+					continue
+				}
+				if bootKey {
+					// The first Enter after boot is still ignored, as a TUI
+					// that has not finished starting does. The text stays on
+					// the line.
+					bootKey = false
+					continue
+				}
+				if len(line) == 0 {
+					continue
+				}
+				if err := os.WriteFile(out, []byte(string(line)+"\nsubmitted\n"), 0o644); err != nil {
+					return err
+				}
+				if _, err := os.Stdout.WriteString("\r\nsubmitted\r\n"); err != nil {
+					return err
+				}
+				// Stay alive after submitting. A respawned pane dies with its
+				// agent, so the test could not read the transcript back if this
+				// exited.
+				time.Sleep(time.Minute)
+				return nil
+			case 0x7f, 0x08:
+				if len(line) > 0 {
+					line = line[:len(line)-1]
+					if drawn > len(line) {
+						drawn = len(line)
+					}
+					if render == 0 {
+						_, _ = os.Stdout.WriteString("\b \b")
+					}
+				}
+			default:
+				line = append(line, b)
 			}
-			if bootKey {
-				// The first Enter after boot is still ignored, as a TUI that
-				// has not finished starting does. The text stays on the line.
-				bootKey = false
-				continue
-			}
-			if len(line) == 0 {
-				continue
-			}
-			if err := os.WriteFile(out, []byte(string(line)+"\nsubmitted\n"), 0o644); err != nil {
+			if err := draw(time.Now()); err != nil {
 				return err
 			}
-			if _, err := os.Stdout.WriteString("\r\nsubmitted\r\n"); err != nil {
-				return err
-			}
-			// Stay alive after submitting. A respawned pane dies with its agent,
-			// so the test could not read the transcript back if this exited.
-			time.Sleep(time.Minute)
-			return nil
-		case 0x7f, 0x08:
-			if len(line) > 0 {
-				line = line[:len(line)-1]
-				_, _ = os.Stdout.WriteString("\b \b")
-			}
-		default:
-			line = append(line, buf[0])
-			if _, err := os.Stdout.Write(buf[:1]); err != nil {
+		case now := <-tick.C:
+			if err := draw(now); err != nil {
 				return err
 			}
 		}
@@ -1088,7 +1152,7 @@ func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
 	h := tmuxTest(t)
 	ctx := context.Background()
 	out := filepath.Join(t.TempDir(), "prompt.txt")
-	fakeSlowAgent(t, out)
+	fakeSlowAgent(t, out, 0)
 
 	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
 	if err != nil {
@@ -1112,6 +1176,83 @@ func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
 	want := text + "\nsubmitted\n"
 	if string(got) != want {
 		t.Fatalf("fake agent received %q, want %q", got, want)
+	}
+}
+
+// TestTmuxPromptPastesOnceAndWaitsForASlowRender is the double-paste guard. The
+// fake agent draws its input line only after a long delay, so a Prompt that
+// gave up early and pasted again would show the text twice. After Prompt
+// returns, the pane must hold the text exactly once and the agent must have
+// submitted exactly once.
+func TestTmuxPromptPastesOnceAndWaitsForASlowRender(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "prompt.txt")
+	// Seven times the measured fresh-agent render and well inside Prompt's
+	// confirm budget: waiting for this render is what proves the paste landed.
+	fakeSlowAgent(t, out, 700*time.Millisecond)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	text := "prompt-once: deliver this line"
+	if err := h.Prompt(ctx, name, text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	waitForFile(t, out)
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read fake agent output: %v", err)
+	}
+	want := text + "\nsubmitted\n"
+	if string(got) != want {
+		t.Fatalf("fake agent received %q, want %q", got, want)
+	}
+	screen := mustCapture(t, h, root)
+	if count := strings.Count(screen, text); count != 1 {
+		t.Fatalf("pane shows the prompt %d times, want exactly 1:\n%s", count, screen)
+	}
+}
+
+// TestTmuxPromptFailsWhenThePasteNeverLands proves the honest failure: a pane
+// that never shows the paste is an error that names the pane, not a second
+// paste hidden inside Prompt.
+func TestTmuxPromptFailsWhenThePasteNeverLands(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "prompt.txt")
+	// The input line is never drawn, so the paste cannot be confirmed.
+	fakeSlowAgent(t, out, time.Hour)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	err = h.Prompt(ctx, name, "prompt-lost: this never lands")
+	if err == nil {
+		t.Fatal("Prompt reported success on a paste the pane never showed")
+	}
+	if !strings.Contains(err.Error(), root) {
+		t.Fatalf("Prompt error does not name pane %s: %v", root, err)
+	}
+	if !strings.Contains(err.Error(), "did not land") {
+		t.Fatalf("Prompt error does not say the paste did not land: %v", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Fatal("fake agent submitted a prompt that never landed")
 	}
 }
 

@@ -602,14 +602,11 @@ func (t tmux) capture(ctx context.Context, pane string) (string, error) {
 // milliseconds, and every look is one tmux call.
 const needlePoll = 50 * time.Millisecond
 
-// pasteDeadline is how long one paste may take to appear on the pane. A fresh
-// pi renders a paste at 310-420ms; the margin covers a busy TUI.
-const pasteDeadline = 3 * time.Second
-
-// pasteTries bounds how many times Prompt pastes text that never appeared. A
-// paste that lands nowhere is usually one sent before the TUI was listening, so
-// it is safe to send it again.
-const pasteTries = 3
+// pasteDeadline is how long the one paste may take to appear on the pane. A
+// fresh pi renders a paste at 310-420ms; the budget is several seconds so a
+// busy TUI is never mistaken for a lost paste. The only cost of waiting is a
+// slow error, while the cost of giving up early is a second paste.
+const pasteDeadline = 5 * time.Second
 
 // submitSettle is the pause between an Enter and the next look that decides
 // whether the prompt was submitted.
@@ -637,12 +634,14 @@ const settleDeadline = 15 * time.Second
 //
 // Delivery is two-sided, because a paste sent while a TUI is still starting is
 // lost without an error. Prompt waits for the pane's screen to stop changing, so
-// a booting TUI is not pasted into. It then polls until the pane shows the
-// pasted text, and pastes again a bounded number of times if it never appears.
-// Only then does it press Enter, and it polls until the pane no longer holds the
-// text as pending input. It returns when the input is submitted, not when the
-// turn finishes. A prompt that does not land or does not submit is an error that
-// names the pane and the phase, so text is never left silently unsent.
+// a booting TUI is not pasted into. It then pastes exactly once and polls until
+// the pane shows the pasted text. Only then does it press Enter, and it polls
+// until the pane no longer holds the text as pending input. It returns when the
+// input is submitted, not when the turn finishes.
+//
+// One call is one paste. A prompt pasted twice renders twice and the agent
+// receives it twice, so a paste that never appears is an error, never a retry
+// inside this call: the caller decides whether to call Prompt again.
 func (t tmux) Prompt(ctx context.Context, name, text string) error {
 	pane, err := t.agentPane(ctx, name)
 	if err != nil {
@@ -703,25 +702,22 @@ func (t tmux) settlePane(ctx context.Context, pane string) error {
 	}
 }
 
-// landPrompt pastes text and waits until the pane shows it. A paste the pane
-// never shows did not land, so it is sent again within a bounded number of
-// tries.
+// landPrompt pastes text once and waits until the pane shows it. A paste the
+// pane never shows did not land, and is reported as an error that names the
+// pane. It is not pasted again: a second paste would render twice and deliver
+// the prompt twice, which is worse than a caller that has to retry the call.
 func (t tmux) landPrompt(ctx context.Context, pane, needle, text string) error {
-	for tries := 1; ; tries++ {
-		if err := t.pasteText(ctx, pane, text); err != nil {
-			return err
-		}
-		shown, err := t.waitShown(ctx, pane, needle, pasteDeadline)
-		if err != nil {
-			return err
-		}
-		if shown {
-			return nil
-		}
-		if tries >= pasteTries {
-			return fmt.Errorf("tmux: pane %s: pasted prompt never appeared after %d pastes", pane, tries)
-		}
+	if err := t.pasteText(ctx, pane, text); err != nil {
+		return err
 	}
+	shown, err := t.waitShown(ctx, pane, needle, pasteDeadline)
+	if err != nil {
+		return err
+	}
+	if !shown {
+		return fmt.Errorf("tmux: pane %s: pasted prompt did not land; it did not appear within %s and was not pasted again", pane, pasteDeadline)
+	}
+	return nil
 }
 
 // waitShown polls until needle is visible anywhere on the pane, or until within
