@@ -33,19 +33,41 @@ func socketPath() string {
 // starts with /dev/null as its config.
 func tmuxTest(t *testing.T) tmux {
 	t.Helper()
+	return tmuxServer(t, safeServerConfig)
+}
+
+// safeServerConfig is the config every private test server starts with. A pane
+// dungeon starts with a shell writes the command line it is given to HISTFILE.
+// Point every shell this server starts at /dev/null before it creates any pane,
+// so the tests never touch the operator's shell history. A plain sh is the pane
+// shell because zsh resets HISTFILE to $HOME/.zsh_history however the
+// environment set it. The config is how the settings exist before the first
+// pane: a server with no sessions exits, so set-environment cannot run after
+// start-server.
+const safeServerConfig = "set-environment -g HISTFILE /dev/null\n" +
+	"set-option -g default-shell /bin/sh\n"
+
+// tmuxTestDestroyUnattached gives a test a private server configured like the
+// operator's: a session with no attached client is destroyed at once. dungeon
+// creates every workspace detached, so this is the setting its sessions must
+// survive.
+func tmuxTestDestroyUnattached(t *testing.T) tmux {
+	t.Helper()
+	return tmuxServer(t, safeServerConfig+
+		"set-option -g destroy-unattached on\n"+
+		"set-option -g exit-unattached on\n")
+}
+
+// tmuxServer starts a private tmux server with config and keeps it alive with a
+// keeper session. The keeper pins destroy-unattached and exit-unattached off on
+// itself in the same invocation that creates it, because a config can turn them
+// on globally and a second invocation would be too late.
+func tmuxServer(t *testing.T, config string) tmux {
+	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
-	// A pane dungeon starts with a shell writes the command line it is given to
-	// HISTFILE. Point every shell this server starts at /dev/null before it
-	// creates any pane, so the tests never touch the operator's shell history.
-	// A plain sh is the pane shell because zsh resets HISTFILE to
-	// $HOME/.zsh_history however the environment set it. The config is how the
-	// settings exist before the first pane: a server with no sessions exits, so
-	// set-environment cannot run after start-server.
 	conf := filepath.Join(t.TempDir(), "tmux.conf")
-	config := "set-environment -g HISTFILE /dev/null\n" +
-		"set-option -g default-shell /bin/sh\n"
 	if err := os.WriteFile(conf, []byte(config), 0o600); err != nil {
 		t.Fatalf("write private tmux config: %v", err)
 	}
@@ -63,7 +85,9 @@ func tmuxTest(t *testing.T) tmux {
 	}
 	// A server with no sessions exits at once, and the next client would start
 	// one without the config above. A keeper session holds it open for the test.
-	if out, err := run("new-session", "-d", "-s", "dungeon-test-server"); err != nil {
+	if out, err := run("new-session", "-d", "-s", "dungeon-test-server",
+		";", "set-option", "-t", "dungeon-test-server", "destroy-unattached", "off",
+		";", "set-option", "-t", "dungeon-test-server", "exit-unattached", "off"); err != nil {
 		t.Fatalf("start keeper session: %v: %s", err, out)
 	}
 	t.Cleanup(func() {
@@ -159,6 +183,59 @@ func TestTmuxWorkspaceLifecycle(t *testing.T) {
 		if w.ID == ws {
 			t.Fatalf("Workspaces still lists closed workspace %s", ws)
 		}
+	}
+}
+
+// TestTmuxWorkspaceSurvivesDestroyUnattached covers the operator's config:
+// destroy-unattached is on globally, so tmux destroys every session that has no
+// attached client. dungeon creates every workspace detached, so the session and
+// its pane must still be there a moment after creation.
+func TestTmuxWorkspaceSurvivesDestroyUnattached(t *testing.T) {
+	h := tmuxTestDestroyUnattached(t)
+	ctx := context.Background()
+	cwd := t.TempDir()
+
+	if got := runInTestServer(t, h.socket, "show-options", "-gv", "destroy-unattached"); got != "on" {
+		t.Fatalf("test server destroy-unattached = %q, want on", got)
+	}
+	if clients := runInTestServer(t, h.socket, "list-clients", "-F", "#{client_name}"); clients != "" {
+		t.Fatalf("test server has clients: %s", clients)
+	}
+
+	ws, tab, root, err := h.CreateWorkspace(ctx, "enc", "worker", cwd)
+	if err != nil {
+		t.Fatalf("CreateWorkspace with destroy-unattached on: %v", err)
+	}
+	for _, option := range []string{"destroy-unattached", "exit-unattached"} {
+		if got := runInTestServer(t, h.socket, "show-options", "-t", ws, "-v", option); got != "off" {
+			t.Fatalf("workspace %s %s = %q, want off", ws, option, got)
+		}
+	}
+
+	// No client is attached. A session the config can destroy is gone within
+	// milliseconds; wait longer than that before deciding.
+	time.Sleep(500 * time.Millisecond)
+
+	if got := runInTestServer(t, h.socket, "list-sessions", "-F", "#{session_id}"); !strings.Contains(got, ws) {
+		t.Fatalf("workspace %s is gone after a moment with no client attached; sessions: %s", ws, got)
+	}
+	info, err := h.Pane(ctx, root)
+	if err != nil {
+		t.Fatalf("workspace %s lost its pane %s: %v", ws, root, err)
+	}
+	if info.Tab != tab || info.Workspace != ws {
+		t.Fatalf("Pane root = %+v, want tab %s workspace %s", info, tab, ws)
+	}
+	if panes := runInTestServer(t, h.socket, "list-panes", "-t", ws, "-F", "#{pane_id}"); !strings.Contains(panes, root) {
+		t.Fatalf("workspace %s lists panes %q, want %s", ws, panes, root)
+	}
+
+	// The session is still dungeon's own, so it closes only on request.
+	if err := h.CloseWorkspace(ctx, ws); err != nil {
+		t.Fatalf("CloseWorkspace: %v", err)
+	}
+	if got := runInTestServer(t, h.socket, "list-sessions", "-F", "#{session_id}"); strings.Contains(got, ws) {
+		t.Fatalf("CloseWorkspace left workspace %s; sessions: %s", ws, got)
 	}
 }
 
