@@ -551,3 +551,63 @@ func TestRailSaysASourceCouldNotBeReadWithItsAge(t *testing.T) {
 		}
 	}
 }
+
+// railToggleEnv points the in-process CLI at the test's private tmux server and
+// at pane, the way tmux sets its environment for a binding.
+func railToggleEnv(t *testing.T, h tmux, pane string) {
+	t.Helper()
+	pid, err := h.call(context.Background(), "display-message", "-p", "#{pid}")
+	if err != nil {
+		t.Fatalf("server pid: %v", err)
+	}
+	t.Setenv("TMUX", socketPath()+","+strings.TrimSpace(string(pid))+",0")
+	t.Setenv("TMUX_PANE", pane)
+}
+
+func TestRailTogglePrintsNothingOnSuccess(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "quiet", "workers", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	right, err := h.SplitPane(ctx, root, "right", t.TempDir(), 0.5)
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	railToggleEnv(t, h, right)
+
+	code, stdout, stderr := runCLI("rail", "toggle", "--mux", "tmux")
+	if code != 0 {
+		t.Fatalf("toggle exit %d, stderr %q", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("a successful toggle wrote %q to stdout; tmux would show it", stdout)
+	}
+}
+
+func TestRailTogglePrintPaneStillReportsThePane(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "quiet", "workers", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	right, err := h.SplitPane(ctx, root, "right", t.TempDir(), 0.5)
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	railToggleEnv(t, h, right)
+
+	code, stdout, stderr := runCLI("rail", "toggle", "--print-pane", "--mux", "tmux")
+	if code != 0 {
+		t.Fatalf("toggle exit %d, stderr %q", code, stderr)
+	}
+	rail := strings.TrimSpace(stdout)
+	if rail == "" {
+		t.Fatal("--print-pane printed no pane id")
+	}
+	if _, err := h.Pane(ctx, rail); err != nil {
+		t.Fatalf("--print-pane reported %s, which is not a pane: %v", rail, err)
+	}
+}
