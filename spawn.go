@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -29,11 +30,73 @@ func (r spawnResult) String() string {
 		len(r.Spawned), len(r.Already), len(r.Failed))
 }
 
-func ensureWorktree(repo, base, encounter, minion, path string) error {
+// laneCut is what up learned about a lane's branch when it cut or reused the
+// worktree. The facts go into the state and the brief, so the agent driving
+// the lane sees the branch it inherited before it writes.
+type laneCut struct {
+	Path      string
+	Branch    string
+	Head      string
+	Subject   string
+	Ahead     int
+	Dirty     int
+	Resumed   bool
+	Recreated bool
+}
+
+func ensureWorktree(repo, base, encounter, minion, path string) (laneCut, error) {
+	branch := encounter + "/" + minion
+	lane := laneCut{Path: path, Branch: branch}
 	if _, err := os.Stat(path); err == nil {
-		return nil // resume: the worktree is already cut
+		fillLaneFacts(repo, base, &lane)
+		return lane, nil
 	}
-	return cutWorktree(repo, base, encounter+"/"+minion, path, true)
+	create := true
+	if branchExists(repo, branch) {
+		lane.Ahead = commitsAhead(repo, base, branch)
+		if lane.Ahead == 0 {
+			// No unique commits: the branch holds no work that base lacks, so
+			// replace it and start from base.
+			if _, err := gitRun(repo, "branch", "-D", branch); err != nil {
+				return lane, err
+			}
+			lane.Recreated = true
+		} else {
+			lane.Resumed = true
+			create = false
+		}
+	}
+	if err := cutWorktree(repo, base, branch, path, create); err != nil {
+		return lane, err
+	}
+	fillLaneFacts(repo, base, &lane)
+	return lane, nil
+}
+
+func branchExists(repo, branch string) bool {
+	_, err := gitRun(repo, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
+}
+
+func commitsAhead(repo, base, branch string) int {
+	out, err := gitRun(repo, "rev-list", "--count", base+"..refs/heads/"+branch)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func fillLaneFacts(repo, base string, lane *laneCut) {
+	lane.Head, _ = gitRun(repo, "rev-parse", "--short", "refs/heads/"+lane.Branch)
+	lane.Subject, _ = gitRun(repo, "log", "-1", "--format=%s", "refs/heads/"+lane.Branch)
+	lane.Ahead = commitsAhead(repo, base, lane.Branch)
+	if files, err := changedFiles(lane.Path); err == nil {
+		lane.Dirty = len(files)
+	}
 }
 
 // cutWorktree cuts a worktree at path. Worktrunk does the work when it is
@@ -79,6 +142,8 @@ func cutWorktree(repo, base, branch, path string, create bool) error {
 // worktreePath uses the project's worktree convention, ../<repo>.worktrees/<name>,
 // so dungeon's lanes sit where worktrunk puts every other worktree. A worktree
 // nested in its own repository confuses every tool that walks the tree.
+// This is the creation path, not proof of where an existing lane is. lanePath
+// asks worktrunk or git first, then falls back to this convention.
 func worktreePath(repo, encounter, minion string) string {
 	root := filepath.Base(repo) + ".worktrees"
 	return filepath.Join(filepath.Dir(repo), root, encounter+"-"+minion)
@@ -197,11 +262,22 @@ func spawnMinions(ctx context.Context, planPath string, p Plan, st *State, split
 		case m.Of != "":
 			owner = m.Of
 		}
+
 		if owner != "" {
-			if err := ensureWorktree(p.Repo, p.Base, p.Encounter, owner, cwd); err != nil {
+			lane, err := ensureWorktree(p.Repo, p.Base, p.Encounter, owner, cwd)
+			if err != nil {
 				res.Failed = append(res.Failed, m.ID)
 				fmt.Fprintf(out, "%s: %v\n", m.ID, err)
 				continue
+			}
+			st.SetLane(owner, lane)
+			if lane.Resumed {
+				fmt.Fprintf(out, "%s: resumed %s at %s, ahead of %s: %d, uncommitted files: %d, %s\n",
+					owner, lane.Branch, lane.Head, p.Base, lane.Ahead, lane.Dirty, lane.Path)
+			}
+			if lane.Recreated {
+				fmt.Fprintf(out, "%s: recreated %s from %s, old branch had no unique commits, %s\n",
+					owner, lane.Branch, p.Base, lane.Path)
 			}
 		}
 

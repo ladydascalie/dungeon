@@ -74,11 +74,7 @@ func ensureIntegrationWorktree(repo, base, path, branch string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
-	create := true
-	if _, err := gitRun(repo, "rev-parse", "--verify", branch); err == nil {
-		create = false
-	}
-	return cutWorktree(repo, base, branch, path, create)
+	return cutWorktree(repo, base, branch, path, !branchExists(repo, branch))
 }
 
 // landable returns the done units that produced code: a staff unit has a
@@ -129,7 +125,7 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 		return res, nil
 	}
 	res.Branch = p.Encounter + "/integration"
-	res.Worktree = worktreePath(p.Repo, p.Encounter, "integration")
+	res.Worktree = lanePath(p, "integration")
 	if err := ensureIntegrationWorktree(p.Repo, p.Base, res.Worktree, res.Branch); err != nil {
 		return res, err
 	}

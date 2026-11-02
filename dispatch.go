@@ -111,12 +111,23 @@ func reportPath(planPath, unit string) string {
 // pair reads the base checkout.
 func minionDir(p Plan, m Minion) string {
 	if writes(m.Role) {
-		return worktreePath(p.Repo, p.Encounter, m.ID)
+		return lanePath(p, m.ID)
 	}
 	if m.Of != "" {
-		return worktreePath(p.Repo, p.Encounter, m.Of)
+		return lanePath(p, m.Of)
 	}
 	return p.Repo
+}
+
+// lanePath is where a lane actually is. A worktree that moved after it was cut
+// is still the lane, so ask worktrunk or git before falling back to the path
+// dungeon would create.
+func lanePath(p Plan, minion string) string {
+	branch := p.Encounter + "/" + minion
+	if path, ok := resolveWorktreePath(p.Repo, branch); ok {
+		return path
+	}
+	return worktreePath(p.Repo, p.Encounter, minion)
 }
 
 // depReport is one dep's report, named by unit so the lane knows which report
@@ -135,6 +146,8 @@ type briefData struct {
 	report     string
 	depReports []depReport
 	parentPane string
+	base       string
+	lane       MinionState
 }
 
 // briefText is the whole contract the lane gets. It names what to do, what it
@@ -143,7 +156,24 @@ type briefData struct {
 func briefText(d briefData) string {
 	m, u := d.minion, d.unit
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n\n%s\n\n", u.ID, u.Goal)
+	fmt.Fprintf(&b, "# %s\n\n", u.ID)
+	if d.lane.Resumed {
+		b.WriteString("## Lane branch reused\n\n")
+		fmt.Fprintf(&b, "branch: %s\nhead: %s %s\nahead of %s: %d\n",
+			d.lane.Branch, d.lane.Head, d.lane.Subject, d.base, d.lane.Ahead)
+		if d.lane.Dirty > 0 {
+			fmt.Fprintf(&b, "uncommitted files: %d\n", d.lane.Dirty)
+		} else {
+			b.WriteString("uncommitted: none\n")
+		}
+		b.WriteString("\nRead the existing commits before writing. Do not reset or delete them.\n\n")
+	}
+	if d.lane.Recreated {
+		b.WriteString("## Lane branch recreated\n\n")
+		fmt.Fprintf(&b, "branch: %s\ncreated from: %s\n", d.lane.Branch, d.base)
+		b.WriteString("The old branch had no unique commits, so dungeon replaced it.\n\n")
+	}
+	fmt.Fprintf(&b, "%s\n\n", u.Goal)
 	fmt.Fprintf(&b, "minion: %s (%s)\nworktree: %s\n", m.ID, m.Role, d.dir)
 	if len(u.Paths) > 0 {
 		b.WriteString("paths you own:\n")
@@ -192,7 +222,7 @@ what you did not do.
 	return b.String()
 }
 
-func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit) (string, error) {
+func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit, st *State) (string, error) {
 	path := briefPath(o.planPath, u.ID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
@@ -211,6 +241,15 @@ func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit) (string, error) {
 		}
 		depReports = append(depReports, depReport{ID: dep, Path: abs})
 	}
+	lane := MinionState{}
+	if st != nil {
+		switch {
+		case writes(m.Role):
+			lane = st.Minions[m.ID]
+		case m.Of != "":
+			lane = st.Minions[m.Of]
+		}
+	}
 	text := briefText(briefData{
 		minion:     m,
 		unit:       u,
@@ -218,6 +257,8 @@ func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit) (string, error) {
 		report:     absReport,
 		depReports: depReports,
 		parentPane: o.parentPane,
+		base:       p.Base,
+		lane:       lane,
 	})
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return "", err
@@ -226,7 +267,7 @@ func writeBrief(o dispatchOpts, p Plan, m Minion, u Unit) (string, error) {
 }
 
 func dispatchUnit(ctx context.Context, h herdrClient, o dispatchOpts, p Plan, st *State, u Unit, m Minion) error {
-	brief, err := writeBrief(o, p, m, u)
+	brief, err := writeBrief(o, p, m, u, st)
 	if err != nil {
 		return err
 	}

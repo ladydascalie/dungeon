@@ -39,12 +39,20 @@ type UnitRow struct {
 }
 
 type MinionRow struct {
-	ID     string `json:"id"`
-	Role   string `json:"role"`
-	Status string `json:"status"`
-	Agent  string `json:"agent,omitempty"`
-	Pane   string `json:"pane,omitempty"`
-	Unit   string `json:"unit,omitempty"`
+	ID        string `json:"id"`
+	Role      string `json:"role"`
+	Status    string `json:"status"`
+	Agent     string `json:"agent,omitempty"`
+	Pane      string `json:"pane,omitempty"`
+	Worktree  string `json:"worktree,omitempty"`
+	Branch    string `json:"branch,omitempty"`
+	Head      string `json:"head,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Ahead     int    `json:"ahead,omitempty"`
+	Dirty     int    `json:"dirty,omitempty"`
+	Resumed   bool   `json:"resumed,omitempty"`
+	Recreated bool   `json:"recreated,omitempty"`
+	Unit      string `json:"unit,omitempty"`
 }
 
 // LoopRow is one loop as one thing: its declaration, its round progress and
@@ -156,6 +164,11 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 			row.Pane = hint
 		}
 		row.Unit = unitByMinion[m.ID]
+		ms := st.Minions[m.ID]
+		row.Worktree, row.Branch = ms.Worktree, ms.Branch
+		row.Head, row.Subject = ms.Head, ms.Subject
+		row.Ahead, row.Dirty = ms.Ahead, ms.Dirty
+		row.Resumed, row.Recreated = ms.Resumed, ms.Recreated
 		s.Minions = append(s.Minions, row)
 	}
 	s.Loops = buildLoopRows(plan, &st)

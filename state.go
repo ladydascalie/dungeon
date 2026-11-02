@@ -32,10 +32,18 @@ type UnitState struct {
 }
 
 type MinionState struct {
-	Status string `json:"status"`
-	Note   string `json:"note,omitempty"`
-	At     string `json:"at"`
-	Pane   string `json:"pane,omitempty"` // a hint, refreshed from herdr whenever the lane is live
+	Status    string `json:"status"`
+	Note      string `json:"note,omitempty"`
+	At        string `json:"at"`
+	Pane      string `json:"pane,omitempty"`     // a hint, refreshed from herdr whenever the lane is live
+	Worktree  string `json:"worktree,omitempty"` // the path that holds the branch, resolved
+	Branch    string `json:"branch,omitempty"`
+	Head      string `json:"head,omitempty"`
+	Subject   string `json:"subject,omitempty"`
+	Ahead     int    `json:"ahead,omitempty"`
+	Dirty     int    `json:"dirty,omitempty"`
+	Resumed   bool   `json:"resumed,omitempty"`
+	Recreated bool   `json:"recreated,omitempty"`
 }
 
 type Change struct {
@@ -221,8 +229,20 @@ func (s *State) SetMinion(id, status, note string) error {
 	if !minionStatusSet[status] {
 		return fmt.Errorf("minion status %q is not one of %s", status, strings.Join(minionStatuses, ", "))
 	}
-	s.Minions[id] = MinionState{Status: status, Note: note, At: now(), Pane: s.Minions[id].Pane}
+	m := s.Minions[id]
+	m.Status, m.Note, m.At = status, note, now()
+	s.Minions[id] = m
 	return nil
+}
+
+// SetLane records what the lane's branch was when up cut or reused it.
+func (s *State) SetLane(id string, lane laneCut) {
+	m := s.Minions[id]
+	m.Worktree, m.Branch = lane.Path, lane.Branch
+	m.Head, m.Subject = lane.Head, lane.Subject
+	m.Ahead, m.Dirty = lane.Ahead, lane.Dirty
+	m.Resumed, m.Recreated = lane.Resumed, lane.Recreated
+	s.Minions[id] = m
 }
 
 func (s *State) PinPane(id, pane string) { m := s.Minions[id]; m.Pane = pane; s.Minions[id] = m }

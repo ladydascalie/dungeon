@@ -163,6 +163,44 @@ func TestUpSpawnsOneLaneAndCutsAWorktree(t *testing.T) {
 	}
 }
 
+// A retry must not die with Branch already exists. When the branch has work
+// but no worktree, up attaches it and tells the agent what it inherited.
+func TestUpResumesABranchWithNoWorktree(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	work := filepath.Join(t.TempDir(), "work")
+	if _, err := gitRun(repo, "worktree", "add", "-b", "enc/w1", work, "main"); err != nil {
+		t.Fatal(err)
+	}
+	commitIn(t, work, "work.txt", "one\n", "w1 work")
+	if _, err := gitRun(repo, "worktree", "remove", work); err != nil {
+		t.Fatal(err)
+	}
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	code, stdout, stderr := runCLI("up", "--no-dispatch", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "w1: resumed enc/w1") || !strings.Contains(stdout, "ahead of main: 1") {
+		t.Fatalf("output %q", stdout)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := st.Minions["w1"]
+	if !ms.Resumed || ms.Recreated {
+		t.Fatalf("minion %+v: want resumed", ms)
+	}
+	if ms.Branch != "enc/w1" || ms.Ahead != 1 || ms.Head == "" || ms.Worktree == "" {
+		t.Fatalf("minion %+v", ms)
+	}
+	if _, err := os.Stat(filepath.Join(ms.Worktree, "work.txt")); err != nil {
+		t.Fatalf("the reused branch must keep its commit: %v", err)
+	}
+}
+
 func TestUpIsIdempotent(t *testing.T) {
 	repo := gitRepo(t)
 	fakeHerdr(t, "")
@@ -352,6 +390,44 @@ func TestMinionDirReadsThePairedWorktree(t *testing.T) {
 	}
 }
 
+func TestBriefLeadsWithAReusedBranch(t *testing.T) {
+	p := decodeOK(t, goodPlan)
+	m, _ := findMinion(p, "w1")
+	var u Unit
+	for _, x := range p.Units {
+		if x.ID == "api-timeout" {
+			u = x
+		}
+	}
+	text := briefText(briefData{
+		minion: m,
+		unit:   u,
+		dir:    "/lane",
+		report: "/enc/reports/api-timeout.md",
+		base:   p.Base,
+		lane: MinionState{
+			Branch: "enc/w1", Head: "1a2b3c4", Subject: "Fix auth",
+			Ahead: 3, Dirty: 2, Resumed: true,
+		},
+	})
+	reused := strings.Index(text, "## Lane branch reused")
+	goal := strings.Index(text, u.Goal)
+	if reused < 0 || goal < 0 || reused > goal {
+		t.Fatalf("the reused branch must lead the brief:\n%s", text)
+	}
+	for _, want := range []string{
+		"branch: enc/w1",
+		"head: 1a2b3c4 Fix auth",
+		"ahead of main: 3",
+		"uncommitted files: 2",
+		"Do not reset or delete them.",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("brief missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestBriefNamesThePairedWorktreeAndDepReports(t *testing.T) {
 	dir := t.TempDir()
 	planPath := filepath.Join(dir, ".dungeon", "plan.yaml")
@@ -364,7 +440,7 @@ func TestBriefNamesThePairedWorktreeAndDepReports(t *testing.T) {
 		}
 	}
 
-	path, err := writeBrief(dispatchOpts{planPath: planPath}, p, m, u)
+	path, err := writeBrief(dispatchOpts{planPath: planPath}, p, m, u, &State{})
 	if err != nil {
 		t.Fatal(err)
 	}

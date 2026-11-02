@@ -391,6 +391,29 @@ func TestRenderTextLoops(t *testing.T) {
 	}
 }
 
+func TestStatusJSONCarriesLaneFacts(t *testing.T) {
+	p := decodeOK(t, statusPlan)
+	st, _ := LoadState(t.TempDir() + "/missing.json")
+	st.Minions["w1"] = MinionState{
+		Status: "spawned", Worktree: "/lanes/w1", Branch: "st/w1",
+		Head: "1a2b3c4", Subject: "Fix auth", Ahead: 3, Dirty: 2, Resumed: true,
+	}
+	s := buildSnapshot(p, "plan.yaml", st, nil)
+	for _, m := range s.Minions {
+		if m.ID != "w1" {
+			continue
+		}
+		if m.Worktree != "/lanes/w1" || m.Branch != "st/w1" || m.Head != "1a2b3c4" {
+			t.Fatalf("lane row %+v", m)
+		}
+		if m.Subject != "Fix auth" || m.Ahead != 3 || m.Dirty != 2 || !m.Resumed {
+			t.Fatalf("lane row %+v", m)
+		}
+		return
+	}
+	t.Fatal("w1 missing from the snapshot")
+}
+
 func TestStatusJSONCarriesLoops(t *testing.T) {
 	path := writePlan(t, loopStatusPlan)
 	code, stdout, stderr := runCLI("status", "--json", "--plan", path)

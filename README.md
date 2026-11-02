@@ -93,9 +93,16 @@ it. A staff minion with no pair reads the base checkout. `of` is the writer
 whose worktree the reviewer reads.
 
 Worktrunk cuts the worktree when `wt` is on PATH, so its hooks and
-ignored-file copies run. dungeon pins the path through the `worktree-path`
-override, so a custom worktrunk layout cannot move a lane. Plain `git worktree
-add` is the fallback, used only when `wt` is missing.
+ignored-file copies run. dungeon pins the creation path through the
+`worktree-path` override, so lanes land in `<repo>.worktrees/`. When a command
+needs an existing lane, dungeon asks `wt list --format json`, then
+`git worktree list --porcelain`, for the worktree that has the branch checked
+out, so a moved worktree is still found. Plain `git worktree add` is the
+fallback, used only when `wt` is missing.
+
+When a lane's branch exists but no worktree holds it, `up` attaches the branch
+if it has unique commits. A branch with no unique commits is recreated from
+base. The brief leads with the branch facts, so the lane sees what it inherited.
 
 `up` records the plan's sha256 in the state. If the plan changes after that,
 `status` and the view say `plan changed since dispatch`, and `next` and `land`
