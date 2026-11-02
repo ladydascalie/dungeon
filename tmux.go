@@ -24,8 +24,9 @@ import (
 // Identity lives in tmux, not in this process. StartAgent records the agent
 // name in a pane option and Agents reads it back from list-panes, so a
 // restarted dungeon still finds its lanes. Ownership lives in tmux too: dungeon
-// sets a session option when it creates a workspace, and CloseWorkspace refuses
-// a session without it.
+// sets a session option when it creates a workspace, and a pane option on every
+// pane it creates. CloseWorkspace refuses a session without its option, and
+// StartAgent only respawns a pane with its own.
 type tmux struct {
 	// socket is the tmux server's socket name (-L). An empty socket means the
 	// operator's default server. Tests set a private name so they never touch
@@ -41,6 +42,7 @@ var _ mux = tmux{}
 // restarted one.
 const (
 	paneAgentOption    = "@dungeon_agent"
+	paneOwnerOption    = "@dungeon_pane"
 	sessionOwnerOption = "@dungeon_encounter"
 )
 
@@ -148,8 +150,29 @@ func requireTarget(kind, id string) error {
 	return nil
 }
 
-// CreateWorkspace creates one detached session, names its first window and
-// records dungeon's ownership on the session.
+// markPane records dungeon's ownership on a pane dungeon created. It is the
+// same kind of fact as sessionOwnerOption: StartAgent reads it back to decide
+// whether it may replace the pane's process, so the operator's own pane is
+// never respawned.
+func (t tmux) markPane(ctx context.Context, pane string) error {
+	if err := requireTarget("pane", pane); err != nil {
+		return err
+	}
+	_, err := t.call(ctx, "set-option", "-p", "-t", pane, paneOwnerOption, "1")
+	return err
+}
+
+// paneOwned reports whether a pane carries dungeon's ownership marker.
+func (t tmux) paneOwned(ctx context.Context, pane string) (bool, error) {
+	out, err := t.call(ctx, "display-message", "-p", "-t", pane, "#{"+paneOwnerOption+"}")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// CreateWorkspace creates one detached session, names its first window, and
+// records dungeon's ownership on the session and its root pane.
 func (t tmux) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (wsID, tabID, rootPane string, err error) {
 	out, err := t.call(ctx, "new-session", "-d", "-s", label, "-c", cwd, "-n", tabLabel,
 		"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}")
@@ -164,10 +187,14 @@ func (t tmux) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) 
 	if _, err := t.call(ctx, "set-option", "-t", wsID, sessionOwnerOption, label); err != nil {
 		return "", "", "", err
 	}
+	if err := t.markPane(ctx, rootPane); err != nil {
+		return "", "", "", err
+	}
 	return wsID, tabID, rootPane, nil
 }
 
-// CreateTab adds one detached window to a session and returns its root pane.
+// CreateTab adds one detached window to a session and returns its root pane,
+// marked as dungeon's own.
 func (t tmux) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, rootPane string, err error) {
 	if err := requireTarget("workspace", ws); err != nil {
 		return "", "", err
@@ -185,12 +212,15 @@ func (t tmux) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, root
 	if len(fields) != 2 || fields[0] == "" || fields[1] == "" {
 		return "", "", fmt.Errorf("tmux new-window returned an incomplete layout")
 	}
+	if err := t.markPane(ctx, fields[1]); err != nil {
+		return "", "", err
+	}
 	return fields[0], fields[1], nil
 }
 
-// SplitPane carves one pane out of target. tmux -p is the share of the window
-// the new pane takes, while ratio is the share target keeps, so the percentages
-// are inverted. Repeated splits of the same target use the same ratio and stay
+// SplitPane carves one pane out of target and marks it as dungeon's own. tmux
+// -p is the share of the window the new pane takes, while ratio is the share
+// target keeps, so the percentages are inverted. Repeated splits of the same target use the same ratio and stay
 // equal. The new pane does not take focus.
 func (t tmux) SplitPane(ctx context.Context, target, direction, cwd string, ratio float64) (string, error) {
 	if err := requireTarget("pane", target); err != nil {
@@ -226,6 +256,9 @@ func (t tmux) SplitPane(ctx context.Context, target, direction, cwd string, rati
 	if id == "" {
 		return "", fmt.Errorf("tmux split-window returned no pane")
 	}
+	if err := t.markPane(ctx, id); err != nil {
+		return "", err
+	}
 	return id, nil
 }
 
@@ -248,16 +281,23 @@ func (t tmux) Pane(ctx context.Context, id string) (pane, error) {
 }
 
 // StartAgent records the name on the pane, runs pi with args, and waits until
-// the agent can take input: the foreground command has left the shell that was
-// there, and the pane's output has gone quiet. A changing foreground command is
-// not enough on its own, because a TUI accepts a pasted prompt long after it
-// has replaced the shell. The name is the identity a restarted dungeon reads
-// back through Agents; nothing here keeps a map. A pane that never starts the
-// agent is an error naming the pane.
+// the agent can take input: the pane's output has gone quiet, and on the
+// operator's pane the foreground command has left the shell that was there. A
+// changing foreground command is not enough on its own, because a TUI accepts a
+// pasted prompt long after it has replaced the shell. The name is the identity a
+// restarted dungeon reads back through Agents; nothing here keeps a map. A pane
+// that never starts the agent is an error naming the pane.
 //
 // A name already live in a different pane is refused: every later lookup is by
 // name, so two panes on one name would make it ambiguous. A name already live
 // in this pane is the same agent, so the call is a no-op.
+//
+// A pane dungeon created carries the paneOwnerOption marker, and there StartAgent replaces
+// the pane's process with respawn-pane: no interactive shell reads a command
+// line, so nothing reaches the operator's HISTFILE, and the pane dies with the
+// agent, so the name option cannot outlive it. A pane without the marker is the
+// operator's own: its shell must survive, so the agent is pasted into it and the
+// name is unset when the agent exits.
 func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) error {
 	if err := requireTarget("pane", pane); err != nil {
 		return err
@@ -273,6 +313,10 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 		return fmt.Errorf("tmux: agent name %s is already live in pane %s", name, a.Pane)
 	}
 	before, err := t.paneCommand(ctx, pane)
+	if err != nil {
+		return err
+	}
+	owned, err := t.paneOwned(ctx, pane)
 	if err != nil {
 		return err
 	}
@@ -292,18 +336,30 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 		_, _ = t.call(unset, "set-option", "-p", "-u", "-t", pane, paneAgentOption)
 	}()
 	command := append([]string{"pi"}, args...)
+	if owned {
+		if err := t.respawn(ctx, pane, command); err != nil {
+			return err
+		}
+		// No shell is left behind, so there is no foreground command to leave:
+		// an empty before disables that half of the readiness wait.
+		if err := t.waitQuiet(ctx, pane, name, ""); err != nil {
+			return err
+		}
+		started = true
+		return nil
+	}
+	line := make([]string, len(command))
 	for i, arg := range command {
-		command[i] = shellQuote(arg)
+		line[i] = shellQuote(arg)
 	}
 	// The option lives in tmux, not in the agent process, so it would outlive a
-	// dead agent and make a ghost lane read live. Unset it after the agent
-	// exits, however it exits.
+	// dead agent and make a ghost lane read live. The operator's shell stays, so
+	// unset it there after the agent exits, however it exits.
 	unset := append([]string{"tmux"}, t.argv("set-option", "-p", "-u", "-t", pane, paneAgentOption)...)
 	for i, arg := range unset {
 		unset[i] = shellQuote(arg)
 	}
-	line := strings.Join(command, " ") + "; " + strings.Join(unset, " ")
-	if err := t.paste(ctx, pane, line); err != nil {
+	if err := t.paste(ctx, pane, strings.Join(line, " ")+"; "+strings.Join(unset, " ")); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -332,6 +388,16 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 	}
 }
 
+// respawn replaces the pane's process with the agent, so the pane runs no
+// interactive shell and dies with the agent. tmux execs the command and its
+// arguments as an argv, without a shell, so they are passed as they are.
+func (t tmux) respawn(ctx context.Context, pane string, command []string) error {
+	argv := []string{"respawn-pane", "-k", "-t", pane, "--"}
+	argv = append(argv, command...)
+	_, err := t.call(ctx, argv...)
+	return err
+}
+
 // paneCommand is the foreground command of a pane.
 func (t tmux) paneCommand(ctx context.Context, pane string) (string, error) {
 	out, err := t.call(ctx, "display-message", "-p", "-t", pane, "#{pane_current_command}")
@@ -348,8 +414,9 @@ const readyQuiet = 300 * time.Millisecond
 
 // waitQuiet blocks until the pane's captured output has not changed for
 // readyQuiet, while the foreground command stays away from the shell that was
-// there before the agent. Bounded: an agent that never settles is an error that
-// names the pane.
+// there before the agent. An empty shell means the pane has no shell to return
+// to, which is the respawned case. Bounded: an agent that never settles is an
+// error that names the pane.
 func (t tmux) waitQuiet(ctx context.Context, pane, name, before string) error {
 	deadline := time.Now().Add(10 * time.Second)
 	last, err := t.capture(ctx, pane)
