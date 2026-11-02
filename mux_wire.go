@@ -21,7 +21,7 @@ func openMux(ctx context.Context, forced string) (mux, error) {
 	case os.Getenv("HERDR_ENV") == "1":
 		return newHerdr(), nil
 	case os.Getenv("TMUX") != "":
-		return nil, fmt.Errorf("dungeon: tmux is set, but this build has no tmux backend. pass --mux herdr to use herdr")
+		return newTmux(), nil
 	}
 	return nil, fmt.Errorf("dungeon: no multiplexer detected: neither HERDR_ENV nor TMUX is set. pass --mux herdr")
 }
@@ -32,9 +32,9 @@ func backendByName(name string) (mux, error) {
 	case "herdr":
 		return newHerdr(), nil
 	case "tmux":
-		return nil, fmt.Errorf("dungeon: this build has no tmux backend")
+		return newTmux(), nil
 	}
-	return nil, fmt.Errorf("dungeon: unknown mux %q, want herdr", name)
+	return nil, fmt.Errorf("dungeon: unknown mux %q, want herdr or tmux", name)
 }
 
 // probeAgents reads the fleet for a command that only displays it. No

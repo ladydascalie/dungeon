@@ -238,8 +238,8 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 	if h, err := openMux(t.Context(), "herdr"); err != nil || h == nil {
 		t.Fatalf("--mux herdr: %v", err)
 	}
-	if _, err := openMux(t.Context(), "tmux"); err == nil {
-		t.Fatal("--mux tmux has no backend yet, so it must fail")
+	if h, err := openMux(t.Context(), "tmux"); err != nil || h == nil {
+		t.Fatalf("--mux tmux: %v", err)
 	}
 	if _, err := openMux(t.Context(), "screen"); err == nil || !strings.Contains(err.Error(), "unknown mux") {
 		t.Fatalf("unknown backend: %v", err)
@@ -252,8 +252,8 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 	}
 
 	t.Setenv("HERDR_ENV", "")
-	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "tmux") {
-		t.Fatalf("a tmux session with no tmux backend: %v", err)
+	if h, err := openMux(t.Context(), ""); err != nil || h == nil {
+		t.Fatalf("TMUX set: %v", err)
 	}
 	t.Setenv("TMUX", "")
 	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "--mux") {
