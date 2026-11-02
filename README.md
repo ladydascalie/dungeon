@@ -9,6 +9,9 @@ that owns a worktree. Anything else fails validation.
 
 ## Status
 
+tmux is the supported backend. herdr still works behind `mux.go`, but it is an
+optional second backend and not the supported path.
+
 Every command is built: `init`, `check`, `status`, `set`, `view`, `fleet`,
 `attach`, `up`, `next`, `land` and `down`.
 

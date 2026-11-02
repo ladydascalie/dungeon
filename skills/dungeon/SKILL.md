@@ -21,9 +21,8 @@ inline, now, in one pass, it is a plan. A plan keeps the operator's view
 and the record of each lane, which the pane path gives up on purpose.
 
 A single second opinion or fresh-context review over an existing diff has
-no decomposition, so it stays one herdr pane. See `## One-off delegation` at
-the end of this skill. Everything else becomes an encounter, however small the
-split.
+no decomposition, so it stays one pane. See `## One-off delegation` at the end
+of this skill. Everything else becomes an encounter, however small the split.
 
 Coalition is not a mode we run. It failed in practice: too many moving parts
 for the control it gave. Do not propose it.
@@ -38,17 +37,19 @@ a branch.
 
 ```bash
 command -v dungeon          # required
+command -v tmux             # the backend you run on
 ```
 
-Dungeon drives lanes through a multiplexer: herdr or tmux. It picks one in
-this order: `--mux herdr|tmux` on the command, `HERDR_ENV=1`, then `TMUX`. It
-reads your own pane from `$HERDR_PANE_ID` on herdr and `$TMUX_PANE` on tmux, so
-run dungeon from the pane that should receive the pings.
+Dungeon runs on tmux. herdr still works behind the same interface in `mux.go`,
+but it is an optional second backend and it is not the supported path. Write
+every instruction for a lane in tmux terms, because that is where it runs.
 
-With no multiplexer and no `--mux`, say so and stop. Dungeon cannot spawn a
-lane without one.
+Dungeon picks the backend from `--mux tmux|herdr` on the command, then
+`HERDR_ENV=1`, then `TMUX`. It reads your own pane from `$TMUX_PANE`, so run
+dungeon from the pane that should receive the pings. With no multiplexer and no
+`--mux`, say so and stop. Dungeon cannot spawn a lane without one.
 
-On tmux, four things change:
+What tmux gives you:
 
 - Every lane reports status `unknown`. tmux has no agent protocol, so dungeon
   cannot tell working from idle.
@@ -56,8 +57,8 @@ On tmux, four things change:
   `next` holds an unknown lane until its report lands. A verdict line still
   decides a reviewer.
 - `down` refuses a lane it cannot classify. Pass `--force` to stop it anyway.
-- The brief's ping line is a tmux command instead of a herdr one. The lane runs
-  it as written.
+- The brief's ping line is a `tmux send-keys` command to your pane. The lane
+  runs it as written.
 
 ## Write the plan
 
@@ -213,8 +214,10 @@ Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
 loop, and there is no daemon to keep alive.
 
 `up` builds one workspace per encounter, one tab per role and one pane per
-minion, so the herdr layout reads like the plan. Panes grow to the right unless
-the plan says `split: down`, and they are equal shares of the tab.
+minion, so the layout reads like the plan. On tmux the workspace is a session,
+the tab is a window and the pane is a pane. The session is created detached;
+attach with `tmux attach -t <encounter>`. Panes grow to the right unless the
+plan says `split: down`, and they are equal shares of the tab.
 
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
@@ -222,26 +225,26 @@ second `up` resumes the fleet instead of doubling it.
 ## Agent names
 
 The minion id is your handle. Briefs, reports, worktrees, sessions, state keys
-and every instruction you write use it. herdr sees the derived agent name
-instead: `<minion>-<token>`.
+and every instruction you write use it. The multiplexer sees the derived agent
+name instead: `<minion>-<token>`.
 
 The token is exactly two characters from `[0-9a-z]`. `dungeon up` generates it
 on the first spawn and stores it as `token` in the run's `state.json`. The agent
-name is the minion id truncated to 29 characters, a hyphen, then the token, so
-it stays inside herdr's 32 character limit. herdr names are lowercase only, and
-the minion id alphabet is already lowercase.
+name is the minion id truncated to 29 characters, a hyphen, then the token. The
+32 character limit is dungeon's own rule, not a backend's, so every backend
+accepts the name. The minion id alphabet is already lowercase.
 
-herdr names are global. `up` checks every derived name against the live fleet
-and re-rolls the whole token when one is taken, up to 64 draws, then fails with
-a finding that names the live agent. Two encounters may declare the same minion
-ids; the token is what keeps them on separate agents.
+Agent names are global within one multiplexer. `up` checks every derived name
+against the live fleet and re-rolls the whole token when one is taken, up to 64
+draws, then fails with a finding that names the live agent. Two encounters may
+declare the same minion ids; the token is what keeps them on separate agents.
 
 Consequences for you:
 
 - Never hardcode an agent name in a plan, a brief or a command. Write the
   minion id; dungeon derives the rest.
 - To reach a lane, use `space f`, `dungeon status`, or the pane recorded in the
-  state. Do not call `herdr` with a name you guessed.
+  state. Do not address a multiplexer with a name you guessed.
 - A run already in flight without a token keeps the bare minion id. `up` leaves
   its live bare agents alone instead of renaming the fleet under it, so do not
   expect a token on an old run.
@@ -251,10 +254,10 @@ Two minion ids that collide after truncation fail `dungeon check` with
 
 ## Lanes ping you
 
-Every brief tells the lane to write its report and then run `herdr pane run
-<your pane> "<unit> finished. Report: <path>"`. dungeon writes your pane id
-from `$HERDR_PANE_ID` at dispatch, so run dungeon from the pane that should
-receive the ping.
+Every brief tells the lane to write its report and then run a `tmux send-keys`
+line that types `<unit>: <minion> finished. Report: <path>` into your pane and
+presses Enter. dungeon takes your pane from `$TMUX_PANE` at dispatch, so run
+dungeon from the pane that should receive the ping.
 
 A ping is a wake-up, not a verdict. Run `dungeon next` to settle the unit: the
 report and the unit's accept command or verdict still decide. Then read the
@@ -359,14 +362,20 @@ keystroke: `dungeon link <unit> <url>`. The row is marked `↗` and `space o` op
 The URL is a plain http(s) link, so any forge works. Do not paste it into chat
 instead.
 
-## Opening the view in herdr
+## Opening the view
 
-`prefix+d` opens `dungeon view` in a right split, from anywhere in the repo:
-the plan is found by walking up. Rows are a two column table sized to their content, with a
-two column gap, so a wide terminal shows a block rather than a stretched line.
-`space f` then jumps from the graph to a lane.
-Tell the operator to look there when a unit is `blocked`; do not paste pane
-output into chat.
+`dungeon view` is a TUI, and it finds the plan by walking up, so it opens from
+anywhere in the repo. Run it in its own pane beside the lanes:
+
+```bash
+tmux split-window -h -c "$PWD" "dungeon view"
+```
+
+Bind that line in `~/.tmux.conf` if you use it often. Rows are a two column
+table sized to their content, with a two column gap, so a wide terminal shows a
+block rather than a stretched line. `space f` then jumps from the graph to a
+lane. Tell the operator to look there when a unit is `blocked`; do not paste
+pane output into chat.
 
 ## The fleet view
 
@@ -376,9 +385,9 @@ touch first. It takes no plan and needs no argument.
 Open it instead of `dungeon view` in two cases:
 
 - More than one encounter is live or parked. One window shows them all.
-- The work runs on tmux. A tmux lane is detached, and dungeon reports every
-  lane status `unknown`. The fleet preview reads the pane itself, so it still
-  says what the lane is doing.
+- The lanes run in a detached tmux session, where dungeon reports every lane
+  status `unknown`. The fleet preview reads the pane itself, so it still says
+  what the lane is doing.
 
 Keys:
 
@@ -447,49 +456,55 @@ parent's only edit in that whole run is the plan.
 Use a pane for one second opinion, one fresh-context review, or one recon. If
 the work splits into units, it is an encounter, not a pane.
 
-This path is herdr-only: it needs the herdr binary and `HERDR_ENV=1`. Outside
-herdr, say so and stop.
-
-Write the handoff to `${TMPDIR:-/tmp}/herdr-handoffs/<slug>/handoff.md` before
+Write the handoff to `${TMPDIR:-/tmp}/dungeon-handoffs/<slug>/handoff.md` before
 any pane exists, outside the checkout. It states the objective, repo and cwd,
 what the child may change, the acceptance criteria, and the stop conditions. The
 child prompt only points at that file.
 
-Split one pane in your own cwd, and read the pane id from the JSON. Never derive
-it from an example:
+Split one pane in your own cwd and take the pane id tmux prints. Never derive it
+from an example:
 
 ```bash
-herdr pane split --current --direction right --cwd "$PWD" --no-focus
-# pane = .result.pane.pane_id
+pane=$(tmux split-window -d -h -t "$TMUX_PANE" -c "$PWD" -P -F '#{pane_id}')
 ```
 
-Start the child with an explicit tool allowlist. A read-only child gets
-`read,bash`, no `edit` and no writer, so its findings go in its final reply. A
-writer child may keep a report under `${TMPDIR:-/tmp}/herdr-handoffs/<slug>/`,
-outside the checkout:
+Start the child in that pane with an explicit tool allowlist. A read-only child
+gets `read,bash`, no `edit` and no writer, so its findings go in its final reply.
+A writer child may keep a report under
+`${TMPDIR:-/tmp}/dungeon-handoffs/<slug>/`, outside the checkout:
 
 ```bash
-herdr agent start review-auth --kind pi --pane <id> -- --tools read,bash --no-mcp
+tmux send-keys -t "$pane" -l -- 'pi --no-skills --no-mcp --tools read,bash'
+tmux send-keys -t "$pane" Enter
 ```
 
-Prompt it to read the handoff and do it, then wait with a timeout:
+Prompt it to read the handoff and do it, then wait a bounded time:
 
 ```bash
-herdr agent prompt review-auth \
-  "Read <abs>/handoff.md and do it." \
-  --wait --timeout 900000
+tmux send-keys -t "$pane" -l -- "Read <abs>/handoff.md and do it."
+tmux send-keys -t "$pane" Enter
 ```
 
-A timeout means the task is async, not that it failed. Check it again later.
-
-Read the child's final reply, not the terminal. A writer child's report file
-comes first; fall back to the pane only when there is no report:
+tmux has no completion signal. Poll the pane for the report path, with a cap:
 
 ```bash
-herdr agent read review-auth --source recent-unwrapped --lines 120
+for i in $(seq 60); do
+  tmux capture-pane -p -t "$pane" | grep -q handoff.md && break
+  sleep 15
+done
 ```
 
-Close only the pane you opened: `herdr pane close <pane-id>`.
+A poll that runs out means the task is async, not that it failed. Check it again
+later.
+
+Read the child's reply from the pane. A writer child's report file comes first;
+fall back to the pane only when there is no report:
+
+```bash
+tmux capture-pane -p -t "$pane" -S -120
+```
+
+Close only the pane you opened: `tmux kill-pane -t "$pane"`.
 
 Never commit, push or merge from a child, and keep one writer per checkout.
 
@@ -497,6 +512,6 @@ When the child is `blocked`, it is asking a question. Answer with raw pane input
 not another prompt, then wait again:
 
 ```bash
-herdr pane run <id> "<answer>"
-herdr agent wait review-auth
+tmux send-keys -t "$pane" -l -- "<answer>"
+tmux send-keys -t "$pane" Enter
 ```
