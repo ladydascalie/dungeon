@@ -27,6 +27,12 @@ type mux interface {
 	// it from the multiplexer, not infer it from what it started, and must say
 	// AgentUnknown when it has no protocol to tell.
 	//
+	// The name must survive the dungeon process. A backend records each agent's
+	// name inside the multiplexer at start (a pane option, a label, whatever it
+	// has) and enumerates here every live pane carrying a recorded name. An
+	// in-memory map is not enough: a restarted dungeon would see an empty fleet
+	// and mark every live lane absent.
+	//
 	// A reachable multiplexer with no agents returns an empty map and no error.
 	// An error means the fleet could not be read at all, which is not the same
 	// as an empty fleet: a caller that decides on liveness must not mistake one
@@ -63,7 +69,8 @@ type mux interface {
 
 	// StartAgent starts an agent named name in pane, running the given command
 	// arguments, and returns when the multiplexer accepts it. name must be the
-	// name later calls use to address that agent.
+	// name later calls use to address that agent, and the backend must record it
+	// inside the multiplexer so Agents still finds it after a restart.
 	StartAgent(ctx context.Context, name, pane string, args []string) error
 
 	// Prompt submits text to the named agent as one prompt and returns as soon
@@ -106,6 +113,11 @@ type Agent struct {
 // AgentState is what a backend knows about an agent. A backend with no agent
 // protocol cannot know more than that a pane is alive, so it reports
 // AgentUnknown rather than guessing a state it does not have.
+//
+// Unknown still runs the encounter. A protocol-less backend drives up, and
+// then settles each unit by its accept command instead of the lane state; a
+// lane it cannot classify is stopped only with down --force, and the operator
+// can always record a status by hand with set.
 type AgentState string
 
 const (

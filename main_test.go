@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -280,11 +281,22 @@ func TestParseAgentStateRefusesToGuess(t *testing.T) {
 	}
 }
 
-// PingCommand owns the quoting, so the caller never builds the shell line.
-func TestPingCommandQuotesTheMessage(t *testing.T) {
-	got := newHerdr().PingCommand("w9:p1", `a "quoted" message`)
-	want := `herdr pane run w9:p1 "a \"quoted\" message"`
-	if got != want {
-		t.Fatalf("PingCommand = %q, want %q", got, want)
+// PingCommand owns the shell quoting, so a message arrives literally whatever
+// it carries.
+func TestPingCommandQuotesForTheShell(t *testing.T) {
+	message := "cost $5, `id`, a 'quote' and\na newline"
+	line := newHerdr().PingCommand("w9:p1", message)
+	const prefix = "herdr pane run w9:p1 "
+	if !strings.HasPrefix(line, prefix) {
+		t.Fatalf("PingCommand = %q, want the herdr pane run prefix", line)
+	}
+	// A real shell evaluates the quoting: what it delivers must be the message,
+	// byte for byte.
+	out, err := exec.Command("sh", "-c", "printf %s "+line[len(prefix):]).Output()
+	if err != nil {
+		t.Fatalf("sh: %v", err)
+	}
+	if string(out) != message {
+		t.Fatalf("the shell delivered %q, want %q", out, message)
 	}
 }

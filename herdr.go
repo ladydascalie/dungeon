@@ -119,7 +119,14 @@ func (h herdr) SendKeys(ctx context.Context, name string, keys ...string) error 
 // PingCommand is the command a shell runs to deliver a message to pane. Quoting
 // is herdr's, so the caller passes the message and gets a finished line.
 func (h herdr) PingCommand(pane, message string) string {
-	return fmt.Sprintf("%s pane run %s %s", h.bin, pane, strconv.Quote(message))
+	return fmt.Sprintf("%s pane run %s %s", h.bin, pane, shellQuote(message))
+}
+
+// shellQuote wraps s in single quotes, where a POSIX shell expands nothing. An
+// embedded quote is closed, escaped and reopened, so $, a backtick or a newline
+// arrives at the pane as written.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // FocusAgent moves the operator to the pane hosting the agent.

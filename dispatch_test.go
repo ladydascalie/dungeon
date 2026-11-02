@@ -582,3 +582,31 @@ func TestBriefStatesTheVerdictInsteadOfAccept(t *testing.T) {
 		t.Fatalf("a verdict unit must not get an accept command:\n%s", text)
 	}
 }
+
+// A backend without a status protocol still settles a unit: when the lane
+// state is unknown, the accept command is the judge.
+func TestNextSettlesAnUnknownLaneByAccept(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	t.Setenv("FAKE_STATUS", "busy") // a word dungeon does not know: unknown
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "3s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "done: A") {
+		t.Fatalf("an unknown lane should settle by accept, got:\n%s", stdout)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done", got)
+	}
+}

@@ -406,7 +406,9 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			st.SetUnit(u.ID, "blocked", "lane is waiting on you in "+a.Pane)
 			d.Blocked = append(d.Blocked, u.ID)
 			progressed = true
-		case AgentIdle, AgentDone:
+		case AgentIdle, AgentDone, AgentUnknown:
+			// With no status protocol the lane state says nothing, so the
+			// accept command is the only judge left.
 			switch settle(ctx, o, p, st, u, m) {
 			case "done":
 				StopLoopAfter(p, st, u.ID)
