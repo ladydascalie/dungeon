@@ -37,6 +37,8 @@ dungeon view --once --width 120    # one frame, for a screenshot or a pipe
 dungeon view --detail MOL1         # open the detail pane on one unit
 dungeon rail                       # a compact rail of every pane running an agent
 dungeon rail toggle                # open, focus or close that rail in this window
+dungeon rail restart               # replace the rail here with this binary
+dungeon rail restart --all         # replace every rail, in every session
 
 dungeon attach MOL1 /tmp/brief-mol1.md
 
@@ -467,6 +469,14 @@ same header twice, so it is not printed again.
 group keeps its header with a `▸` mark and its pane count, and `z` again, or
 `enter` on the header, unfolds it. Folds survive a refresh, and a number jump
 unfolds the groups that hide its pane.
+
+The rail is one process per window, so a new binary does not climb into the
+rails that are already open. Two things cover that: `dungeon rail restart`
+replaces the rail in this window, and `--all` walks every `@agent_rail` pane in
+every session, reopening each at the width it had. A running rail also checks
+the file it runs on every backstop tick and re-execs itself when that file
+changes, so `go install` reaches every open rail within one tick, with no
+restart and no lost pane.
 
 When a pane's worktree belongs to an encounter, the rail reads that encounter's
 state and shows the unit and its status beside the agent. A lane in a worktree

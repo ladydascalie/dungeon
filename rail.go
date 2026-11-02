@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -241,6 +242,10 @@ type railModel struct {
 	backstop time.Duration
 	sources  railSources
 
+	exe    string
+	stamp  string
+	reload bool
+
 	agents     []railPaneInfo
 	cursor     int
 	scroll     int
@@ -387,6 +392,13 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if m.backstop <= 0 {
 			return m, nil
+		}
+		// A rail is one process per window, so replacing the binary would
+		// leave every open rail on the old build. Check the file it runs and
+		// re-exec, which keeps the pane and picks up the new build.
+		if m.exe != "" && railStamp(m.exe) != m.stamp {
+			m.reload = true
+			return m, tea.Quit
 		}
 		return m, tea.Batch(m.refresh(), tick(m.backstop))
 
@@ -1212,8 +1224,13 @@ func railBackend(ctx context.Context, forced string) (tmux, error) {
 }
 
 func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "toggle" {
-		return railToggleCmd(ctx, args[1:], stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "toggle":
+			return railToggleCmd(ctx, args[1:], stdout, stderr)
+		case "restart":
+			return railRestartCmd(ctx, args[1:], stdout, stderr)
+		}
 	}
 	fs := newFlagSet("rail", stderr)
 	backstop := fs.Duration("backstop", 10*time.Second, "slow re-read so a missed event cannot freeze the rail")
@@ -1280,9 +1297,50 @@ func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		m.watchErr = err
 		m.watchErrAt = time.Now()
 	}
+	m.exe, _ = os.Executable()
+	m.stamp = railStamp(m.exe)
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(runCtx))
-	if _, err := prog.Run(); err != nil {
+	final, err := prog.Run()
+	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if fm, ok := final.(railModel); ok && fm.reload {
+		return reexec(myExe(stderr), stderr)
+	}
+	return 0
+}
+
+// railStamp identifies a build. A rail re-execs when the file it runs changes,
+// which is what makes go install reach every open rail.
+func railStamp(path string) string {
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d/%d", info.ModTime().UnixNano(), info.Size())
+}
+
+func myExe(stderr io.Writer) string {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return ""
+	}
+	return exe
+}
+
+// reexec replaces this process with the same command, so the rail keeps its
+// pane and starts the build that was installed over it.
+func reexec(exe string, stderr io.Writer) int {
+	if exe == "" {
+		return 2
+	}
+	if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+		fmt.Fprintf(stderr, "dungeon: re-exec %s: %v\n", exe, err)
 		return 2
 	}
 	return 0
@@ -1330,6 +1388,47 @@ func railToggleCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	if *printPane && rail != "" {
 		fmt.Fprintln(stdout, rail)
+	}
+	return 0
+}
+
+// railRestartCmd replaces open rails with one running this binary.
+func railRestartCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	fs := newFlagSet("rail restart", stderr)
+	all := fs.Bool("all", false, "restart every rail, in every session")
+	width := fs.Int("width", 32, "rail width when the old rail does not report one")
+	backend := muxFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "dungeon: rail restart takes no arguments, got %q\n", fs.Arg(0))
+		return 2
+	}
+	t, err := railBackend(ctx, *backend)
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	target := os.Getenv("TMUX_PANE")
+	if target == "" {
+		out, err := t.call(ctx, "display-message", "-p", "#{pane_id}")
+		if err == nil {
+			target = strings.TrimSpace(string(out))
+		}
+	}
+	if target == "" {
+		fmt.Fprintln(stderr, "dungeon: rail restart needs a tmux pane")
+		return 2
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	if _, err := t.railRestart(ctx, target, *all, *width, shellQuote(exe)+" rail"); err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
 	}
 	return 0
 }

@@ -929,3 +929,117 @@ func TestRailJumpUnfoldsTheTargetPane(t *testing.T) {
 		t.Fatalf("the jump selected group %q pane %d, want pane 1", m.onGroup, m.cursor)
 	}
 }
+
+func TestRailRestartReplacesTheRailInThisWindow(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, _, root, err := h.CreateWorkspace(ctx, "railrestart", "workers", dir)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	rail, err := h.railToggle(ctx, root, 24, "sleep 60")
+	if err != nil {
+		t.Fatalf("railToggle: %v", err)
+	}
+	restarted, err := h.railRestart(ctx, root, false, 24, "sleep 60")
+	if err != nil {
+		t.Fatalf("railRestart: %v", err)
+	}
+	if len(restarted) != 1 {
+		t.Fatalf("restarted %d rails, want 1: %v", len(restarted), restarted)
+	}
+	if restarted[0] == rail {
+		t.Fatal("restart kept the old rail pane")
+	}
+	if _, err := h.Pane(ctx, rail); err == nil {
+		t.Fatal("the old rail pane survived")
+	}
+	out, err := h.call(ctx, "display-message", "-p", "-t", restarted[0], "#{@agent_rail}\t#{pane_width}")
+	if err != nil {
+		t.Fatalf("display-message: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "1\t24" {
+		t.Fatalf("the new rail is %q, want the rail mark and its old width", got)
+	}
+}
+
+func TestRailRestartAllLeavesNothingBehind(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, first, err := h.CreateWorkspace(ctx, "railall-a", "workers", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	_, _, second, err := h.CreateWorkspace(ctx, "railall-b", "workers", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	a, err := h.railToggle(ctx, first, 24, "sleep 60")
+	if err != nil {
+		t.Fatalf("railToggle a: %v", err)
+	}
+	b, err := h.railToggle(ctx, second, 24, "sleep 60")
+	if err != nil {
+		t.Fatalf("railToggle b: %v", err)
+	}
+	restarted, err := h.railRestart(ctx, first, true, 24, "sleep 60")
+	if err != nil {
+		t.Fatalf("railRestart --all: %v", err)
+	}
+	if len(restarted) != 2 {
+		t.Fatalf("restarted %d rails, want 2: %v", len(restarted), restarted)
+	}
+	for _, old := range []string{a, b} {
+		if _, err := h.Pane(ctx, old); err == nil {
+			t.Fatalf("the old rail %s survived --all", old)
+		}
+	}
+	for _, pane := range restarted {
+		if _, err := h.Pane(ctx, pane); err != nil {
+			t.Fatalf("the new rail %s is gone: %v", pane, err)
+		}
+	}
+}
+
+func TestRailRestartWithoutARailSaysSo(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "railnone", "workers", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if _, err := h.railRestart(ctx, root, false, 24, "sleep 60"); err == nil {
+		t.Fatal("railRestart invented a rail where there was none")
+	}
+}
+
+func TestRailReexecsWhenItsBinaryChanges(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "dungeon")
+	if err := os.WriteFile(exe, []byte("build one"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	m := railModel{backstop: time.Second, exe: exe, stamp: railStamp(exe)}
+	if m.stamp == "" {
+		t.Fatal("no stamp for the binary")
+	}
+	next, cmd := m.Update(tickMsg{})
+	if got := next.(railModel); got.reload {
+		t.Fatal("an unchanged binary asked for a re-exec")
+	} else if cmd == nil {
+		t.Fatal("the unchanged rail stopped its tick")
+	}
+
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(exe, later, later); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	next, cmd = m.Update(tickMsg{})
+	if got := next.(railModel); !got.reload {
+		t.Fatal("a replaced binary did not ask for a re-exec")
+	}
+	if cmd == nil {
+		t.Fatal("a re-exec must stop the running program")
+	}
+}

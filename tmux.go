@@ -1156,6 +1156,87 @@ func readRailOSC(server, pane string) (oscStatus, bool, error) {
 	return st, true, nil
 }
 
+// railRestart replaces open rails with fresh ones running command, keeping the
+// width each rail had. A rail is one process per window, so a new binary or new
+// flags reach the open rails only by replacing them. The scope is the target's
+// window, or every session when all is set.
+func (t tmux) railRestart(ctx context.Context, target string, all bool, width int, command string) ([]string, error) {
+	if err := requireTarget("pane", target); err != nil {
+		return nil, err
+	}
+	const delim = "\x1f"
+	out, err := t.call(ctx, "list-panes", "-a", "-F",
+		"#{pane_id}"+delim+"#{window_id}"+delim+"#{@agent_rail}"+delim+"#{pane_width}")
+	if err != nil {
+		return nil, err
+	}
+	window := ""
+	if !all {
+		w, err := t.call(ctx, "display-message", "-p", "-t", target, "#{window_id}")
+		if err != nil {
+			return nil, err
+		}
+		window = strings.TrimSpace(string(w))
+	}
+	type railPane struct {
+		id, window string
+		rail       bool
+		width      int
+	}
+	var panes []railPane
+	perWindow := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Split(line, delim)
+		if len(f) != 4 || f[0] == "" {
+			continue
+		}
+		var w int
+		fmt.Sscan(f[3], &w)
+		panes = append(panes, railPane{id: f[0], window: f[1], rail: f[2] == "1", width: w})
+		perWindow[f[1]]++
+	}
+	var restarted []string
+	found := 0
+	for _, p := range panes {
+		if !p.rail {
+			continue
+		}
+		if !all && p.window != window {
+			continue
+		}
+		found++
+		if perWindow[p.window] < 2 {
+			continue // the rail is the window's only pane
+		}
+		anchor := ""
+		for _, q := range panes {
+			if q.window == p.window && !q.rail {
+				anchor = q.id
+				break
+			}
+		}
+		if anchor == "" {
+			continue
+		}
+		if err := t.callNoOutput(ctx, "kill-pane", "-t", p.id); err != nil {
+			return restarted, err
+		}
+		w := p.width
+		if w <= 0 {
+			w = width
+		}
+		rail, err := t.railToggle(ctx, anchor, w, command)
+		if err != nil {
+			return restarted, err
+		}
+		restarted = append(restarted, rail)
+	}
+	if !all && found == 0 {
+		return nil, fmt.Errorf("no rail in this window")
+	}
+	return restarted, nil
+}
+
 // railToggle opens, focuses, or closes the rail in the target's window. It
 // splits the leftmost pane, not the focused one, so the rail stays on the edge
 // after a split in the middle of a window.
