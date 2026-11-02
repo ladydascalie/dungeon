@@ -2,7 +2,7 @@ package main
 
 import "context"
 
-// Mux is the terminal multiplexer dungeon needs: workspaces, tabs and panes, the
+// mux is the terminal multiplexer dungeon needs: workspaces, tabs and panes, the
 // agents living in them, and nothing else.
 //
 // A second backend (tmux, for example) implements this interface and nothing
@@ -24,7 +24,7 @@ import "context"
 // Calls take a context. A backend must stop and return promptly when it is
 // cancelled; a missing multiplexer is reported as an error, except for the
 // read-only probes named below.
-type Mux interface {
+type mux interface {
 	// Agents reports every live agent, keyed by the name its lane was given.
 	// This is the only source of liveness and status truth: a backend must read
 	// it from the multiplexer, not infer it from what it started. A missing or
@@ -34,31 +34,31 @@ type Mux interface {
 
 	// Workspaces lists every workspace, in the backend's own order. Empty is
 	// valid. A missing or failing multiplexer returns nil.
-	Workspaces(ctx context.Context) []Workspace
+	Workspaces(ctx context.Context) []workspace
 
 	// CreateWorkspace creates one workspace with its first tab, labels that tab
 	// tabLabel, and returns the workspace, the tab and that tab's root pane. It
 	// is created without focus and rooted at cwd.
-	CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (workspace, tab, rootPane string, err error)
+	CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (wsID, tabID, rootPane string, err error)
 
-	// CreateTab adds one tab to workspace and returns the tab and its root pane.
-	// An empty workspace means the current one. It is created without focus and
-	// rooted at cwd.
-	CreateTab(ctx context.Context, workspace, label, cwd string) (tab, rootPane string, err error)
+	// CreateTab adds one tab to ws and returns the tab and its root pane. An
+	// empty ws means the current one. It is created without focus and rooted at
+	// cwd.
+	CreateTab(ctx context.Context, ws, label, cwd string) (tabID, rootPane string, err error)
 
-	// Tabs lists the tabs of one workspace. An empty workspace returns nil. A
-	// failing backend returns nil.
-	Tabs(ctx context.Context, workspace string) []Tab
+	// Tabs lists the tabs of one workspace. An empty ws returns nil. A failing
+	// backend returns nil.
+	Tabs(ctx context.Context, ws string) []tab
 
 	// SplitPane splits target and returns the new pane, rooted at cwd. direction
 	// is one of right, down, left or up. ratio is the share of target the
 	// existing pane keeps, so repeated splits of one target stay equal. The new
 	// pane does not take focus.
-	SplitPane(ctx context.Context, target, direction, cwd string, ratio float64) (pane string, err error)
+	SplitPane(ctx context.Context, target, direction, cwd string, ratio float64) (newPane string, err error)
 
 	// Pane reports one pane's tab and workspace. A pane that is gone is an
 	// error; that is how a stale pin is detected.
-	Pane(ctx context.Context, pane string) (Pane, error)
+	Pane(ctx context.Context, id string) (pane, error)
 
 	// StartAgent starts an agent named name in pane, running the given command
 	// arguments, and returns when the multiplexer accepts it. name must be the
@@ -102,24 +102,24 @@ type Mux interface {
 	CloseTab(ctx context.Context, tab string) error
 
 	// CloseWorkspace closes one workspace dungeon created, and the tabs in it.
-	CloseWorkspace(ctx context.Context, workspace string) error
+	CloseWorkspace(ctx context.Context, ws string) error
 }
 
-// Workspace is one workspace: an opaque id and the label dungeon gave it.
-type Workspace struct {
+// workspace is one workspace: an opaque id and the label dungeon gave it.
+type workspace struct {
 	ID    string
 	Label string
 }
 
-// Tab is one tab in a workspace: an opaque id and the label dungeon gave it.
-type Tab struct {
+// tab is one tab in a workspace: an opaque id and the label dungeon gave it.
+type tab struct {
 	ID    string
 	Label string
 }
 
-// Pane is where a pane lives: its opaque id, its tab and its workspace. It is
+// pane is where a pane lives: its opaque id, its tab and its workspace. It is
 // the answer to both "does this pane still exist" and "whose pane is it".
-type Pane struct {
+type pane struct {
 	ID        string
 	Tab       string
 	Workspace string
