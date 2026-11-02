@@ -407,6 +407,18 @@ The fleet view never writes. It reads plans, state, reports and panes. A jump
 moves the multiplexer's focus and nothing else: no key on this screen
 dispatches, settles or edits a lane.
 
+## The rail
+
+`dungeon rail` does not poll. A long-lived tmux client in control mode wakes it
+when the topology changes: window add, close or rename, layout or pane mode,
+session changes, clients attaching. fsnotify on the repo's `.dungeon` tree wakes
+it when `plan.yaml`, any `state.json`, a report or a brief changes. A 10 second
+backstop, `--backstop`, re-reads in case an event was missed. The control client
+runs `refresh-client -f no-output`, so the pane stream is deliberately disabled:
+the rail takes pane state from its `pipe-pane` sink and OSC records, not from
+that stream. When nothing changes the rail waits on its event channels and one
+timer.
+
 ## Finishing
 
 ```bash
