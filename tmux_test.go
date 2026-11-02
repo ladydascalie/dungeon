@@ -1038,6 +1038,59 @@ func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
 	}
 }
 
+// TestTmuxPromptSubmitsToARealPi is the case that failed: a fresh pi renders a
+// paste hundreds of milliseconds after it, and the Enter sent with the paste is
+// swallowed during startup. Prompt must prove delivery itself, so pi takes the
+// prompt and starts a turn with no key from this test.
+func TestTmuxPromptSubmitsToARealPi(t *testing.T) {
+	if _, err := exec.LookPath("pi"); err != nil {
+		t.Skip("pi is not installed")
+	}
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, root, []string{"--no-skills"}); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	text := "prompt-confirm: reply with the single word ok"
+	if err := h.Prompt(ctx, name, text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// No key came from this test. pi took the prompt when it shows its working
+	// indicator, or when its status line counts tokens for the request. A fast
+	// model can finish before the first look, so poll for either.
+	deadline := time.Now().Add(20 * time.Second)
+	var screen string
+	for {
+		screen = mustCapture(t, h, root)
+		if strings.Contains(screen, "Working") || strings.Contains(screen, "↑") {
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("pi never took the prompt %q:\n%s", text, screen)
+}
+
+// mustCapture reads a pane's text or fails the test.
+func mustCapture(t *testing.T, h tmux, pane string) string {
+	t.Helper()
+	screen, err := h.capture(context.Background(), pane)
+	if err != nil {
+		t.Fatalf("capture %s: %v", pane, err)
+	}
+	return screen
+}
+
 func TestTmuxStartAgentWaitsForOutputToSettle(t *testing.T) {
 	h := tmuxTest(t)
 	ctx := context.Background()

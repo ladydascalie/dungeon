@@ -460,62 +460,191 @@ func (t tmux) capture(ctx context.Context, pane string) (string, error) {
 	return string(out), nil
 }
 
-// submitSettle is the pause between an Enter and the look that decides whether
-// the prompt was submitted.
+// needlePoll is the pause between two looks at a pane while a prompt lands or
+// submits. It is short because a TUI renders a paste in a few hundred
+// milliseconds, and every look is one tmux call.
+const needlePoll = 50 * time.Millisecond
+
+// pasteDeadline is how long one paste may take to appear on the pane. A fresh
+// pi renders a paste at 310-420ms; the margin covers a busy TUI.
+const pasteDeadline = 3 * time.Second
+
+// pasteTries bounds how many times Prompt pastes text that never appeared. A
+// paste that lands nowhere is usually one sent before the TUI was listening, so
+// it is safe to send it again.
+const pasteTries = 3
+
+// submitSettle is the pause between an Enter and the next look that decides
+// whether the prompt was submitted.
 const submitSettle = 200 * time.Millisecond
 
-// submitTries bounds the extra Enters Prompt sends when a slow TUI ignored the
+// submitTries bounds how many Enters Prompt sends when a slow TUI ignores the
 // first one.
 const submitTries = 10
 
+// submitDeadline bounds the whole submit phase, so a TUI that keeps the text on
+// the input line for another reason cannot hold Prompt forever.
+const submitDeadline = 5 * time.Second
+
+// drawDeadline is how long Prompt waits for an agent to draw anything at all
+// before it pastes into a blank pane anyway.
+const drawDeadline = 5 * time.Second
+
+// settleDeadline bounds the wait for a drawing agent to stop drawing. An agent
+// that streams while idle is pasted into regardless; the confirmation decides
+// what happened.
+const settleDeadline = 15 * time.Second
+
 // Prompt submits text to the named agent as one prompt. The text travels
-// through a buffer and bracketed paste, so a long prompt keeps its bytes, then
-// Enter submits it. A TUI may not be listening yet: when the pasted text is
-// still on the cursor's input line, Prompt presses Enter again a bounded number
-// of times. It returns when the input is submitted, not when the turn finishes.
-// A prompt that will not submit is an error that names the pane, so text is
-// never left silently unsent.
+// through a buffer and bracketed paste, so a long prompt keeps its bytes.
+//
+// Delivery is two-sided, because a paste sent while a TUI is still starting is
+// lost without an error. Prompt waits for the pane's screen to stop changing, so
+// a booting TUI is not pasted into. It then polls until the pane shows the
+// pasted text, and pastes again a bounded number of times if it never appears.
+// Only then does it press Enter, and it polls until the pane no longer holds the
+// text as pending input. It returns when the input is submitted, not when the
+// turn finishes. A prompt that does not land or does not submit is an error that
+// names the pane and the phase, so text is never left silently unsent.
 func (t tmux) Prompt(ctx context.Context, name, text string) error {
 	pane, err := t.agentPane(ctx, name)
 	if err != nil {
 		return err
 	}
-	if err := t.paste(ctx, pane, text); err != nil {
+	if err := t.settlePane(ctx, pane); err != nil {
 		return err
 	}
-	return t.confirmSubmit(ctx, pane, text)
-}
-
-// confirmSubmit looks at the cursor's line after the first Enter. Paste echoes
-// the text on that line and leaves the cursor after it; a TUI that accepted the
-// prompt clears the line or moves the cursor away. Text still under the cursor
-// means the Enter was ignored, so send another.
-func (t tmux) confirmSubmit(ctx context.Context, pane, text string) error {
 	needle := inputNeedle(text)
 	if needle == "" {
-		return nil
+		return fmt.Errorf("tmux: pane %s: prompt has no visible text to confirm", pane)
 	}
-	enters := 0
+	if err := t.landPrompt(ctx, pane, needle, text); err != nil {
+		return err
+	}
+	return t.submitPrompt(ctx, pane, needle)
+}
+
+// settlePane waits until the pane has drawn something and then stopped drawing,
+// so a paste does not race a booting TUI. A fresh pi draws its startup banner
+// for seconds and can clear the screen under the paste, which looks like a
+// submitted prompt: the pane would show the text once and then lose it. A pane
+// that never draws is pasted into at drawDeadline, and one that never settles at
+// settleDeadline: the two-sided confirmation below still decides what happened.
+func (t tmux) settlePane(ctx context.Context, pane string) error {
+	drawnAt := time.Now().Add(drawDeadline)
+	settleAt := time.Now().Add(settleDeadline)
+	var last string
+	drawn := false
+	since := time.Now()
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(submitSettle):
-		}
-		held, err := t.inputHolds(ctx, pane, needle)
+		screen, err := t.capture(ctx, pane)
 		if err != nil {
 			return err
 		}
-		if !held {
+		if strings.TrimSpace(screen) != "" {
+			drawn = true
+		}
+		now := time.Now()
+		if !drawn {
+			if now.After(drawnAt) {
+				return nil
+			}
+		} else {
+			if screen != last {
+				last = screen
+				since = now
+			}
+			if now.Sub(since) >= readyQuiet || now.After(settleAt) {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(needlePoll):
+		}
+	}
+}
+
+// landPrompt pastes text and waits until the pane shows it. A paste the pane
+// never shows did not land, so it is sent again within a bounded number of
+// tries.
+func (t tmux) landPrompt(ctx context.Context, pane, needle, text string) error {
+	for tries := 1; ; tries++ {
+		if err := t.pasteText(ctx, pane, text); err != nil {
+			return err
+		}
+		shown, err := t.waitShown(ctx, pane, needle, pasteDeadline)
+		if err != nil {
+			return err
+		}
+		if shown {
 			return nil
 		}
+		if tries >= pasteTries {
+			return fmt.Errorf("tmux: pane %s: pasted prompt never appeared after %d pastes", pane, tries)
+		}
+	}
+}
+
+// waitShown polls until needle is visible anywhere on the pane, or until within
+// has passed.
+func (t tmux) waitShown(ctx context.Context, pane, needle string, within time.Duration) (bool, error) {
+	deadline := time.Now().Add(within)
+	for {
+		shown, _, err := t.promptShown(ctx, pane, needle)
+		if err != nil {
+			return false, err
+		}
+		if shown {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(needlePoll):
+		}
+	}
+}
+
+// submitPrompt presses Enter and waits until the pane no longer holds the text
+// as pending input. Text still on the cursor's line after an Enter means the
+// TUI ignored it, so Enter is sent again, bounded in both count and time. Text
+// gone from the pane entirely also counts: that TUI has cleared the input.
+func (t tmux) submitPrompt(ctx context.Context, pane, needle string) error {
+	deadline := time.Now().Add(submitDeadline)
+	enters := 0
+	var lastEnter time.Time
+	for {
+		now := time.Now()
+		if now.After(deadline) {
+			return fmt.Errorf("tmux: pane %s: prompt was pasted but not submitted after %d Enters", pane, enters)
+		}
 		if enters >= submitTries {
-			return fmt.Errorf("tmux: pane %s still holds the prompt after %d Enters", pane, enters+1)
+			return fmt.Errorf("tmux: pane %s: prompt was pasted but still pending after %d Enters", pane, enters)
 		}
-		if _, err := t.call(ctx, "send-keys", "-t", pane, "Enter"); err != nil {
-			return fmt.Errorf("tmux: pane %s: %w", pane, err)
+		if enters == 0 || now.Sub(lastEnter) >= submitSettle {
+			if _, err := t.call(ctx, "send-keys", "-t", pane, "Enter"); err != nil {
+				return fmt.Errorf("tmux: pane %s: %w", pane, err)
+			}
+			enters++
+			lastEnter = now
 		}
-		enters++
+		shown, pending, err := t.promptShown(ctx, pane, needle)
+		if err != nil {
+			return err
+		}
+		if !shown || !pending {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(needlePoll):
+		}
 	}
 }
 
@@ -539,26 +668,27 @@ func inputNeedle(text string) string {
 	return string(runes)
 }
 
-// inputHolds reports whether needle is on the pane's cursor line. Only that
-// line counts: submitted text in the transcript above is not a pending prompt.
-func (t tmux) inputHolds(ctx context.Context, pane, needle string) (bool, error) {
+// promptShown reports whether needle is on the pane at all, which proves a paste
+// landed, and whether it is on the cursor's line, which is where a TUI echoes
+// input it has not submitted. The second answer is a hint, not a proof: a TUI
+// that hides the cursor reports a row unrelated to the input, so the caller
+// treats a needle gone from the whole pane as submitted too.
+func (t tmux) promptShown(ctx context.Context, pane, needle string) (shown, pending bool, err error) {
 	out, err := t.call(ctx, "display-message", "-p", "-t", pane, "#{cursor_y}")
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	row, err := strconv.Atoi(strings.TrimSpace(string(out)))
 	if err != nil {
-		return false, fmt.Errorf("tmux: pane %s reported cursor row %q", pane, out)
+		return false, false, fmt.Errorf("tmux: pane %s reported cursor row %q", pane, out)
 	}
 	screen, err := t.capture(ctx, pane)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	lines := strings.Split(screen, "\n")
-	if row < 0 || row >= len(lines) {
-		return false, nil
-	}
-	return strings.Contains(lines[row], needle), nil
+	pending = row >= 0 && row < len(lines) && strings.Contains(lines[row], needle)
+	return strings.Contains(screen, needle), pending, nil
 }
 
 func (t tmux) agentPane(ctx context.Context, name string) (string, error) {
@@ -573,15 +703,24 @@ func (t tmux) agentPane(ctx context.Context, name string) (string, error) {
 	return a.Pane, nil
 }
 
-// paste loads text into a private tmux buffer, pastes it bracketed, deletes the
-// buffer, then presses Enter.
-func (t tmux) paste(ctx context.Context, pane, text string) error {
+// pasteText loads text into a private tmux buffer, pastes it bracketed and
+// deletes the buffer, without pressing Enter.
+func (t tmux) pasteText(ctx context.Context, pane, text string) error {
 	buf := fmt.Sprintf("dungeon-%d-%d", os.Getpid(), pasteSeq.Add(1))
 	if _, err := t.run(ctx, []byte(text), "load-buffer", "-b", buf, "-"); err != nil {
 		return err
 	}
 	if _, err := t.call(ctx, "paste-buffer", "-p", "-d", "-b", buf, "-t", pane); err != nil {
 		_, _ = t.call(ctx, "delete-buffer", "-b", buf)
+		return err
+	}
+	return nil
+}
+
+// paste pastes text and presses Enter, for a caller that does not need to
+// confirm delivery itself.
+func (t tmux) paste(ctx context.Context, pane, text string) error {
+	if err := t.pasteText(ctx, pane, text); err != nil {
 		return err
 	}
 	_, err := t.call(ctx, "send-keys", "-t", pane, "Enter")
