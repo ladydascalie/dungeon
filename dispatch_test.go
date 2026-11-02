@@ -661,3 +661,85 @@ func TestNextLeavesAnUnknownLaneUntilItsReportLands(t *testing.T) {
 		t.Fatalf("unit %q, want done", got)
 	}
 }
+
+// A lane leaves its work in the worktree. Dungeon commits it on the lane
+// branch, names the unit, then runs the accept. The lane never commits.
+func TestDungeonCommitsLaneWorkOnTheLaneBranch(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	wt := worktreePath(repo, "enc", "w1")
+	if err := os.WriteFile(filepath.Join(wt, "NOTES.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan := strings.Replace(planFor(repo), "paths: [src/**]", "paths: [NOTES.md]", 1)
+	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--force", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "done: A") {
+		t.Fatalf("output:\n%s", stdout)
+	}
+	st, _ := LoadState(statePath)
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done: %s", got, st.Units["A"].Note)
+	}
+
+	subject, err := gitRun(repo, "log", "-1", "--format=%s", "enc/w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(subject, "A") {
+		t.Fatalf("commit message %q does not name the unit", subject)
+	}
+	files, err := gitRun(repo, "show", "--name-only", "--format=", "enc/w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(files, "NOTES.md") {
+		t.Fatalf("lane branch does not hold NOTES.md:\n%s", files)
+	}
+	if clean, _ := changedFiles(wt); len(clean) != 0 {
+		t.Fatalf("worktree still dirty after the commit: %v", clean)
+	}
+}
+
+// A change outside the unit's paths still blocks the unit and names the files.
+func TestAChangeOutsideThePathsStillBlocks(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	wt := worktreePath(repo, "enc", "w1")
+	if err := os.WriteFile(filepath.Join(wt, "elsewhere.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--force", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "blocked: A") {
+		t.Fatalf("output:\n%s", stdout)
+	}
+	st, _ := LoadState(statePath)
+	if got := st.Units["A"].Note; !strings.Contains(got, "outside your paths: elsewhere.txt") {
+		t.Fatalf("note %q", got)
+	}
+	if subject, _ := gitRun(repo, "log", "-1", "--format=%s", "enc/w1"); subject != "root" {
+		t.Fatalf("an outside change must not be committed, head %q", subject)
+	}
+}

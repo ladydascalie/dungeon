@@ -213,8 +213,8 @@ func briefText(d briefData) string {
 - Touch a file outside the paths above.
 - Edit the plan or the state file. They are not yours.
 - Claim work you did not do.
-- Leave work uncommitted. Commit on your branch, or there is nothing to land
-  and the unit stays blocked.
+- Commit. Leave the work in the worktree. Dungeon commits it on the lane
+  branch when the lane stops.
 
 Write the report to the path above. Keep it short: what changed, what you ran,
 what you did not do.
@@ -312,8 +312,8 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 		st.SetUnit(u.ID, "blocked", "settled with no report at "+report)
 		return "blocked"
 	}
-	// A lane that leaves work uncommitted leaves nothing to land, so the unit is
-	// not done no matter what its accept command says about the working tree.
+	// Dungeon commits the lane's work on the lane branch before the accept runs.
+	// A change outside the unit's paths still blocks the unit and names the files.
 	if blockedByWorktree(o, p, st, u, m) {
 		return "blocked"
 	}

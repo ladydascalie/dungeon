@@ -216,9 +216,26 @@ func changedFiles(dir string) ([]string, error) {
 	return files, nil
 }
 
-// blockedByWorktree is the honesty check on a lane that writes. Uncommitted work
-// in the paths it owns means nothing to land. A change outside those paths means
-// the split was not respected. Both block the unit and say which one happened.
+// commitLaneWork commits the named files on the branch the worktree has
+// checked out. The parent does this, not the lane: a lane leaves its work in
+// the worktree and never commits.
+func commitLaneWork(dir, message string, files []string) error {
+	args := append([]string{"add", "--"}, files...)
+	if _, err := gitRun(dir, args...); err != nil {
+		return err
+	}
+	if _, err := gitRun(dir, "commit", "-m", message, "--"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// blockedByWorktree is the honesty check on a lane that writes. Changes inside
+// the paths a writing unit owns are committed on the lane branch by dungeon, so
+// the lane does not have to break the rule that lanes never commit. A change
+// outside those paths means the split was not respected: it blocks and names
+// the files. A non-writing lane has no branch of its own, so its uncommitted
+// work still blocks.
 func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) bool {
 	files, err := changedFiles(minionDir(p, m))
 	if err != nil {
@@ -236,14 +253,21 @@ func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) bool
 		}
 	}
 	switch {
-	case len(mine) > 0:
-		st.SetUnit(u.ID, "blocked", "uncommitted work in "+truncate(strings.Join(mine, " "), 100)+
-			": commit it on your branch, then run dungeon next")
 	case len(outside) > 0:
 		st.SetUnit(u.ID, "blocked", "changed files outside your paths: "+
 			truncate(strings.Join(outside, " "), 100))
-	default:
+		return true
+	case len(mine) == 0:
 		return false
+	case !writes(m.Role):
+		st.SetUnit(u.ID, "blocked", "uncommitted work in "+truncate(strings.Join(mine, " "), 100))
+		return true
 	}
-	return true
+	message := "dungeon: commit lane work for unit " + u.ID
+	if err := commitLaneWork(minionDir(p, m), message, mine); err != nil {
+		st.SetUnit(u.ID, "blocked", "could not commit work in "+
+			truncate(strings.Join(mine, " "), 100)+": "+err.Error())
+		return true
+	}
+	return false
 }
