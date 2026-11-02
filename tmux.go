@@ -9,9 +9,11 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -1156,6 +1158,39 @@ func readRailOSC(server, pane string) (oscStatus, bool, error) {
 	return st, true, nil
 }
 
+// railLock serialises the rail work of one window. The lock lives in the file
+// system, not in this process, because the callers are separate dungeon
+// invocations: a key binding, a hook and a restart can all reach the same
+// window at once.
+func railLock(window string) (func(), error) {
+	name := strings.NewReplacer("@", "", "/", "-").Replace(window)
+	path := filepath.Join(os.TempDir(), "dungeon-rail-"+name+".lock")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("rail lock %s: %w", path, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			file.Close()
+			return nil, fmt.Errorf("rail lock %s: %w", path, err)
+		}
+		if time.Now().After(deadline) {
+			file.Close()
+			return nil, fmt.Errorf("rail lock %s: another dungeon still holds it", path)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		file.Close()
+	}, nil
+}
+
 // windowLayout reads one window's layout as tmux prints it. A layout it cannot
 // read is not fatal: the caller keeps the plain split it would have made.
 func (t tmux) windowLayout(ctx context.Context, window string) (windowLayout, error) {
@@ -1251,16 +1286,22 @@ func (t tmux) railRestart(ctx context.Context, target string, all bool, width in
 		if anchor == "" {
 			continue
 		}
+		unlock, err := railLock(p.window)
+		if err != nil {
+			return restarted, err
+		}
 		before, layoutErr := t.windowLayout(ctx, p.window)
 		if err := t.callNoOutput(ctx, "kill-pane", "-t", p.id); err != nil {
+			unlock()
 			return restarted, err
 		}
 		w := p.width
 		if w <= 0 {
 			w = width
 		}
-		rail, err := t.railToggle(ctx, anchor, w, command)
+		rail, err := t.railOpen(ctx, p.window, anchor, w, command)
 		if err != nil {
+			unlock()
 			return restarted, err
 		}
 		if layoutErr == nil {
@@ -1268,6 +1309,7 @@ func (t tmux) railRestart(ctx context.Context, target string, all bool, width in
 				_ = t.applyLayout(ctx, p.window, exact)
 			}
 		}
+		unlock()
 		restarted = append(restarted, rail)
 	}
 	if !all && found == 0 {
@@ -1291,6 +1333,18 @@ func (t tmux) railToggle(ctx context.Context, target string, width int, command 
 	if win == "" {
 		return "", fmt.Errorf("tmux: pane %s has no window", target)
 	}
+	// Two toggles racing between the lookup and the split would each find no
+	// rail and put one in, which is how a window ends up with two rails.
+	unlock, err := railLock(win)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	return t.railOpen(ctx, win, target, width, command)
+}
+
+// railOpen is the rail work for one window, with the window lock already held.
+func (t tmux) railOpen(ctx context.Context, win, target string, width int, command string) (string, error) {
 	const delim = "\x1f"
 	out, err := t.call(ctx, "list-panes", "-t", win, "-F",
 		"#{pane_id}"+delim+"#{@agent_rail}"+delim+"#{pane_left}")

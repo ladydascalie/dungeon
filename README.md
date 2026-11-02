@@ -471,6 +471,10 @@ group keeps its header with a `▸` mark and its pane count, and `z` again, or
 `enter` on the header, unfolds it. Folds survive a refresh, and a number jump
 unfolds the groups that hide its pane.
 
+`rail toggle` and `rail restart` hold a lock per window, in `$TMPDIR`, so a
+key binding, a hook and a restart that reach the same window at once cannot
+leave two rails in it.
+
 The rail is declared into the window's layout, not split into it. A split takes
 its columns from the pane beside it, so that pane shrinks and every other pane
 keeps its width; opening the rail scales every pane in the window by the same

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1292,5 +1294,82 @@ func TestRailRestartKeepsEveryWidth(t *testing.T) {
 	}
 	if got := after[restarted[0]]; got != before[rail] {
 		t.Fatalf("the new rail is %d wide, the old one was %d", got, before[rail])
+	}
+}
+
+func TestRailLockSerialisesTwoCallers(t *testing.T) {
+	window := fmt.Sprintf("@locktest-%d", time.Now().UnixNano())
+	var inside, peak int32
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			unlock, err := railLock(window)
+			if err != nil {
+				t.Errorf("railLock: %v", err)
+				return
+			}
+			held := atomic.AddInt32(&inside, 1)
+			for {
+				seen := atomic.LoadInt32(&peak)
+				if held <= seen || atomic.CompareAndSwapInt32(&peak, seen, held) {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			atomic.AddInt32(&inside, -1)
+			unlock()
+		}()
+	}
+	wg.Wait()
+	if peak != 1 {
+		t.Fatalf("%d callers held the window lock at once, want 1", peak)
+	}
+}
+
+func TestRailToggleTwiceAtOnceLeavesOneRail(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, tab, root, err := h.CreateWorkspace(ctx, "railrace", "workers", dir)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	right, err := h.SplitPane(ctx, root, "right", dir, 0.5)
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	ids := make([]string, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ids[i], errs[i] = h.railToggle(ctx, right, 20, "sleep 60")
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("railToggle %d: %v", i, err)
+		}
+	}
+	if ids[0] != ids[1] {
+		t.Fatalf("two toggles made %s and %s, want the same rail", ids[0], ids[1])
+	}
+	out, err := h.call(ctx, "list-panes", "-t", tab, "-F", "#{pane_id}\x1f#{@agent_rail}")
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	rails := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasSuffix(line, "\x1f1") {
+			rails++
+		}
+	}
+	if rails != 1 {
+		t.Fatalf("%d rails in the window, want 1:\n%s", rails, out)
 	}
 }
