@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -196,24 +197,36 @@ func ownedBy(patterns []string, file string) bool {
 	return false
 }
 
-// changedFiles lists what git sees as changed in dir.
+// changedFiles lists what git sees as changed in dir. It reads porcelain with
+// -z and parses the NUL entries itself: a leading space is the index status of
+// a modified file, so trimming the output loses a byte and corrupts the path.
 func changedFiles(dir string) ([]string, error) {
-	out, err := gitRun(dir, "status", "--porcelain")
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain", "-z")
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("git status --porcelain -z in %s: %w", dir, err)
 	}
+	return parsePorcelainZ(out), nil
+}
+
+// parsePorcelainZ reads the NUL-separated entries of git status --porcelain -z.
+// Each entry is "XY path"; a rename or copy carries its source as the next
+// entry, so the destination is kept and the source skipped.
+func parsePorcelainZ(out []byte) []string {
+	entries := strings.Split(string(out), "\x00")
 	var files []string
-	for _, line := range strings.Split(out, "\n") {
-		if len(line) < 4 {
-			continue
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
+			continue // end of output, or not a status entry
 		}
-		path := strings.TrimSpace(line[3:])
-		if i := strings.LastIndex(path, " -> "); i >= 0 {
-			path = path[i+4:] // a rename reports both ends; the new one is the file
+		status, path := entry[:2], entry[3:]
+		if strings.ContainsAny(status, "RC") {
+			i++ // the source of a rename or copy follows as its own entry
 		}
-		files = append(files, strings.Trim(path, `"`))
+		files = append(files, path)
 	}
-	return files, nil
+	return files
 }
 
 // commitLaneWork commits the named files on the branch the worktree has
