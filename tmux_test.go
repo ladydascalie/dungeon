@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -989,13 +990,21 @@ func TestTmuxFocusAcrossSessionsWithNoClientAttached(t *testing.T) {
 // lands in the terminal long before the TUI shows it.
 func fakeSlowAgent(t *testing.T, out string, render time.Duration) {
 	t.Helper()
+	fakeSlowAgentAfter(t, out, time.Second, render)
+}
+
+// fakeSlowAgentAfter is fakeSlowAgent with a chosen boot delay. The agent
+// ignores every Enter until boot has passed, so a test that checks a wrapped
+// paste picks a boot short enough to be over before Prompt runs.
+func fakeSlowAgentAfter(t *testing.T, out string, boot, render time.Duration) {
+	t.Helper()
 	bin, err := os.Executable()
 	if err != nil {
 		t.Fatalf("test binary path: %v", err)
 	}
 	body := "DUNGEON_FAKE_AGENT_OUT=" + shellQuote(out) + "\n" +
 		"export DUNGEON_FAKE_AGENT_OUT\n" +
-		"DUNGEON_FAKE_AGENT_DELAY=1s\n" +
+		"DUNGEON_FAKE_AGENT_DELAY=" + shellQuote(boot.String()) + "\n" +
 		"export DUNGEON_FAKE_AGENT_DELAY\n" +
 		"DUNGEON_FAKE_AGENT_RENDER=" + shellQuote(render.String()) + "\n" +
 		"export DUNGEON_FAKE_AGENT_RENDER\n" +
@@ -1148,6 +1157,89 @@ func runFakeAgent(out string, boot, render time.Duration) error {
 	}
 }
 
+// TestNeedleAtCursor proves the anchored match without tmux. The pasted tail
+// sits under the cursor, so only the cursor's row or the row above joined to it
+// can hold a landed paste, and the match must end on the cursor's row. Two
+// unrelated rows spelling the needle are not input, and neither is a needle that
+// ends above the cursor.
+func TestNeedleAtCursor(t *testing.T) {
+	const needle = "0123456789abcdef"
+	tests := []struct {
+		name   string
+		screen string
+		row    int
+		want   bool
+	}{
+		{
+			name:   "wholly on the cursor row",
+			screen: "shell prompt\n0123456789abcdef tail\n$ ",
+			row:    1,
+			want:   true,
+		},
+		{
+			name:   "split across the row above and the cursor row",
+			screen: "row one 0123456\n789abcdef tail\n$ ",
+			row:    1,
+			want:   true,
+		},
+		{
+			name:   "two adjacent rows spelling the needle with the cursor elsewhere",
+			screen: "landing on row one 0123456\n789abcdef tail row two\n$ ",
+			row:    2,
+			want:   false,
+		},
+		{
+			name:   "two adjacent rows spelling the needle and the cursor on the row above",
+			screen: "landing on row one 0123456\n789abcdef tail row two\n$ ",
+			row:    0,
+			want:   false,
+		},
+		{
+			name:   "needle absent",
+			screen: "nothing was pasted here\n$ ",
+			row:    1,
+			want:   false,
+		},
+		{
+			name:   "split but ending above the cursor",
+			screen: "row one 0123456\n789abcdef tail\nnext row\n$ ",
+			row:    2,
+			want:   false,
+		},
+		{
+			name:   "wholly on the row above the cursor",
+			screen: "0123456789abcdef\n$ ",
+			row:    1,
+			want:   false,
+		},
+		{
+			name:   "split ending exactly at the boundary with the row above",
+			screen: "xx0123456789abcdef\n$ ",
+			row:    1,
+			want:   false,
+		},
+		{
+			name:   "begins on the cursor row and would only end on the row below",
+			screen: "row one 0123456\n789abcdef tail\n$ ",
+			row:    0,
+			want:   false,
+		},
+		{
+			name:   "cursor row outside the screen",
+			screen: "0123456789abcdef\n$ ",
+			row:    7,
+			want:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := needleAtCursor(tt.screen, tt.row, needle); got != tt.want {
+				t.Fatalf("needleAtCursor(%q, %d, %q) = %v, want %v", tt.screen, tt.row, needle, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
 	h := tmuxTest(t)
 	ctx := context.Background()
@@ -1218,6 +1310,60 @@ func TestTmuxPromptPastesOnceAndWaitsForASlowRender(t *testing.T) {
 	screen := mustCapture(t, h, root)
 	if count := strings.Count(screen, text); count != 1 {
 		t.Fatalf("pane shows the prompt %d times, want exactly 1:\n%s", count, screen)
+	}
+}
+
+// TestTmuxPromptConfirmsAWrappedPaste is the wrap case. The pasted line is one
+// pane width plus six columns, so the terminal wraps it six columns into the
+// needle's sixteen characters: the needle straddles two rows and is never
+// contiguous on the raw screen. Prompt must still confirm the paste as input and
+// submit it. The boot delay is short so Prompt is pasting into a settled agent.
+func TestTmuxPromptConfirmsAWrappedPaste(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "prompt.txt")
+	fakeSlowAgentAfter(t, out, 100*time.Millisecond, 0)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	widthOut, err := h.call(ctx, "display-message", "-p", "-t", root, "#{pane_width}")
+	if err != nil {
+		t.Fatalf("pane width: %v", err)
+	}
+	width, err := strconv.Atoi(strings.TrimSpace(string(widthOut)))
+	if err != nil {
+		t.Fatalf("pane width %q: %v", widthOut, err)
+	}
+	// Six columns on the last row: the needle's first ten characters end row
+	// one and its last six start row two.
+	text := strings.Repeat("a", width+6-len("0123456789abcdef")) + "0123456789abcdef"
+	needle := inputNeedle(text)
+	if err := h.Prompt(ctx, name, text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	screen := mustCapture(t, h, root)
+	if strings.Contains(screen, needle) {
+		t.Fatalf("the raw screen holds the needle %q, so the paste did not wrap:\n%s", needle, screen)
+	}
+	if !strings.Contains(strings.ReplaceAll(screen, "\n", ""), needle) {
+		t.Fatalf("the pane never showed the wrapped needle %q:\n%s", needle, screen)
+	}
+	waitForFile(t, out)
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read fake agent output: %v", err)
+	}
+	want := text + "\nsubmitted\n"
+	if string(got) != want {
+		t.Fatalf("fake agent received %q, want %q", got, want)
 	}
 }
 
