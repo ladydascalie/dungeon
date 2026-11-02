@@ -115,7 +115,7 @@ func TestRailViewShowsTheAgents(t *testing.T) {
 		height: 10,
 	}
 	out := m.View()
-	for _, want := range []string{"PANES", "w1-qg", "fleet:0.0", "r1-qg", "fleet:1.0", "\ueefa working", "fleet-view", "─", "j/k  enter  r  q"} {
+	for _, want := range []string{"PANES", "w1-qg", "fleet:0.0", "r1-qg", "fleet:1.0", "\ueefa working", "fleet-view", "─", "j/k  enter  z fold  r  q"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -783,5 +783,149 @@ func TestRailScrollsByOneTileNotAScreen(t *testing.T) {
 	}
 	if m.scroll > len(lay.lines)-m.railBody() {
 		t.Fatalf("scroll %d is past the end of %d lines", m.scroll, len(lay.lines))
+	}
+}
+
+func railFoldFixture() railModel {
+	return railModel{
+		agents: []railPaneInfo{
+			{Label: "w1", Kind: "pi", Pane: "%1", Session: "fleet", Encounter: "fleet-view"},
+			{Label: "w2", Kind: "pi", Pane: "%2", Session: "fleet", Encounter: "fleet-view"},
+			{Label: "r1", Kind: "pi", Pane: "%3", Session: "fleet", Encounter: "review-fleet"},
+			{Label: "idle", Kind: "pi", Pane: "%4", Session: "fleet"},
+			{Label: "w9", Kind: "pi", Pane: "%5", Session: "own-stack", Encounter: "rail-events"},
+		},
+		width: 40, height: 30,
+	}
+}
+
+func TestRailFoldsTheEncounterUnderTheCursor(t *testing.T) {
+	m := railFoldFixture()
+	m.key("z")
+	want := railEncounterGroup("fleet", "fleet-view")
+	if !m.folded[want] {
+		t.Fatalf("z did not fold the encounter: %+v", m.folded)
+	}
+	if m.onGroup != want {
+		t.Fatalf("cursor %q, want the folded header", m.onGroup)
+	}
+	joined := strings.Join(m.layout().lines, "\n")
+	if strings.Contains(joined, "w1") || strings.Contains(joined, "w2") {
+		t.Fatalf("the folded panes are still drawn:\n%s", joined)
+	}
+	if !strings.Contains(joined, "fleet-view (2)") {
+		t.Fatalf("the folded header lost its count:\n%s", joined)
+	}
+	for _, keep := range []string{"r1", "idle", "w9"} {
+		if !strings.Contains(joined, keep) {
+			t.Fatalf("folding hid %q:\n%s", keep, joined)
+		}
+	}
+}
+
+func TestRailFoldsTheWholeSession(t *testing.T) {
+	m := railFoldFixture()
+	m.key("Z")
+	if !m.folded[railSessionGroup("fleet")] {
+		t.Fatalf("Z did not fold the session: %+v", m.folded)
+	}
+	joined := strings.Join(m.layout().lines, "\n")
+	if strings.Contains(joined, "r1") || strings.Contains(joined, "idle") {
+		t.Fatalf("the session's panes are still drawn:\n%s", joined)
+	}
+	if !strings.Contains(joined, "fleet (4)") {
+		t.Fatalf("the folded session header lost its count:\n%s", joined)
+	}
+	if !strings.Contains(joined, "w9") {
+		t.Fatalf("folding one session hid another:\n%s", joined)
+	}
+}
+
+func TestRailUnfoldsFromTheFoldedHeader(t *testing.T) {
+	m := railFoldFixture()
+	m.key("z")
+	m.key("z")
+	want := railEncounterGroup("fleet", "fleet-view")
+	if m.folded[want] {
+		t.Fatalf("a second z did not unfold: %+v", m.folded)
+	}
+	if m.onGroup != want {
+		t.Fatalf("the cursor left the header: %q", m.onGroup)
+	}
+	if !strings.Contains(strings.Join(m.layout().lines, "\n"), "w1") {
+		t.Fatal("the unfolded panes are still hidden")
+	}
+}
+
+func TestRailWalksHeadersWithTheKeyboard(t *testing.T) {
+	m := railFoldFixture()
+	m.key("k")
+	if m.onGroup != railEncounterGroup("fleet", "fleet-view") {
+		t.Fatalf("k from the first tile landed on %q, want the encounter header", m.onGroup)
+	}
+	if p := m.selectedPane(); p != "" {
+		t.Fatalf("a header selected pane %q", p)
+	}
+	m.key("k")
+	if m.onGroup != railSessionGroup("fleet") {
+		t.Fatalf("k from the encounter header landed on %q, want the session header", m.onGroup)
+	}
+	m.key("j")
+	m.key("j")
+	if m.onGroup != "" || m.cursor != 0 {
+		t.Fatalf("j back down landed on group %q pane %d", m.onGroup, m.cursor)
+	}
+}
+
+func TestRailClickOnAHeaderSelectsItAndFocusesNothing(t *testing.T) {
+	m := railFoldFixture()
+	line := -1
+	for i, group := range m.layout().lineGroup {
+		if group == railSessionGroup("own-stack") {
+			line = i
+			break
+		}
+	}
+	if line < 0 {
+		t.Fatal("no session header for own-stack")
+	}
+	next, cmd := m.Update(tea.MouseMsg{
+		X: 2, Y: line + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,
+	})
+	got := next.(railModel)
+	if got.onGroup != railSessionGroup("own-stack") {
+		t.Fatalf("the click selected %q, want the own-stack header", got.onGroup)
+	}
+	if cmd != nil {
+		t.Fatal("a header click must not focus a pane")
+	}
+}
+
+func TestRailKeepsFoldsAcrossARefresh(t *testing.T) {
+	m := railFoldFixture()
+	m.key("z")
+	want := railEncounterGroup("fleet", "fleet-view")
+	next, _ := m.Update(railSnapshotMsg{read: railRead{agents: m.agents}, at: time.Now()})
+	got := next.(railModel)
+	if !got.folded[want] {
+		t.Fatalf("a refresh unfolded the group: %+v", got.folded)
+	}
+	if got.onGroup != want {
+		t.Fatalf("a refresh moved the cursor to %q", got.onGroup)
+	}
+}
+
+func TestRailJumpUnfoldsTheTargetPane(t *testing.T) {
+	m := railFoldFixture()
+	m.key("Z")
+	if !m.folded[railSessionGroup("fleet")] {
+		t.Fatalf("Z did not fold the session: %+v", m.folded)
+	}
+	m.key("2")
+	if m.folded[railSessionGroup("fleet")] {
+		t.Fatal("the number jump left the session folded")
+	}
+	if m.onGroup != "" || m.cursor != 1 {
+		t.Fatalf("the jump selected group %q pane %d, want pane 1", m.onGroup, m.cursor)
 	}
 }

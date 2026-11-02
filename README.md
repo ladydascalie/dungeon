@@ -446,10 +446,11 @@ tmux cannot.
 
 `dungeon rail toggle` opens a pane on the left of the current window running
 `dungeon rail`. The rail lists every live pane except itself, including dungeon
-lanes in detached sessions that herdr cannot see. `j`/`k` move, `enter`
-switches to the pane, `1` to `9` jump, `r` reloads, and `q` closes the rail.
-A click on a tile switches to that pane too, and the mouse wheel moves the
-selection. Agent panes get their own icon and kind; plain terminals appear as
+lanes in detached sessions that herdr cannot see. `j`/`k` move row by row,
+headers included, `enter` switches to the pane and folds a header, `1` to `9`
+jump, `r` reloads, and `q` closes the rail. A click on a tile switches to that
+pane too, a click on a header selects it, and the mouse wheel moves the
+selection. The window holds its place while the selection stays inside it. Agent panes get their own icon and kind; plain terminals appear as
 `zsh`, `bash`, or whatever shell is in front. The rail sees a dungeon lane by
 its `@dungeon_agent` option, a known agent command, or an OSC report that names
 the app; it does not walk the process tree. A title alone is not proof: a stale
@@ -461,6 +462,11 @@ session, and names each group with a header. Panes no encounter owns follow
 their session under a `no encounter` header; a session that hosts no encounter
 is one group and needs no header. An encounter named after its session is the
 same header twice, so it is not printed again.
+
+`z` folds the group under the cursor, `Z` folds the whole session. A folded
+group keeps its header with a `▸` mark and its pane count, and `z` again, or
+`enter` on the header, unfolds it. Folds survive a refresh, and a number jump
+unfolds the groups that hide its pane.
 
 When a pane's worktree belongs to an encounter, the rail reads that encounter's
 state and shows the unit and its status beside the agent. A lane in a worktree

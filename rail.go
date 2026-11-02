@@ -244,6 +244,8 @@ type railModel struct {
 	agents     []railPaneInfo
 	cursor     int
 	scroll     int
+	onGroup    string
+	folded     map[string]bool
 	lastActive string
 	notice     string
 	err        error
@@ -425,6 +427,7 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case railSnapshotMsg:
 		keep := m.selectedPane()
+		keepGroup := m.onGroup
 		m.err = msg.err
 		if msg.err == nil {
 			m.readAt = msg.at
@@ -453,6 +456,7 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+			m.onGroup = keepGroup
 			m.clampCursor()
 		} else {
 			m.readErr = msg.err
@@ -484,22 +488,35 @@ func (m *railModel) key(key string) tea.Cmd {
 	case "esc":
 		return nil
 	case "j", "down":
-		m.cursor++
+		m.move(1)
 	case "k", "up":
-		m.cursor--
+		m.move(-1)
 	case "g", "home":
-		m.cursor = 0
+		m.move(-len(m.layout().rows()))
 	case "G", "end":
-		m.cursor = len(m.agents) - 1
+		m.move(len(m.layout().rows()))
+	case "z":
+		m.toggleFold(m.foldTarget())
+	case "Z":
+		m.toggleFold(m.sessionTarget())
 	case "r":
 		return m.refresh()
 	case "enter":
+		if m.onGroup != "" {
+			m.toggleFold(m.onGroup)
+			m.clampCursor()
+			return nil
+		}
 		if p := m.selectedPane(); p != "" {
 			return m.focusCmd(p)
 		}
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		idx := int(key[0] - '1')
 		if idx < len(m.agents) {
+			m.onGroup = ""
+			m.cursor = idx
+			m.unfoldTo(idx)
+			m.clampCursor()
 			m.notice = "focused " + m.agents[idx].Label
 			return m.focusCmd(m.agents[idx].Pane)
 		}
@@ -511,30 +528,51 @@ func (m *railModel) key(key string) tea.Cmd {
 func (m *railModel) mouse(msg tea.MouseMsg) tea.Cmd {
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
-		m.cursor--
+		m.move(-1)
 	case tea.MouseButtonWheelDown:
-		m.cursor++
+		m.move(1)
 	case tea.MouseButtonLeft:
 		if msg.Action != tea.MouseActionPress {
 			return nil
 		}
-		if idx, ok := m.tileAt(msg.Y); ok {
-			m.cursor = idx
+		row, ok := m.rowAt(msg.Y)
+		if !ok {
 			m.clampCursor()
-			return m.focusCmd(m.agents[idx].Pane)
+			return nil
 		}
+		m.selectRow(row)
+		m.clampCursor()
+		if row.group != "" {
+			return nil
+		}
+		return m.focusCmd(m.agents[row.pane].Pane)
 	}
 	m.clampCursor()
 	return nil
 }
 
 // railGroup is one block of the rail: an encounter inside a session, or the
-// panes a session has that no encounter owns.
+// panes a session has that no encounter owns. Its id is the fold key. An
+// encounter that shares its session's name folds as the session, because its
+// header would be the session header twice.
 type railGroup struct {
+	id        string
 	session   string
 	encounter string
 	unscoped  bool
 	panes     []int
+}
+
+func railSessionGroup(session string) string {
+	return "session:" + session
+}
+
+func railEncounterGroup(session, encounter string) string {
+	return "encounter:" + session + "/" + encounter
+}
+
+func railLooseGroup(session string) string {
+	return "loose:" + session
 }
 
 // railGroups orders the panes for display: sessions in the order tmux lists
@@ -567,55 +605,125 @@ func railGroups(agents []railPaneInfo) []railGroup {
 			byEncounter[encounter] = append(byEncounter[encounter], i)
 		}
 		for _, encounter := range encounters {
-			out = append(out, railGroup{session: session, encounter: encounter, panes: byEncounter[encounter]})
+			id := railEncounterGroup(session, encounter)
+			if encounter == session {
+				id = railSessionGroup(session)
+			}
+			out = append(out, railGroup{id: id, session: session, encounter: encounter, panes: byEncounter[encounter]})
 		}
 		if len(loose) > 0 {
-			out = append(out, railGroup{session: session, unscoped: len(encounters) > 0, panes: loose})
+			id := railSessionGroup(session)
+			if len(encounters) > 0 {
+				id = railLooseGroup(session)
+			}
+			out = append(out, railGroup{id: id, session: session, unscoped: len(encounters) > 0, panes: loose})
 		}
 	}
 	return out
 }
 
-// railLayout is the whole body of the rail, plus the pane each line belongs to,
-// or -1 for a header or a rule. Scrolling and clicks both read it, so a header
-// can never shift a click onto the wrong pane.
-type railLayout struct {
-	lines    []string
-	linePane []int
+// railRow is one selectable line group: a header, or a pane tile.
+type railRow struct {
+	group string
+	pane  int
 }
 
-func (l *railLayout) add(line string, pane int) {
+// railLayout is the whole body of the rail, plus the pane or fold group each
+// line belongs to. Scrolling, clicks and folds all read it, so a header can
+// never shift a click onto the wrong pane.
+type railLayout struct {
+	lines     []string
+	linePane  []int
+	lineGroup []string
+	groups    map[string]railGroup
+	parent    map[string]string
+}
+
+func (l *railLayout) add(line string, pane int, group string) {
 	l.lines = append(l.lines, line)
 	l.linePane = append(l.linePane, pane)
+	l.lineGroup = append(l.lineGroup, group)
+}
+
+// rows lists the selectable lines in order: a header once, and the top line of
+// each pane tile.
+func (l railLayout) rows() []railRow {
+	var out []railRow
+	for i := range l.lines {
+		switch {
+		case l.lineGroup[i] != "":
+			out = append(out, railRow{group: l.lineGroup[i], pane: -1})
+		case l.linePane[i] >= 0 && (i == 0 || l.linePane[i-1] != l.linePane[i]):
+			out = append(out, railRow{pane: l.linePane[i]})
+		}
+	}
+	return out
+}
+
+// groupHeader names a group. A folded group keeps its header and says how many
+// panes it hides, so the fold is always reversible from the line it collapsed.
+func (m railModel) groupHeader(id, name string, count, width int, indent string) string {
+	mark := "\u25be "
+	text := indent + mark + name
+	if m.folded[id] {
+		mark = "\u25b8 "
+		text = fmt.Sprintf("%s%s%s (%d)", indent, mark, name, count)
+	}
+	if m.onGroup == id {
+		return railSelectedStyle.Render(pad(truncate(text, width), width))
+	}
+	if indent != "" {
+		return dimStyle.Render(truncate(text, width))
+	}
+	return boldStyle.Render(truncate(text, width))
 }
 
 func (m railModel) layout() railLayout {
 	width := max(10, m.width)
-	rule := ruleStyle.Render(strings.Repeat("─", width))
-	var lay railLayout
+	rule := ruleStyle.Render(strings.Repeat("\u2500", width))
+	groups := railGroups(m.agents)
+	counts := map[string]int{}
+	sessionCounts := map[string]int{}
+	for _, g := range groups {
+		counts[g.id] += len(g.panes)
+		sessionCounts[g.session] += len(g.panes)
+	}
+	lay := railLayout{groups: map[string]railGroup{}, parent: map[string]string{}}
 	session := ""
-	firstGroup := true
-	for _, g := range railGroups(m.agents) {
-		if !firstGroup {
-			lay.add(rule, -1)
-		}
-		firstGroup = false
-		if g.session != session && g.session != "" {
-			lay.add(boldStyle.Render(truncate(g.session, width)), -1)
+	sessionFolded := false
+	for _, g := range groups {
+		sessionID := railSessionGroup(g.session)
+		lay.groups[g.id] = g
+		lay.parent[g.id] = sessionID
+		if g.session != session {
 			session = g.session
+			if len(lay.lines) > 0 {
+				lay.add(rule, -1, "")
+			}
+			sessionFolded = m.folded[sessionID]
+			lay.groups[sessionID] = railGroup{id: sessionID, session: g.session}
+			lay.add(m.groupHeader(sessionID, g.session, sessionCounts[g.session], width, ""), -1, sessionID)
+		}
+		if sessionFolded {
+			continue
 		}
 		switch {
-		case g.encounter != "" && g.encounter != g.session:
-			lay.add(dimStyle.Render(truncate("  "+g.encounter, width)), -1)
+		case g.encounter != "" && g.id != sessionID:
+			lay.add(rule, -1, "")
+			lay.add(m.groupHeader(g.id, g.encounter, counts[g.id], width, "  "), -1, g.id)
 		case g.unscoped:
-			lay.add(dimStyle.Render(truncate("  no encounter", width)), -1)
+			lay.add(rule, -1, "")
+			lay.add(m.groupHeader(g.id, "no encounter", counts[g.id], width, "  "), -1, g.id)
+		}
+		if m.folded[g.id] {
+			continue
 		}
 		for i, idx := range g.panes {
 			if i > 0 {
-				lay.add(rule, -1)
+				lay.add(rule, -1, "")
 			}
-			for _, line := range m.rowLines(m.agents[idx], width, idx == m.cursor) {
-				lay.add(line, idx)
+			for _, line := range m.rowLines(m.agents[idx], width, idx == m.cursor && m.onGroup == "") {
+				lay.add(line, idx, "")
 			}
 		}
 	}
@@ -628,22 +736,35 @@ func (m railModel) railBody() int {
 	return max(1, m.height-3)
 }
 
+// selectionLine is the first line of whatever the cursor is on, or -1 when the
+// selection is off screen.
+func (m railModel) selectionLine(lay railLayout) int {
+	if m.onGroup != "" {
+		for i, group := range lay.lineGroup {
+			if group == m.onGroup {
+				return i
+			}
+		}
+		return -1
+	}
+	for i, pane := range lay.linePane {
+		if pane == m.cursor {
+			return i
+		}
+	}
+	return -1
+}
+
 // window picks the first body line to show. The rail holds its place while the
 // cursor moves inside the window, and scrolls by the smallest step that brings
-// the selected pane back into view, so one j moves one tile, not a screen.
+// the selection back into view, so one j moves one row, not a screen.
 func (m railModel) window(lay railLayout) int {
 	body := m.railBody()
 	if len(lay.lines) <= body {
 		return 0
 	}
 	start := m.scroll
-	top := -1
-	for i, pane := range lay.linePane {
-		if pane == m.cursor {
-			top = i
-			break
-		}
-	}
+	top := m.selectionLine(lay)
 	switch {
 	case top < 0:
 	case top < start:
@@ -660,21 +781,139 @@ func (m railModel) window(lay railLayout) int {
 	return start
 }
 
-func (m railModel) tileAt(y int) (int, bool) {
+// rowAt maps a screen line to the row under it, headers included.
+func (m railModel) rowAt(y int) (railRow, bool) {
 	rel := y - 2
 	if rel < 0 {
-		return 0, false
+		return railRow{}, false
 	}
 	lay := m.layout()
 	line := m.window(lay) + rel
 	if line < 0 || line >= len(lay.lines) {
-		return 0, false
+		return railRow{}, false
 	}
-	idx := lay.linePane[line]
-	if idx < 0 {
-		return 0, false
+	if group := lay.lineGroup[line]; group != "" {
+		return railRow{group: group, pane: -1}, true
 	}
-	return idx, true
+	if pane := lay.linePane[line]; pane >= 0 {
+		return railRow{pane: pane}, true
+	}
+	return railRow{}, false
+}
+
+func (m railModel) rowIndex(rows []railRow) int {
+	for i, row := range rows {
+		if m.onGroup != "" {
+			if row.group == m.onGroup {
+				return i
+			}
+			continue
+		}
+		if row.group == "" && row.pane == m.cursor {
+			return i
+		}
+	}
+	return -1
+}
+
+func (m *railModel) selectRow(row railRow) {
+	if row.group != "" {
+		m.onGroup = row.group
+		return
+	}
+	m.onGroup = ""
+	m.cursor = row.pane
+}
+
+// move walks the selectable rows, headers included, so a folded header is one
+// step away and never skipped.
+func (m *railModel) move(delta int) {
+	rows := m.layout().rows()
+	if len(rows) == 0 {
+		return
+	}
+	i := m.rowIndex(rows)
+	switch {
+	case i < 0:
+		i = 0
+	case i+delta < 0:
+		i = 0
+	case i+delta >= len(rows):
+		i = len(rows) - 1
+	default:
+		i += delta
+	}
+	m.selectRow(rows[i])
+}
+
+// foldTarget is the group z folds: the encounter under the cursor, or its
+// session when the pane has no encounter of its own.
+func (m railModel) foldTarget() string {
+	if m.onGroup != "" {
+		return m.onGroup
+	}
+	if m.cursor < 0 || m.cursor >= len(m.agents) {
+		return ""
+	}
+	a := m.agents[m.cursor]
+	if a.Encounter != "" && a.Encounter != a.Session {
+		return railEncounterGroup(a.Session, a.Encounter)
+	}
+	if a.Encounter == "" {
+		for _, g := range railGroups(m.agents) {
+			if g.id == railLooseGroup(a.Session) {
+				return g.id
+			}
+		}
+	}
+	return railSessionGroup(a.Session)
+}
+
+// sessionTarget is the session Z folds, from a header or from a pane.
+func (m railModel) sessionTarget() string {
+	if m.onGroup != "" {
+		if parent := m.layout().parent[m.onGroup]; parent != "" {
+			return parent
+		}
+		if strings.HasPrefix(m.onGroup, "session:") {
+			return m.onGroup
+		}
+		return ""
+	}
+	if m.cursor < 0 || m.cursor >= len(m.agents) {
+		return ""
+	}
+	return railSessionGroup(m.agents[m.cursor].Session)
+}
+
+func (m *railModel) toggleFold(id string) {
+	if id == "" {
+		return
+	}
+	if m.folded == nil {
+		m.folded = map[string]bool{}
+	}
+	if m.folded[id] {
+		delete(m.folded, id)
+	} else {
+		m.folded[id] = true
+	}
+	m.onGroup = id
+}
+
+// unfoldTo opens the groups that hide a pane, before the rail jumps to it.
+func (m *railModel) unfoldTo(idx int) {
+	if m.folded == nil || idx < 0 || idx >= len(m.agents) {
+		return
+	}
+	a := m.agents[idx]
+	delete(m.folded, railSessionGroup(a.Session))
+	if a.Encounter != "" && a.Encounter != a.Session {
+		delete(m.folded, railEncounterGroup(a.Session, a.Encounter))
+	}
+	if a.Encounter == "" {
+		delete(m.folded, railLooseGroup(a.Session))
+	}
 }
 
 func (m *railModel) clampCursor() {
@@ -684,10 +923,19 @@ func (m *railModel) clampCursor() {
 	if n := len(m.agents); n > 0 && m.cursor >= n {
 		m.cursor = n - 1
 	}
-	m.scroll = m.window(m.layout())
+	lay := m.layout()
+	if m.onGroup != "" {
+		if _, ok := lay.groups[m.onGroup]; !ok {
+			m.onGroup = ""
+		}
+	}
+	m.scroll = m.window(lay)
 }
 
 func (m railModel) selectedPane() string {
+	if m.onGroup != "" {
+		return ""
+	}
 	it, ok := m.selectedAgent()
 	if !ok {
 		return ""
@@ -924,7 +1172,7 @@ func (m railModel) render() string {
 	for len(lines) < height-1 {
 		lines = append(lines, "")
 	}
-	keys := "j/k  enter  r  q"
+	keys := "j/k  enter  z fold  r  q"
 	switch {
 	case m.notice != "":
 		keys = m.notice
