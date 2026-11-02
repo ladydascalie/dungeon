@@ -262,6 +262,45 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 	if agents := probeAgents(t.Context(), ""); agents != nil {
 		t.Fatalf("a read-only probe with no mux should see nothing, got %v", agents)
 	}
+
+	// status is read-only, so it is the command an operator points at the other
+	// backend. Its --mux flag must reach the fleet probe and beat the
+	// environment, and with no flag the environment must still decide.
+	path := writePlan(t, goodPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	fakeHerdr(t, "w1:working\n")
+	t.Setenv("HERDR_ENV", "")
+	// The socket path is bogus, so a regression that fell through to tmux
+	// cannot reach the operator's own server.
+	t.Setenv("TMUX", "/nonexistent-dungeon-test,1,0")
+
+	statusAgent := func(args ...string) string {
+		t.Helper()
+		code, stdout, stderr := runCLI(append([]string{"status", "--json",
+			"--plan", path, "--state", state}, args...)...)
+		if code != 0 {
+			t.Fatalf("status %v exit %d: %s", args, code, stderr)
+		}
+		var snap Snapshot
+		if err := json.Unmarshal([]byte(stdout), &snap); err != nil {
+			t.Fatalf("status %v is not JSON: %v", args, err)
+		}
+		for _, u := range snap.Units {
+			if u.ID == "api-timeout" {
+				return u.Agent
+			}
+		}
+		t.Fatalf("status %v has no api-timeout row", args)
+		return ""
+	}
+
+	if got := statusAgent("--mux", "herdr"); got != "working" {
+		t.Fatalf("status --mux herdr agent = %q, want working: the flag must beat TMUX", got)
+	}
+	t.Setenv("HERDR_ENV", "1")
+	if got := statusAgent(); got != "working" {
+		t.Fatalf("status with HERDR_ENV=1 agent = %q, want working: the environment must still decide", got)
+	}
 }
 
 // A status word outside the boundary's vocabulary is unknown, never guessed.
