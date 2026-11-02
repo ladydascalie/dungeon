@@ -456,6 +456,12 @@ the app; it does not walk the process tree. A title alone is not proof: a stale
 `π - ...` title does not keep a shell in the agent list. The rail marks its own
 pane with `@agent_rail`, so it never lists itself.
 
+The rail groups its tiles by tmux session, then by encounter inside that
+session, and names each group with a header. Panes no encounter owns follow
+their session under a `no encounter` header; a session that hosts no encounter
+is one group and needs no header. An encounter named after its session is the
+same header twice, so it is not printed again.
+
 When a pane's worktree belongs to an encounter, the rail reads that encounter's
 state and shows the unit and its status beside the agent. A lane in a worktree
 uses the repo's `.dungeon`, not a copy inside the worktree.

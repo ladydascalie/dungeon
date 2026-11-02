@@ -611,3 +611,133 @@ func TestRailTogglePrintPaneStillReportsThePane(t *testing.T) {
 		t.Fatalf("--print-pane reported %s, which is not a pane: %v", rail, err)
 	}
 }
+
+func TestRailGroupsSessionsThenEncounters(t *testing.T) {
+	agents := []railPaneInfo{
+		{Label: "plain", Session: "10", Pane: "%0"},
+		{Label: "w1", Session: "fleet", Pane: "%1", Encounter: "fleet-view"},
+		{Label: "r1", Session: "fleet", Pane: "%2", Encounter: "review-fleet"},
+		{Label: "w2", Session: "fleet", Pane: "%3", Encounter: "fleet-view"},
+		{Label: "idle", Session: "fleet", Pane: "%4"},
+		{Label: "w3", Session: "own-stack", Pane: "%5", Encounter: "rail-events"},
+	}
+	got := railGroups(agents)
+	want := []struct {
+		session, encounter string
+		unscoped           bool
+		panes              []int
+	}{
+		{"10", "", false, []int{0}},
+		{"fleet", "fleet-view", false, []int{1, 3}},
+		{"fleet", "review-fleet", false, []int{2}},
+		{"fleet", "", true, []int{4}},
+		{"own-stack", "rail-events", false, []int{5}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d groups, want %d: %+v", len(got), len(want), got)
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.session != w.session || g.encounter != w.encounter || g.unscoped != w.unscoped {
+			t.Fatalf("group %d is %+v, want %+v", i, g, w)
+		}
+		if len(g.panes) != len(w.panes) {
+			t.Fatalf("group %d panes %v, want %v", i, g.panes, w.panes)
+		}
+		for j := range w.panes {
+			if g.panes[j] != w.panes[j] {
+				t.Fatalf("group %d panes %v, want %v", i, g.panes, w.panes)
+			}
+		}
+	}
+}
+
+func TestRailViewShowsSessionAndEncounterHeaders(t *testing.T) {
+	m := railModel{
+		agents: []railPaneInfo{
+			{Label: "w1", Kind: "pi", Session: "fleet", Encounter: "fleet-view", WindowIndex: "1", PaneIndex: "1"},
+			{Label: "idle", Kind: "pi", Session: "fleet", WindowIndex: "2", PaneIndex: "0"},
+			{Label: "w9", Kind: "pi", Session: "own-stack", Encounter: "rail-events", WindowIndex: "0", PaneIndex: "1"},
+		},
+		width: 40, height: 20,
+	}
+	out := m.View()
+	order := []string{"fleet", "fleet-view", "w1", "no encounter", "idle", "own-stack", "rail-events", "w9"}
+	at := -1
+	for _, want := range order {
+		i := strings.Index(out, want)
+		if i < 0 {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+		if i < at {
+			t.Fatalf("%q is out of order in:\n%s", want, out)
+		}
+		at = i
+	}
+}
+
+func TestRailClickMapsThroughGroupHeaders(t *testing.T) {
+	m := railModel{
+		agents: []railPaneInfo{
+			{Label: "w1", Pane: "%1", Session: "fleet", Encounter: "fleet-view"},
+			{Label: "r1", Pane: "%2", Session: "fleet", Encounter: "review-fleet"},
+		},
+		width: 40, height: 20,
+	}
+	lay := m.layout()
+	want := 1
+	top := -1
+	for i, pane := range lay.linePane {
+		if pane == want {
+			top = i
+			break
+		}
+	}
+	if top < 0 {
+		t.Fatalf("no tile for pane %d in:\n%s", want, strings.Join(lay.lines, "\n"))
+	}
+	next, cmd := m.Update(tea.MouseMsg{
+		X: 2, Y: top + 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,
+	})
+	if got := next.(railModel).cursor; got != want {
+		t.Fatalf("click on line %d selected %d, want %d", top, got, want)
+	}
+	if cmd == nil {
+		t.Fatal("a click must focus the clicked pane")
+	}
+}
+
+func TestRailWindowFollowsTheCursor(t *testing.T) {
+	var agents []railPaneInfo
+	for i := 0; i < 20; i++ {
+		agents = append(agents, railPaneInfo{Label: "pane", Pane: "%" + string(rune('a'+i)), Session: "fleet"})
+	}
+	m := railModel{agents: agents, width: 40, height: 12, cursor: 18}
+	lay := m.layout()
+	start := m.window(lay)
+	top := -1
+	for i, pane := range lay.linePane {
+		if pane == m.cursor {
+			top = i
+			break
+		}
+	}
+	body := m.railBody()
+	if top < start || top+1 >= start+body {
+		t.Fatalf("selected tile at %d is outside the window %d..%d", top, start, start+body)
+	}
+}
+
+func TestRailDoesNotRepeatTheSessionAsItsEncounter(t *testing.T) {
+	m := railModel{
+		agents: []railPaneInfo{
+			{Label: "w1", Kind: "pi", Pane: "%1", Session: "fleet", Encounter: "fleet", WindowIndex: "1", PaneIndex: "1"},
+		},
+		width: 40, height: 12,
+	}
+	lay := m.layout()
+	if len(lay.lines) != 3 {
+		t.Fatalf("layout has %d lines, want one session header and two tile lines:\n%s",
+			len(lay.lines), strings.Join(lay.lines, "\n"))
+	}
+}

@@ -526,34 +526,144 @@ func (m *railModel) mouse(msg tea.MouseMsg) tea.Cmd {
 	return nil
 }
 
-func (m railModel) tileRange() (start, end int) {
-	body := max(1, m.height-3)
-	tiles := max(1, (body+1)/railTileStep)
-	start = m.cursor - tiles/2
+// railGroup is one block of the rail: an encounter inside a session, or the
+// panes a session has that no encounter owns.
+type railGroup struct {
+	session   string
+	encounter string
+	unscoped  bool
+	panes     []int
+}
+
+// railGroups orders the panes for display: sessions in the order tmux lists
+// them, encounters inside a session in the order they appear, then the panes no
+// encounter owns. A session with no encounters is one group, so it needs no
+// "no encounter" header.
+func railGroups(agents []railPaneInfo) []railGroup {
+	var sessions []string
+	bySession := map[string][]int{}
+	for i, a := range agents {
+		if _, seen := bySession[a.Session]; !seen {
+			sessions = append(sessions, a.Session)
+		}
+		bySession[a.Session] = append(bySession[a.Session], i)
+	}
+	var out []railGroup
+	for _, session := range sessions {
+		var encounters []string
+		byEncounter := map[string][]int{}
+		var loose []int
+		for _, i := range bySession[session] {
+			encounter := agents[i].Encounter
+			if encounter == "" {
+				loose = append(loose, i)
+				continue
+			}
+			if _, seen := byEncounter[encounter]; !seen {
+				encounters = append(encounters, encounter)
+			}
+			byEncounter[encounter] = append(byEncounter[encounter], i)
+		}
+		for _, encounter := range encounters {
+			out = append(out, railGroup{session: session, encounter: encounter, panes: byEncounter[encounter]})
+		}
+		if len(loose) > 0 {
+			out = append(out, railGroup{session: session, unscoped: len(encounters) > 0, panes: loose})
+		}
+	}
+	return out
+}
+
+// railLayout is the whole body of the rail, plus the pane each line belongs to,
+// or -1 for a header or a rule. Scrolling and clicks both read it, so a header
+// can never shift a click onto the wrong pane.
+type railLayout struct {
+	lines    []string
+	linePane []int
+}
+
+func (l *railLayout) add(line string, pane int) {
+	l.lines = append(l.lines, line)
+	l.linePane = append(l.linePane, pane)
+}
+
+func (m railModel) layout() railLayout {
+	width := max(10, m.width)
+	rule := ruleStyle.Render(strings.Repeat("─", width))
+	var lay railLayout
+	session := ""
+	firstGroup := true
+	for _, g := range railGroups(m.agents) {
+		if !firstGroup {
+			lay.add(rule, -1)
+		}
+		firstGroup = false
+		if g.session != session && g.session != "" {
+			lay.add(boldStyle.Render(truncate(g.session, width)), -1)
+			session = g.session
+		}
+		switch {
+		case g.encounter != "" && g.encounter != g.session:
+			lay.add(dimStyle.Render(truncate("  "+g.encounter, width)), -1)
+		case g.unscoped:
+			lay.add(dimStyle.Render(truncate("  no encounter", width)), -1)
+		}
+		for i, idx := range g.panes {
+			if i > 0 {
+				lay.add(rule, -1)
+			}
+			for _, line := range m.rowLines(m.agents[idx], width, idx == m.cursor) {
+				lay.add(line, idx)
+			}
+		}
+	}
+	return lay
+}
+
+// railBody is the number of lines the rail has between its title and its
+// footer.
+func (m railModel) railBody() int {
+	return max(1, m.height-3)
+}
+
+// window picks the first body line to show. It centres the selected pane, so a
+// cursor always paints the same window and a click maps back to the same pane.
+func (m railModel) window(lay railLayout) int {
+	body := m.railBody()
+	if len(lay.lines) <= body {
+		return 0
+	}
+	start := 0
+	for i, pane := range lay.linePane {
+		if pane == m.cursor {
+			start = i - body/2
+			break
+		}
+	}
+	if start > len(lay.lines)-body {
+		start = len(lay.lines) - body
+	}
 	if start < 0 {
 		start = 0
 	}
-	if start+tiles > len(m.agents) {
-		start = len(m.agents) - tiles
-	}
-	if start < 0 {
-		start = 0
-	}
-	end = min(len(m.agents), start+tiles)
-	return start, end
+	return start
 }
 
 func (m railModel) tileAt(y int) (int, bool) {
 	rel := y - 2
-	if rel < 0 || len(m.agents) == 0 {
+	if rel < 0 {
 		return 0, false
 	}
-	start, end := m.tileRange()
-	tile := rel / railTileStep
-	if start+tile >= end {
+	lay := m.layout()
+	line := m.window(lay) + rel
+	if line < 0 || line >= len(lay.lines) {
 		return 0, false
 	}
-	return start + tile, true
+	idx := lay.linePane[line]
+	if idx < 0 {
+		return 0, false
+	}
+	return idx, true
 }
 
 func (m *railModel) clampCursor() {
@@ -621,8 +731,6 @@ func railKindMark(kind string) (string, lipgloss.Style) {
 	}
 	return glyph, lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
 }
-
-const railTileStep = 3 // two lines per agent, one separator between
 
 func railStatusStyle(status string) lipgloss.Style {
 	if style, ok := statusStyles[status]; ok {
@@ -796,13 +904,10 @@ func (m railModel) render() string {
 			lines = append(lines, dimStyle.Render("no panes"))
 		}
 	} else {
-		start, end := m.tileRange()
-		for i := start; i < end; i++ {
-			if i > start {
-				lines = append(lines, ruleStyle.Render(strings.Repeat("─", width)))
-			}
-			lines = append(lines, m.rowLines(m.agents[i], width, i == m.cursor)...)
-		}
+		lay := m.layout()
+		start := m.window(lay)
+		end := min(len(lay.lines), start+m.railBody())
+		lines = append(lines, lay.lines[start:end]...)
 	}
 	for len(lines) < height-1 {
 		lines = append(lines, "")
