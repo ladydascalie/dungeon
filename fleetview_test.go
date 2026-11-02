@@ -135,11 +135,209 @@ func TestFleetPreviewFallsBackToTheReportWhenTheLaneIsGone(t *testing.T) {
 	if !strings.Contains(errText, "unknown mux") {
 		t.Fatalf("the unreadable lane should be named, got %q", errText)
 	}
+	if !strings.Contains(header, "not live") {
+		t.Fatalf("a report standing in for a dead pane must say the lane is not live, got %q", header)
+	}
 
 	model.Rows[0].Pane = ""
 	text, _, header, errText = fleetPreview(t.Context(), "no-such-mux", model, fleetRowKey(model.Rows[0]))
-	if text != "report body\n" || !strings.Contains(header, "report A") || errText != "" {
-		t.Fatalf("a gone lane should show the report: text %q header %q err %q", text, header, errText)
+	if text != "report body\n" || !strings.Contains(header, "report A") {
+		t.Fatalf("a gone lane should show the report: text %q header %q", text, header)
+	}
+	if !strings.Contains(header, "not live") || !strings.Contains(errText, "no live lane") {
+		t.Fatalf("a gone lane is not a live one: header %q err %q", header, errText)
+	}
+}
+
+func boolp(b bool) *bool { return &b }
+
+func fleetLine(t *testing.T, out, want string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	t.Fatalf("no line holding %q in:\n%s", want, out)
+	return ""
+}
+
+// A source that failed must not render as a quiet zero, and the header must
+// name it.
+func TestFleetViewNamesTheSourceThatFailed(t *testing.T) {
+	now := time.Now()
+	model := FleetModel{
+		Encounters: []FleetEncounter{{
+			Name:      "alpha",
+			Path:      filepath.Join(t.TempDir(), ".dungeon", "alpha", "plan.yaml"),
+			LastTouch: now,
+		}},
+		Rows: []FleetRow{{
+			Encounter: "alpha", ID: "A", Minion: "w1", Role: "worker", Status: "working",
+			Pane: "%1", Branch: "fleet/w1", Worktree: "/repo/alpha.worktrees/w1", LastTouch: now,
+		}},
+		Sources: FleetSources{
+			Worktrunk: FleetSource{Err: "wt: exit status 1"},
+			Hunk:      FleetSource{Available: true},
+		},
+	}
+	m := newFleetViewModel(time.Second, "")
+	m.width, m.height = 140, 40
+	m.model, m.modelAt = model, now.Add(-3*time.Minute)
+	out := m.View()
+	for _, want := range []string{
+		"wt unavailable: wt: exit status 1",
+		"hunk ok",
+		"snapshot 3m ago",
+		"changed is the uncommitted diff",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if row := fleetLine(t, out, "w1 worker"); !strings.Contains(row, "?") {
+		t.Fatalf("a failed wt must leave the changed cell unknown, not a zero: %q", row)
+	}
+}
+
+func TestFleetChangedSaysUnknownNotZero(t *testing.T) {
+	cases := []struct {
+		name string
+		row  FleetRow
+		want string
+	}{
+		{"worktree with no wt fact", FleetRow{Worktree: "/repo/w1"}, "?"},
+		{"wt fact with no diff", FleetRow{Worktree: "/repo/w1", WT: &FleetWT{}}, "+?/-?"},
+		{"a real zero", FleetRow{Worktree: "/repo/w1", WT: &FleetWT{Added: intp(0), Deleted: intp(0)}}, "+0/-0"},
+		{"no worktree at all", FleetRow{}, "-"},
+	}
+	for _, c := range cases {
+		if got := fleetChanged(c.row); got != c.want {
+			t.Fatalf("%s: changed %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// LoadState answers an empty state for a missing file and UnitStatus answers
+// planned. The view must name the missing state, not claim one.
+func TestFleetViewNamesAMissingStateFile(t *testing.T) {
+	encDir := filepath.Join(t.TempDir(), ".dungeon", "alpha")
+	if err := os.MkdirAll(encDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	model := FleetModel{
+		Encounters: []FleetEncounter{{Name: "alpha", Path: filepath.Join(encDir, "plan.yaml"), LastTouch: time.Now()}},
+		Rows:       []FleetRow{{Encounter: "alpha", ID: "A", Status: "planned"}},
+		Sources:    FleetSources{Worktrunk: FleetSource{Available: true}, Hunk: FleetSource{Available: true}},
+	}
+	m := newFleetViewModel(time.Second, "")
+	m.width, m.height = 120, 30
+	m.model = model
+	out := m.View()
+	for _, want := range []string{"no state.json", "alpha", "read as planned"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(encDir, "state.json"), []byte("{\"units\":{}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out := m.View(); strings.Contains(out, "no state.json") {
+		t.Fatalf("a state file is not a missing one:\n%s", out)
+	}
+}
+
+// A dead lane standing behind a report must keep saying it is dead.
+func TestFleetViewKeepsThePreviewReadErrorBesideTheReport(t *testing.T) {
+	_, m, _ := fleetViewFixture(t)
+	m.previewErr = "lane unreadable, the report stands in for the pane: pane %1 is gone"
+	out := m.View()
+	if !strings.Contains(out, "pane %1 is gone") {
+		t.Fatalf("the read failure must stand beside the report:\n%s", out)
+	}
+	if m.preview == "" {
+		t.Fatal("the fixture should carry a preview")
+	}
+}
+
+// Hunk that could not be asked is not a worktree with no session.
+func TestFleetHunkActionSaysWhenHunkCouldNotBeAsked(t *testing.T) {
+	model, m, row := fleetViewFixture(t)
+	model.Sources.Hunk = FleetSource{Err: "hunk: exit status 1"}
+	m.model = model
+	it := fleetItem{row: model.Rows[0], encounter: row.Encounter, label: row.ID}
+	msg, ok := m.hunkCmd(it)().(fleetNoticeMsg)
+	if !ok {
+		t.Fatal("the hunk action should answer with a notice")
+	}
+	if !strings.Contains(msg.text, "could not be asked") || !strings.Contains(msg.text, "exit status 1") {
+		t.Fatalf("notice %q should say hunk could not be asked", msg.text)
+	}
+	if strings.Contains(msg.text, "no hunk session") {
+		t.Fatalf("notice %q claims something it cannot know", msg.text)
+	}
+
+	model.Sources.Hunk = FleetSource{Available: true}
+	m.model = model
+	msg, _ = m.hunkCmd(it)().(fleetNoticeMsg)
+	if !strings.Contains(msg.text, "no hunk session on this worktree") {
+		t.Fatalf("an answered source with no session should say so, got %q", msg.text)
+	}
+}
+
+// A folded row names an encounter. It never carried a pane, a branch or a diff.
+func TestFleetViewFoldedSummaryCarriesNoFieldItNeverHad(t *testing.T) {
+	_, m, _ := fleetViewFixture(t)
+	out := m.View()
+	line := fleetLine(t, out, "1 settled")
+	for _, bad := range []string{"?"} {
+		if strings.Contains(line, bad) {
+			t.Fatalf("folded summary drew %q for a field it never carried: %q", bad, line)
+		}
+	}
+	if strings.Contains(line, "-") {
+		t.Fatalf("folded summary drew a pane, a branch or a diff it never carried: %q", line)
+	}
+}
+
+func TestFleetDetailDoesNotPrintZeroAheadDirty(t *testing.T) {
+	model, m, _ := fleetViewFixture(t)
+	m.model = model
+	m.overlay = "detail"
+
+	m.rebuildOrder(fleetRowKey(model.Rows[2])) // planned, no worktree: nothing was recorded
+	out := m.View()
+	if strings.Contains(out, "0 / 0") {
+		t.Fatalf("a lane that recorded neither must not read 0 / 0:\n%s", out)
+	}
+	if !strings.Contains(out, "never recorded") {
+		t.Fatalf("the detail must say ahead and dirty were never recorded:\n%s", out)
+	}
+
+	m.rebuildOrder(fleetRowKey(model.Rows[0])) // spawned: 2 ahead, 1 dirty
+	out = m.View()
+	if !strings.Contains(out, "2 / 1, recorded at spawn") || !strings.Contains(out, "no timestamp") {
+		t.Fatalf("a recorded ahead and dirty must show and say where it came from:\n%s", out)
+	}
+}
+
+func TestFleetDetailShowsStaleChecksAndMergeable(t *testing.T) {
+	model, m, _ := fleetViewFixture(t)
+	model.Rows[0].WT = &FleetWT{
+		Added:   intp(7),
+		Deleted: intp(3),
+		Checks:  &FleetChecks{Status: "passing", Stale: true},
+		PR:      &FleetPR{Number: 42, Review: "approved", Mergeable: boolp(false)},
+	}
+	m.model = model
+	m.overlay = "detail"
+	m.rebuildOrder(fleetRowKey(model.Rows[0]))
+	out := m.View()
+	for _, want := range []string{"passing (stale", "#42 approved", "not mergeable"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
 }
 

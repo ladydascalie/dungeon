@@ -69,6 +69,7 @@ type fleetMsg struct {
 	previewFor    string
 	previewHeader string
 	previewErr    string
+	at            time.Time
 }
 
 type fleetNoticeMsg struct {
@@ -85,6 +86,9 @@ type fleetViewModel struct {
 	model  FleetModel
 	err    error
 	notice string
+	// modelAt is when the shown snapshot was built. It is the only clock the
+	// view holds, and the honest age of every fact the model carries.
+	modelAt time.Time
 
 	overlay string // "", "detail" or "actions"
 	action  int
@@ -125,6 +129,7 @@ func (m fleetViewModel) refresh() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		model := BuildFleetModel(ctx, FleetOptions{Run: run, Cache: cache})
+		at := time.Now()
 		if keep == "" {
 			keep = fleetFirstKey(model, expanded)
 		}
@@ -136,6 +141,7 @@ func (m fleetViewModel) refresh() tea.Cmd {
 			previewFor:    forKey,
 			previewHeader: header,
 			previewErr:    previewErr,
+			at:            at,
 		}
 	}
 }
@@ -159,6 +165,7 @@ func (m fleetViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewFor = msg.previewFor
 		m.previewHeader = msg.previewHeader
 		m.previewErr = msg.previewErr
+		m.modelAt = msg.at
 		m.err = nil
 		return m, nil
 
@@ -305,6 +312,13 @@ func (m fleetViewModel) jumpCmd(it fleetItem) tea.Cmd {
 
 func (m fleetViewModel) hunkCmd(it fleetItem) tea.Cmd {
 	row := it.row
+	if !m.model.Sources.Hunk.Available {
+		why := m.model.Sources.Hunk.Err
+		if why == "" {
+			why = "no answer"
+		}
+		return func() tea.Msg { return fleetNoticeMsg{text: "hunk could not be asked: " + why} }
+	}
 	if row.Review == nil || row.Review.Session == "" {
 		return func() tea.Msg { return fleetNoticeMsg{text: "no hunk session on this worktree"} }
 	}
@@ -331,7 +345,7 @@ func (m fleetViewModel) copyPaneCmd(it fleetItem) tea.Cmd {
 		// OSC 52 asks the terminal to copy, so no clipboard tool is needed and
 		// the pane never leaves the fleet view.
 		_, _ = fmt.Fprintf(os.Stdout, "\x1b]52;c;%s\a", base64.StdEncoding.EncodeToString([]byte(pane)))
-		return fleetNoticeMsg{text: "copied " + pane}
+		return fleetNoticeMsg{text: "asked the terminal to copy " + pane}
 	}
 }
 
@@ -511,7 +525,8 @@ func fleetPreview(ctx context.Context, backend string, model FleetModel, key str
 	report := fleetReportText(model, row)
 	if row.Pane == "" {
 		if report != "" {
-			return report, forKey, "report " + row.ID, ""
+			return report, forKey, "report " + row.ID + " · not live",
+				"no live lane: the report stands in for the pane"
 		}
 		return "", forKey, "no live lane", "no live lane and no report"
 	}
@@ -526,7 +541,8 @@ func fleetPreview(ctx context.Context, backend string, model FleetModel, key str
 		err = readErr
 	}
 	if report != "" {
-		return report, forKey, "report " + row.ID, "lane unreadable: " + err.Error()
+		return report, forKey, "report " + row.ID + " · not live",
+			"lane unreadable, the report stands in for the pane: " + err.Error()
 	}
 	return "", forKey, "lane " + row.Pane, err.Error()
 }
@@ -575,11 +591,37 @@ func fleetLane(row FleetRow) string {
 	return lane
 }
 
-func fleetChanged(row FleetRow) string {
-	if row.WT == nil || (row.WT.Added == nil && row.WT.Deleted == nil) {
-		return "-"
+// The view draws two different nothings. fleetNone means the row never carried
+// the field: a unit with no worktree has no diff to measure. fleetUnknown means
+// the fact should exist and was not read, because a source failed or the state
+// never recorded it. A zero is neither.
+const (
+	fleetUnknown = "?"
+	fleetNone    = "-"
+)
+
+func orUnknown(s string) string {
+	if s == "" {
+		return fleetUnknown
 	}
-	added, deleted := "?", "?"
+	return s
+}
+
+func fleetPane(row FleetRow) string { return orUnknown(row.Pane) }
+
+func fleetBranch(row FleetRow) string { return orUnknown(row.Branch) }
+
+// fleetChanged is the uncommitted diff worktrunk reports, never the branch's
+// own commits. A row with a worktree and no worktrunk fact has an unknown
+// diff, not a zero one.
+func fleetChanged(row FleetRow) string {
+	if row.WT == nil {
+		if row.Worktree == "" {
+			return fleetNone
+		}
+		return fleetUnknown
+	}
+	added, deleted := fleetUnknown, fleetUnknown
 	if row.WT.Added != nil {
 		added = fmt.Sprint(*row.WT.Added)
 	}
@@ -587,6 +629,131 @@ func fleetChanged(row FleetRow) string {
 		deleted = fmt.Sprint(*row.WT.Deleted)
 	}
 	return "+" + added + "/-" + deleted
+}
+
+// A folded summary names an encounter, not a unit. It never carried a pane, a
+// branch, a lane or a diff, so it must not draw the unknown glyph for them.
+func fleetItemLane(it fleetItem) string {
+	if it.summary {
+		return ""
+	}
+	return fleetLane(it.row)
+}
+
+func fleetItemPane(it fleetItem) string {
+	if it.summary {
+		return ""
+	}
+	return fleetPane(it.row)
+}
+
+func fleetItemBranch(it fleetItem) string {
+	if it.summary {
+		return ""
+	}
+	return fleetBranch(it.row)
+}
+
+func fleetItemChanged(it fleetItem) string {
+	if it.summary {
+		return ""
+	}
+	return fleetChanged(it.row)
+}
+
+// fleetAheadDirty is written once, at spawn, and never refreshed. A row with no
+// worktree recorded neither, so it knows neither.
+func fleetAheadDirty(row FleetRow) string {
+	if row.Worktree == "" {
+		return "unknown, never recorded"
+	}
+	return fmt.Sprintf("%d / %d, recorded at spawn, never refreshed, no timestamp", row.Ahead, row.Dirty)
+}
+
+func fleetChecks(checks *FleetChecks) string {
+	if checks == nil {
+		return "no result"
+	}
+	status := checks.Status
+	if status == "" {
+		status = "unknown"
+	}
+	if checks.Stale {
+		status += " (stale, not the current head)"
+	}
+	return status
+}
+
+func fleetPR(pr *FleetPR) string {
+	if pr == nil {
+		return fleetNone
+	}
+	out := fmt.Sprintf("#%d %s", pr.Number, orUnknown(pr.Review))
+	switch {
+	case pr.Mergeable == nil:
+		out += " · mergeable unknown"
+	case *pr.Mergeable:
+		out += " · mergeable"
+	default:
+		out += " · not mergeable"
+	}
+	return out
+}
+
+// fleetSourceLine names every source and whether it answered. A source that
+// failed feeds no column, so the header must say which one and why. The age is
+// the snapshot's: it is the only clock the view holds.
+func fleetSourceLine(model FleetModel, at time.Time) string {
+	parts := []string{
+		fleetSourceState("wt", model.Sources.Worktrunk, fmt.Sprintf("cached up to %s", fleetWTCacheTTL)),
+		fleetSourceState("hunk", model.Sources.Hunk, ""),
+	}
+	if !at.IsZero() {
+		parts = append(parts, "snapshot "+fleetAge(at))
+	}
+	parts = append(parts, "changed is the uncommitted diff")
+	return "sources  " + strings.Join(parts, " · ")
+}
+
+func fleetSourceState(name string, src FleetSource, note string) string {
+	if src.Available {
+		if note != "" {
+			return name + " ok (" + note + ")"
+		}
+		return name + " ok"
+	}
+	why := src.Err
+	if why == "" {
+		why = "no answer"
+	}
+	return name + " unavailable: " + why
+}
+
+// fleetMissingState names encounters with no state.json. LoadState answers an
+// empty state with no error and UnitStatus then answers "planned", so without
+// this the view would claim a state that was never written.
+func fleetMissingState(model FleetModel) []string {
+	var missing []string
+	for _, enc := range model.Encounters {
+		if enc.Path == "" || enc.Err != "" {
+			continue
+		}
+		if _, err := os.Stat(StatePath(enc.Path)); os.IsNotExist(err) {
+			missing = append(missing, enc.Name)
+		}
+	}
+	return missing
+}
+
+func fleetStateMissing(model FleetModel, encounter string) bool {
+	for _, enc := range model.Encounters {
+		if enc.Name != encounter || enc.Path == "" || enc.Err != "" {
+			continue
+		}
+		_, err := os.Stat(StatePath(enc.Path))
+		return os.IsNotExist(err)
+	}
+	return false
 }
 
 func fleetAge(t time.Time) string {
@@ -634,10 +801,10 @@ func (m fleetViewModel) metrics(items []fleetItem) fleetMetrics {
 	for _, it := range items {
 		mt.status = max(mt.status, runeLen(it.status))
 		mt.id = max(mt.id, runeLen(it.label))
-		mt.lane = max(mt.lane, runeLen(fleetLane(it.row)))
-		mt.pane = max(mt.pane, runeLen(orDash(it.row.Pane)))
-		mt.branch = max(mt.branch, runeLen(orDash(it.row.Branch)))
-		mt.changed = max(mt.changed, runeLen(fleetChanged(it.row)))
+		mt.lane = max(mt.lane, runeLen(fleetItemLane(it)))
+		mt.pane = max(mt.pane, runeLen(fleetItemPane(it)))
+		mt.branch = max(mt.branch, runeLen(fleetItemBranch(it)))
+		mt.changed = max(mt.changed, runeLen(fleetItemChanged(it)))
 		mt.age = max(mt.age, runeLen(fleetAge(it.lastTouch)))
 	}
 	mt.id = min(mt.id, 28)
@@ -650,10 +817,10 @@ func (m fleetViewModel) metrics(items []fleetItem) fleetMetrics {
 func (m fleetViewModel) rowLine(it fleetItem, mt fleetMetrics, width int, selected bool) string {
 	status := pad(truncate(it.status, mt.status), mt.status)
 	id := pad(truncate(it.label, mt.id), mt.id)
-	lane := pad(truncate(fleetLane(it.row), mt.lane), mt.lane)
-	pane := pad(truncate(orDash(it.row.Pane), mt.pane), mt.pane)
-	branch := pad(truncate(orDash(it.row.Branch), mt.branch), mt.branch)
-	changed := pad(truncate(fleetChanged(it.row), mt.changed), mt.changed)
+	lane := pad(truncate(fleetItemLane(it), mt.lane), mt.lane)
+	pane := pad(truncate(fleetItemPane(it), mt.pane), mt.pane)
+	branch := pad(truncate(fleetItemBranch(it), mt.branch), mt.branch)
+	changed := pad(truncate(fleetItemChanged(it), mt.changed), mt.changed)
 	when := pad(truncate(fleetAge(it.lastTouch), mt.age), mt.age)
 	did := fleetItemDid(it)
 	plain := fmt.Sprintf("%s  %s  %s  %s  %s  %s  %s  %s", status, id, lane, pane, branch, changed, when, did)
@@ -739,13 +906,29 @@ func (m fleetViewModel) headerView() string {
 			chips += "  " + statusStyles[sec.style].Render(fmt.Sprintf("%d %s", n, strings.ToLower(sec.label)))
 		}
 	}
-	return spread(left, right, m.width) + "\n" + chips + "\n" +
-		ruleStyle.Render(strings.Repeat("─", max(0, m.width)))
+	out := spread(left, right, m.width) + "\n" + chips + "\n" +
+		dimStyle.Render(truncate(fleetSourceLine(m.model, m.modelAt), max(1, m.width))) + "\n"
+	if missing := fleetMissingState(m.model); len(missing) > 0 {
+		note := "state  no state.json for " + strings.Join(missing, ", ") + ": those units read as planned"
+		out += statusStyles["blocked"].Render(truncate(note, max(1, m.width))) + "\n"
+	}
+	return out + ruleStyle.Render(strings.Repeat("─", max(0, m.width)))
+}
+
+// headerHeight counts the lines headerView draws, so the list keeps the frame
+// inside the terminal.
+func (m fleetViewModel) headerHeight() int {
+	h := 4 // title, chips, sources, rule
+	if len(fleetMissingState(m.model)) > 0 {
+		h++
+	}
+	return h
 }
 
 func (m fleetViewModel) listBody() string {
-	previewH := min(10, max(3, (m.height-5)/3))
-	rows := max(3, m.height-5-previewH)
+	room := max(6, m.height-m.headerHeight()-2) // 2 is the footer rule and its key line
+	previewH := min(10, max(3, room/3))
+	rows := max(3, room-previewH)
 	lines, cursorLine := m.listLines(m.width)
 	lines = window(lines, cursorLine, rows)
 	body := strings.Join(lines, "\n")
@@ -761,18 +944,22 @@ func (m fleetViewModel) previewView(height int) string {
 		head += " " + dimStyle.Render(m.previewHeader)
 	}
 	lines := []string{ruleStyle.Render(strings.Repeat("─", max(0, m.width))), head}
+	if m.previewErr != "" {
+		// The error stands even when a report fills the pane: a dead lane
+		// reading as a live one is the failure this view must not make.
+		lines = append(lines, statusStyles["blocked"].Render(truncate("! "+m.previewErr, max(1, m.width))))
+	}
+	room := max(1, height-len(lines))
 	var text []string
 	if m.preview != "" {
 		text = strings.Split(strings.ReplaceAll(m.preview, "\t", "    "), "\n")
 		for i := range text {
 			text[i] = truncate(text[i], max(1, m.width))
 		}
-		if len(text) > height-2 {
-			text = text[len(text)-(height-2):]
+		if len(text) > room {
+			text = text[len(text)-room:]
 		}
-	} else if m.previewErr != "" {
-		text = []string{dimStyle.Render(truncate(m.previewErr, max(1, m.width)))}
-	} else {
+	} else if m.previewErr == "" {
 		text = []string{dimStyle.Render("no lane selected")}
 	}
 	lines = append(lines, text...)
@@ -801,11 +988,11 @@ func (m fleetViewModel) detailOverlay() string {
 			dimStyle.Render(fmt.Sprintf("  %s %s", row.Role, row.Minion)) + "\n\n")
 		fields := [][2]string{
 			{"encounter", row.Encounter},
-			{"pane", orDash(row.Pane)},
-			{"branch", orDash(row.Branch)},
-			{"worktree", orDash(row.Worktree)},
+			{"pane", fleetPane(row)},
+			{"branch", fleetBranch(row)},
+			{"worktree", orUnknown(row.Worktree)},
 			{"changed", fleetChanged(row)},
-			{"ahead / dirty", fmt.Sprintf("%d / %d", row.Ahead, row.Dirty)},
+			{"ahead / dirty", fleetAheadDirty(row)},
 			{"accept", orDash(row.Accept)},
 			{"last report", "-"},
 			{"last touch", fleetAge(row.LastTouch)},
@@ -813,21 +1000,37 @@ func (m fleetViewModel) detailOverlay() string {
 		if row.LastReport != nil {
 			fields[7][1] = fleetAge(*row.LastReport)
 		}
-		if row.Review != nil {
-			fields = append(fields, [2]string{"hunk session", row.Review.Session})
+		if row.Worktree != "" {
+			switch {
+			case row.Review != nil && row.Review.Session != "":
+				fields = append(fields, [2]string{"hunk session", row.Review.Session})
+			case !m.model.Sources.Hunk.Available:
+				fields = append(fields, [2]string{"hunk session", "unknown, hunk could not be asked"})
+			default:
+				fields = append(fields, [2]string{"hunk session", "none open"})
+			}
 		}
-		if row.WT != nil && row.WT.PR != nil {
-			fields = append(fields, [2]string{"pull request", fmt.Sprintf("#%d %s", row.WT.PR.Number, row.WT.PR.Review)})
+		if row.WT != nil {
+			fields = append(fields, [2]string{"checks", fleetChecks(row.WT.Checks)})
+			if row.WT.PR != nil {
+				fields = append(fields, [2]string{"pull request", fleetPR(row.WT.PR)})
+			}
+		} else if row.Worktree != "" {
+			fields = append(fields, [2]string{"wt", "no fact for this worktree, changed and checks unknown"})
 		}
-		if row.WT != nil && row.WT.Checks != nil {
-			fields = append(fields, [2]string{"checks", row.WT.Checks.Status})
+		if fleetStateMissing(m.model, row.Encounter) {
+			fields = append(fields, [2]string{"state", "no state.json, this unit reads as planned"})
 		}
 		for _, field := range fields {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("%-14s", field[0])) + truncate(field[1], max(1, inner-14)) + "\n")
 		}
+		b.WriteString(dimStyle.Render(truncate(fleetSourceLine(m.model, m.modelAt), max(1, inner))) + "\n")
 	}
 	if m.preview != "" {
 		b.WriteString("\n" + sectionStyle.Render("PREVIEW") + "\n")
+		if m.previewErr != "" {
+			b.WriteString(statusStyles["blocked"].Render(truncate("! "+m.previewErr, inner)) + "\n")
+		}
 		preview := strings.Split(strings.ReplaceAll(m.preview, "\t", "    "), "\n")
 		if len(preview) > 12 {
 			preview = preview[len(preview)-12:]
@@ -906,6 +1109,7 @@ func fleetCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	if *once || !isTerminal(stdout) {
 		m.model = model
+		m.modelAt = time.Now()
 		keep := fleetFirstKey(model, m.expanded)
 		m.rebuildOrder(keep)
 		m.preview, m.previewFor, m.previewHeader, m.previewErr = fleetPreview(ctx, *backend, model, keep)
