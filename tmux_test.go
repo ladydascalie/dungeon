@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // testSocket names this process's tmux server. It is derived once, so every
@@ -158,6 +160,7 @@ func TestTmuxStartAgentRecordsIdentity(t *testing.T) {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	done := make(chan error, 1)
 	go func() { done <- h.StartAgent(ctx, name, root, []string{"--no-skills"}) }()
@@ -365,6 +368,7 @@ func TestTmuxStartAgentRefusesANameLiveInAnotherPane(t *testing.T) {
 		t.Fatalf("SplitPane other: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	done := make(chan error, 1)
 	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
@@ -453,6 +457,7 @@ func TestTmuxStartAgentLeavesNoGhostWhenTheAgentExits(t *testing.T) {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	if err := h.StartAgent(ctx, name, root, nil); err != nil {
 		t.Fatalf("StartAgent: %v", err)
@@ -473,6 +478,7 @@ func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	done := make(chan error, 1)
 	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
@@ -490,22 +496,23 @@ func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
 
 func TestFocusArgv(t *testing.T) {
 	cases := []struct {
-		name                                      string
-		paneSession, paneWindow, pane, clientSess string
-		want                                      []string
+		name                                           string
+		paneSession, paneWindow, pane, clientSessionID string
+		want                                           []string
 	}{
 		{
 			// The client already watches the pane's session: no switch.
 			name:        "same session",
-			paneSession: "$1", paneWindow: "@2", pane: "%3", clientSess: "$1",
+			paneSession: "$1", paneWindow: "@2", pane: "%3", clientSessionID: "$1",
 			want: []string{"select-window", "-t", "@2", ";", "select-pane", "-t", "%3"},
 		},
 		{
 			// The pane lives in another session: switch the client first.
 			name:        "different session",
-			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSess: "$1",
+			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSessionID: "$1",
 			want: []string{
 				"switch-client", "-t", "$4",
+				";",
 				"select-window", "-t", "@5",
 				";",
 				"select-pane", "-t", "%6",
@@ -514,17 +521,175 @@ func TestFocusArgv(t *testing.T) {
 		{
 			// Nobody is attached: no client to switch, and no error.
 			name:        "no client",
-			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSess: "",
+			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSessionID: "",
 			want: []string{"select-window", "-t", "@5", ";", "select-pane", "-t", "%6"},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := focusArgv(c.paneSession, c.paneWindow, c.pane, c.clientSess)
+			got := focusArgv(c.paneSession, c.paneWindow, c.pane, c.clientSessionID)
 			if !slices.Equal(got, c.want) {
 				t.Fatalf("focusArgv = %q, want %q", got, c.want)
 			}
+			assertFocusSeparators(t, got)
 		})
+	}
+}
+
+// assertFocusSeparators fails unless every focus command after the first has a
+// ";" immediately before it. A missing separator makes tmux read the next
+// command as the previous one's arguments.
+func assertFocusSeparators(t *testing.T, argv []string) {
+	t.Helper()
+	seen := false
+	for i, tok := range argv {
+		switch tok {
+		case "switch-client", "select-window", "select-pane":
+			if !seen {
+				seen = true
+				continue
+			}
+			if argv[i-1] != ";" {
+				t.Fatalf("focus argv has no separator before %s: %q", tok, argv)
+			}
+		}
+	}
+	if !seen {
+		t.Fatalf("focus argv has no command: %q", argv)
+	}
+}
+
+// focusEnv is the environment for a tmux command run against the test server.
+// A non-empty clientTMUX points the command at an attached client; an empty one
+// strips TMUX so the command runs with no current client.
+func focusEnv(clientTMUX string) []string {
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_PANE=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	if clientTMUX != "" {
+		env = append(env, "TMUX="+clientTMUX)
+	}
+	return env
+}
+
+// runFocusArgv runs the emitted sequence the way focus does, not as a string.
+func runFocusArgv(t *testing.T, h tmux, argv, env []string) {
+	t.Helper()
+	cmd := exec.Command("tmux", h.argv(argv...)...)
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("tmux %q: %v: %s", argv, err, out)
+	}
+}
+
+// attachControlClient attaches a scriptable tmux client to session and waits
+// until tmux lists it. The test cleanup kills it.
+func attachControlClient(t *testing.T, h tmux, session string) {
+	t.Helper()
+	cmd := exec.Command("tmux", h.argv("-C", "attach-session", "-t", session)...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("control client stdin: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start control client: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	ctx := context.Background()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := h.call(ctx, "list-clients", "-F", "#{client_session}")
+		if err == nil && strings.TrimSpace(string(out)) == session {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("control client did not attach to session %s", session)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// sessionID must turn the name #{client_session} reports into the id a pane
+// carries. Comparing the name to a pane's session id would always be false.
+func TestTmuxSessionIDResolvesName(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	ws, _, _, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	got, err := h.sessionID(ctx, "enc")
+	if err != nil {
+		t.Fatalf("sessionID: %v", err)
+	}
+	if got != ws {
+		t.Fatalf("sessionID(enc) = %q, want %q", got, ws)
+	}
+}
+
+// The emitted argv must actually run. A string-only assertion missed a missing
+// ";" after switch-client: tmux read select-window as switch-client's argument.
+func TestFocusArgvRunsAgainstALiveServer(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	if _, _, _, err := h.CreateWorkspace(ctx, "one", "worker", t.TempDir()); err != nil {
+		t.Fatalf("CreateWorkspace one: %v", err)
+	}
+	target, targetTab, targetPane, err := h.CreateWorkspace(ctx, "two", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace two: %v", err)
+	}
+	at, err := h.Pane(ctx, targetPane)
+	if err != nil {
+		t.Fatalf("Pane: %v", err)
+	}
+
+	// No client: no switch, and window and pane are still selected.
+	argv := focusArgv(at.Workspace, at.Tab, at.ID, "")
+	assertFocusSeparators(t, argv)
+	runFocusArgv(t, h, argv, focusEnv(""))
+	if got := runInTestServer(t, h.socket, "display-message", "-p", "-t", target, "#{window_id}"); got != targetTab {
+		t.Fatalf("active window = %s, want %s", got, targetTab)
+	}
+	if got := runInTestServer(t, h.socket, "display-message", "-p", "-t", target, "#{pane_id}"); got != targetPane {
+		t.Fatalf("active pane = %s, want %s", got, targetPane)
+	}
+
+	// A client on another session: the emitted sequence switches it, then
+	// selects the window and pane.
+	attachControlClient(t, h, "one")
+	source, err := h.sessionID(ctx, "one")
+	if err != nil {
+		t.Fatalf("sessionID one: %v", err)
+	}
+	argv = focusArgv(at.Workspace, at.Tab, at.ID, source)
+	assertFocusSeparators(t, argv)
+	serverPID, err := h.call(ctx, "display-message", "-p", "#{pid}")
+	if err != nil {
+		t.Fatalf("server pid: %v", err)
+	}
+	clientTMUX := socketPath() + "," + strings.TrimSpace(string(serverPID)) + ",0"
+	runFocusArgv(t, h, argv, focusEnv(clientTMUX))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, err := h.call(ctx, "list-clients", "-F", "#{client_session}")
+		if err == nil && strings.TrimSpace(string(out)) == "two" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client did not end on session two; list-clients: %s", out)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -595,4 +760,186 @@ func TestTmuxFocusAcrossSessionsWithNoClientAttached(t *testing.T) {
 	if activePane != secondPane {
 		t.Fatalf("active pane of %s = %s, want %s", second, activePane, secondPane)
 	}
+}
+
+// fakeSlowAgent writes a fake pi that boots slowly, echoes the prompt it is
+// given, ignores the first Enter after boot, and submits on the next one. It is
+// the process behind TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter.
+func fakeSlowAgent(t *testing.T, out string) {
+	t.Helper()
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test binary path: %v", err)
+	}
+	body := "DUNGEON_FAKE_AGENT_OUT=" + shellQuote(out) + "\n" +
+		"export DUNGEON_FAKE_AGENT_OUT\n" +
+		"DUNGEON_FAKE_AGENT_DELAY=1s\n" +
+		"export DUNGEON_FAKE_AGENT_DELAY\n" +
+		"exec " + shellQuote(bin) + " -test.run '^TestFakeAgentHelper$'\n"
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "pi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestFakeAgentHelper is the fake agent body. It only does work when the test
+// binary is re-executed by fakeSlowAgent.
+func TestFakeAgentHelper(t *testing.T) {
+	out := os.Getenv("DUNGEON_FAKE_AGENT_OUT")
+	if out == "" {
+		t.Skip("helper process for the tmux prompt tests")
+	}
+	delay, err := time.ParseDuration(os.Getenv("DUNGEON_FAKE_AGENT_DELAY"))
+	if err != nil {
+		t.Fatalf("fake agent delay: %v", err)
+	}
+	if err := runFakeAgent(out, delay); err != nil {
+		t.Fatalf("fake agent: %v", err)
+	}
+}
+
+// runFakeAgent reads the terminal in raw mode, echoes what it is given so the
+// text is visibly on the input line, ignores every Enter during boot and the
+// first Enter after it, then writes the submitted line to out.
+func runFakeAgent(out string, boot time.Duration) error {
+	fd := int(os.Stdin.Fd())
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return fmt.Errorf("raw mode: %w", err)
+	}
+	defer term.Restore(fd, old)
+
+	if _, err := os.Stdout.WriteString("fake agent booting\r\n"); err != nil {
+		return err
+	}
+	ready := time.Now().Add(boot)
+	bootKey := true
+	line := make([]byte, 0, 256)
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 0 {
+			if err != nil {
+				return nil
+			}
+			continue
+		}
+		switch buf[0] {
+		case '\r', '\n':
+			if time.Now().Before(ready) {
+				continue
+			}
+			if bootKey {
+				// The first Enter after boot is still ignored, as a TUI that
+				// has not finished starting does. The text stays on the line.
+				bootKey = false
+				continue
+			}
+			if len(line) == 0 {
+				continue
+			}
+			if err := os.WriteFile(out, []byte(string(line)+"\nsubmitted\n"), 0o644); err != nil {
+				return err
+			}
+			_, err := os.Stdout.WriteString("\r\nsubmitted\r\n")
+			return err
+		case 0x7f, 0x08:
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+				_, _ = os.Stdout.WriteString("\b \b")
+			}
+		default:
+			line = append(line, buf[0])
+			if _, err := os.Stdout.Write(buf[:1]); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "prompt.txt")
+	fakeSlowAgent(t, out)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	text := "prompt-submit: deliver this line"
+	if err := h.Prompt(ctx, name, text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	waitForFile(t, out)
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read fake agent output: %v", err)
+	}
+	want := text + "\nsubmitted\n"
+	if string(got) != want {
+		t.Fatalf("fake agent received %q, want %q", got, want)
+	}
+}
+
+func TestTmuxStartAgentWaitsForOutputToSettle(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	fakePi(t, `i=0
+while [ $i -lt 8 ]; do echo "booting $i"; sleep 0.1; i=$((i+1)); done
+echo ready
+exec sleep 60`)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	screen, err := h.capture(ctx, root)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if !strings.Contains(screen, "ready") {
+		t.Fatalf("StartAgent returned before the agent's output settled:\n%s", screen)
+	}
+}
+
+// waitForShell blocks until a freshly created pane's shell is reading input.
+// tmux maps a pane before its shell has started; a paste sent then is lost.
+func waitForShell(t *testing.T, h tmux, pane string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		command, commandErr := h.paneCommand(ctx, pane)
+		screen, screenErr := h.capture(ctx, pane)
+		if commandErr == nil && screenErr == nil && isShell(command) && strings.TrimSpace(screen) != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s shell did not become ready: command %q, content:\n%s", pane, command, screen)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// isShell reports whether a foreground command is a shell reading a tty.
+func isShell(name string) bool {
+	switch filepath.Base(name) {
+	case "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "ash", "yash":
+		return true
+	}
+	return false
 }
