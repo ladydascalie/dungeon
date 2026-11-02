@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // testSocket names this process's tmux server. It is derived once, so every
@@ -595,4 +597,186 @@ func TestTmuxFocusAcrossSessionsWithNoClientAttached(t *testing.T) {
 	if activePane != secondPane {
 		t.Fatalf("active pane of %s = %s, want %s", second, activePane, secondPane)
 	}
+}
+
+// fakeSlowAgent writes a fake pi that boots slowly, echoes the prompt it is
+// given, ignores the first Enter after boot, and submits on the next one. It is
+// the process behind TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter.
+func fakeSlowAgent(t *testing.T, out string) {
+	t.Helper()
+	bin, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test binary path: %v", err)
+	}
+	body := "DUNGEON_FAKE_AGENT_OUT=" + shellQuote(out) + "\n" +
+		"export DUNGEON_FAKE_AGENT_OUT\n" +
+		"DUNGEON_FAKE_AGENT_DELAY=1s\n" +
+		"export DUNGEON_FAKE_AGENT_DELAY\n" +
+		"exec " + shellQuote(bin) + " -test.run '^TestFakeAgentHelper$'\n"
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "pi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestFakeAgentHelper is the fake agent body. It only does work when the test
+// binary is re-executed by fakeSlowAgent.
+func TestFakeAgentHelper(t *testing.T) {
+	out := os.Getenv("DUNGEON_FAKE_AGENT_OUT")
+	if out == "" {
+		t.Skip("helper process for the tmux prompt tests")
+	}
+	delay, err := time.ParseDuration(os.Getenv("DUNGEON_FAKE_AGENT_DELAY"))
+	if err != nil {
+		t.Fatalf("fake agent delay: %v", err)
+	}
+	if err := runFakeAgent(out, delay); err != nil {
+		t.Fatalf("fake agent: %v", err)
+	}
+}
+
+// runFakeAgent reads the terminal in raw mode, echoes what it is given so the
+// text is visibly on the input line, ignores every Enter during boot and the
+// first Enter after it, then writes the submitted line to out.
+func runFakeAgent(out string, boot time.Duration) error {
+	fd := int(os.Stdin.Fd())
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return fmt.Errorf("raw mode: %w", err)
+	}
+	defer term.Restore(fd, old)
+
+	if _, err := os.Stdout.WriteString("fake agent booting\r\n"); err != nil {
+		return err
+	}
+	ready := time.Now().Add(boot)
+	bootKey := true
+	line := make([]byte, 0, 256)
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 0 {
+			if err != nil {
+				return nil
+			}
+			continue
+		}
+		switch buf[0] {
+		case '\r', '\n':
+			if time.Now().Before(ready) {
+				continue
+			}
+			if bootKey {
+				// The first Enter after boot is still ignored, as a TUI that
+				// has not finished starting does. The text stays on the line.
+				bootKey = false
+				continue
+			}
+			if len(line) == 0 {
+				continue
+			}
+			if err := os.WriteFile(out, []byte(string(line)+"\nsubmitted\n"), 0o644); err != nil {
+				return err
+			}
+			_, err := os.Stdout.WriteString("\r\nsubmitted\r\n")
+			return err
+		case 0x7f, 0x08:
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+				_, _ = os.Stdout.WriteString("\b \b")
+			}
+		default:
+			line = append(line, buf[0])
+			if _, err := os.Stdout.Write(buf[:1]); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func TestTmuxPromptSubmitsAfterASlowAgentIgnoresTheFirstEnter(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	out := filepath.Join(t.TempDir(), "prompt.txt")
+	fakeSlowAgent(t, out)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+
+	text := "prompt-submit: deliver this line"
+	if err := h.Prompt(ctx, name, text); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	waitForFile(t, out)
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read fake agent output: %v", err)
+	}
+	want := text + "\nsubmitted\n"
+	if string(got) != want {
+		t.Fatalf("fake agent received %q, want %q", got, want)
+	}
+}
+
+func TestTmuxStartAgentWaitsForOutputToSettle(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	fakePi(t, `i=0
+while [ $i -lt 8 ]; do echo "booting $i"; sleep 0.1; i=$((i+1)); done
+echo ready
+exec sleep 60`)
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	name := "w1-aa"
+	waitForShell(t, h, root)
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	screen, err := h.capture(ctx, root)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if !strings.Contains(screen, "ready") {
+		t.Fatalf("StartAgent returned before the agent's output settled:\n%s", screen)
+	}
+}
+
+// waitForShell blocks until a freshly created pane's shell is reading input.
+// tmux maps a pane before its shell has started; a paste sent then is lost.
+func waitForShell(t *testing.T, h tmux, pane string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		command, commandErr := h.paneCommand(ctx, pane)
+		screen, screenErr := h.capture(ctx, pane)
+		if commandErr == nil && screenErr == nil && isShell(command) && strings.TrimSpace(screen) != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pane %s shell did not become ready: command %q, content:\n%s", pane, command, screen)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// isShell reports whether a foreground command is a shell reading a tty.
+func isShell(name string) bool {
+	switch filepath.Base(name) {
+	case "sh", "bash", "dash", "zsh", "fish", "ksh", "mksh", "ash", "yash":
+		return true
+	}
+	return false
 }

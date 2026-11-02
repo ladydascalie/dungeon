@@ -247,10 +247,13 @@ func (t tmux) Pane(ctx context.Context, id string) (pane, error) {
 	return pane{ID: fields[0], Tab: fields[1], Workspace: fields[2]}, nil
 }
 
-// StartAgent records the name on the pane, runs pi with args, and waits for the
-// foreground command to change from the shell that was there. The name is the
-// identity a restarted dungeon reads back through Agents; nothing here keeps a
-// map. A pane that never starts the agent is an error naming the pane.
+// StartAgent records the name on the pane, runs pi with args, and waits until
+// the agent can take input: the foreground command has left the shell that was
+// there, and the pane's output has gone quiet. A changing foreground command is
+// not enough on its own, because a TUI accepts a pasted prompt long after it
+// has replaced the shell. The name is the identity a restarted dungeon reads
+// back through Agents; nothing here keeps a map. A pane that never starts the
+// agent is an error naming the pane.
 //
 // A name already live in a different pane is refused: every later lookup is by
 // name, so two panes on one name would make it ambiguous. A name already live
@@ -312,6 +315,9 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 		}
 		now, err := t.paneCommand(ctx, pane)
 		if err == nil && now != "" && now != before {
+			if err := t.waitQuiet(ctx, pane, name, before); err != nil {
+				return err
+			}
 			started = true
 			return nil
 		}
@@ -335,16 +341,157 @@ func (t tmux) paneCommand(ctx context.Context, pane string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// readyQuiet is how long a pane's output must stay unchanged before StartAgent
+// calls the agent ready. Boot banners arrive in bursts; a quiet gap longer than
+// the burst spacing means the agent has reached its prompt.
+const readyQuiet = 300 * time.Millisecond
+
+// waitQuiet blocks until the pane's captured output has not changed for
+// readyQuiet, while the foreground command stays away from the shell that was
+// there before the agent. Bounded: an agent that never settles is an error that
+// names the pane.
+func (t tmux) waitQuiet(ctx context.Context, pane, name, before string) error {
+	deadline := time.Now().Add(10 * time.Second)
+	last, err := t.capture(ctx, pane)
+	if err != nil {
+		return err
+	}
+	since := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		now, err := t.capture(ctx, pane)
+		if err != nil {
+			return err
+		}
+		command, err := t.paneCommand(ctx, pane)
+		if err == nil && command == before {
+			return fmt.Errorf("tmux: pane %s returned to %q before agent %s was ready", pane, command, name)
+		}
+		if now != last {
+			last = now
+			since = time.Now()
+		}
+		if time.Since(since) >= readyQuiet {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("tmux: pane %s output did not settle for agent %s within 10s", pane, name)
+		}
+	}
+}
+
+// capture reads a pane's visible text, without escape sequences.
+func (t tmux) capture(ctx context.Context, pane string) (string, error) {
+	out, err := t.call(ctx, "capture-pane", "-p", "-t", pane)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// submitSettle is the pause between an Enter and the look that decides whether
+// the prompt was submitted.
+const submitSettle = 200 * time.Millisecond
+
+// submitTries bounds the extra Enters Prompt sends when a slow TUI ignored the
+// first one.
+const submitTries = 10
+
 // Prompt submits text to the named agent as one prompt. The text travels
 // through a buffer and bracketed paste, so a long prompt keeps its bytes, then
-// Enter submits it. It returns when the input is submitted, not when the turn
-// finishes.
+// Enter submits it. A TUI may not be listening yet: when the pasted text is
+// still on the cursor's input line, Prompt presses Enter again a bounded number
+// of times. It returns when the input is submitted, not when the turn finishes.
+// A prompt that will not submit is an error that names the pane, so text is
+// never left silently unsent.
 func (t tmux) Prompt(ctx context.Context, name, text string) error {
 	pane, err := t.agentPane(ctx, name)
 	if err != nil {
 		return err
 	}
-	return t.paste(ctx, pane, text)
+	if err := t.paste(ctx, pane, text); err != nil {
+		return err
+	}
+	return t.confirmSubmit(ctx, pane, text)
+}
+
+// confirmSubmit looks at the cursor's line after the first Enter. Paste echoes
+// the text on that line and leaves the cursor after it; a TUI that accepted the
+// prompt clears the line or moves the cursor away. Text still under the cursor
+// means the Enter was ignored, so send another.
+func (t tmux) confirmSubmit(ctx context.Context, pane, text string) error {
+	needle := inputNeedle(text)
+	if needle == "" {
+		return nil
+	}
+	enters := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(submitSettle):
+		}
+		held, err := t.inputHolds(ctx, pane, needle)
+		if err != nil {
+			return err
+		}
+		if !held {
+			return nil
+		}
+		if enters >= submitTries {
+			return fmt.Errorf("tmux: pane %s still holds the prompt after %d Enters", pane, enters+1)
+		}
+		if _, err := t.call(ctx, "send-keys", "-t", pane, "Enter"); err != nil {
+			return fmt.Errorf("tmux: pane %s: %w", pane, err)
+		}
+		enters++
+	}
+}
+
+// inputNeedle is the tail of the prompt's last line: the visible part of the
+// text that the terminal echoes under the cursor. A wrapped prompt still ends
+// with it on the cursor's line.
+func inputNeedle(text string) string {
+	last := text
+	if i := strings.LastIndexByte(last, '\n'); i >= 0 {
+		last = last[i+1:]
+	}
+	last = strings.TrimRight(last, " \t\r")
+	if last == "" {
+		return ""
+	}
+	runes := []rune(last)
+	const tail = 16
+	if len(runes) > tail {
+		runes = runes[len(runes)-tail:]
+	}
+	return string(runes)
+}
+
+// inputHolds reports whether needle is on the pane's cursor line. Only that
+// line counts: submitted text in the transcript above is not a pending prompt.
+func (t tmux) inputHolds(ctx context.Context, pane, needle string) (bool, error) {
+	out, err := t.call(ctx, "display-message", "-p", "-t", pane, "#{cursor_y}")
+	if err != nil {
+		return false, err
+	}
+	row, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return false, fmt.Errorf("tmux: pane %s reported cursor row %q", pane, out)
+	}
+	screen, err := t.capture(ctx, pane)
+	if err != nil {
+		return false, err
+	}
+	lines := strings.Split(screen, "\n")
+	if row < 0 || row >= len(lines) {
+		return false, nil
+	}
+	return strings.Contains(lines[row], needle), nil
 }
 
 func (t tmux) agentPane(ctx context.Context, name string) (string, error) {
