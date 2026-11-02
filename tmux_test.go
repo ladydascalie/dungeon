@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -485,4 +486,113 @@ func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
 	}
 
 	pollAgents(t, h, name, true)
+}
+
+func TestFocusArgv(t *testing.T) {
+	cases := []struct {
+		name                                      string
+		paneSession, paneWindow, pane, clientSess string
+		want                                      []string
+	}{
+		{
+			// The client already watches the pane's session: no switch.
+			name:        "same session",
+			paneSession: "$1", paneWindow: "@2", pane: "%3", clientSess: "$1",
+			want: []string{"select-window", "-t", "@2", ";", "select-pane", "-t", "%3"},
+		},
+		{
+			// The pane lives in another session: switch the client first.
+			name:        "different session",
+			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSess: "$1",
+			want: []string{
+				"switch-client", "-t", "$4",
+				"select-window", "-t", "@5",
+				";",
+				"select-pane", "-t", "%6",
+			},
+		},
+		{
+			// Nobody is attached: no client to switch, and no error.
+			name:        "no client",
+			paneSession: "$4", paneWindow: "@5", pane: "%6", clientSess: "",
+			want: []string{"select-window", "-t", "@5", ";", "select-pane", "-t", "%6"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := focusArgv(c.paneSession, c.paneWindow, c.pane, c.clientSess)
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("focusArgv = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestTmuxFocusWithNoClientAttached(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	ws, _, _, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	second, other, err := h.CreateTab(ctx, ws, "reviewer", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	// No client is attached to this private server, which is the normal case.
+	if clients := runInTestServer(t, h.socket, "list-clients", "-F", "#{client_name}"); clients != "" {
+		t.Fatalf("test server has clients: %s", clients)
+	}
+	runInTestServer(t, h.socket, "set-option", "-p", "-t", other, paneAgentOption, "w1-aa")
+
+	// FocusTab lands on the other window of the same session.
+	if err := h.FocusTab(ctx, second); err != nil {
+		t.Fatalf("FocusTab with no client: %v", err)
+	}
+	active := runInTestServer(t, h.socket, "display-message", "-p", "-t", ws, "#{window_id}")
+	if active != second {
+		t.Fatalf("active window = %s, want %s", active, second)
+	}
+
+	// FocusAgent moves to the window and the pane that hosts the agent.
+	if err := h.FocusAgent(ctx, "w1-aa"); err != nil {
+		t.Fatalf("FocusAgent with no client: %v", err)
+	}
+	active = runInTestServer(t, h.socket, "display-message", "-p", "-t", ws, "#{window_id}")
+	if active != second {
+		t.Fatalf("active window after FocusAgent = %s, want %s", active, second)
+	}
+	activePane := runInTestServer(t, h.socket, "display-message", "-p", "-t", ws, "#{pane_id}")
+	if activePane != other {
+		t.Fatalf("active pane after FocusAgent = %s, want %s", activePane, other)
+	}
+}
+
+func TestTmuxFocusAcrossSessionsWithNoClientAttached(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	if _, _, _, err := h.CreateWorkspace(ctx, "one", "worker", t.TempDir()); err != nil {
+		t.Fatalf("CreateWorkspace one: %v", err)
+	}
+	second, secondTab, secondPane, err := h.CreateWorkspace(ctx, "two", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace two: %v", err)
+	}
+	runInTestServer(t, h.socket, "set-option", "-p", "-t", secondPane, paneAgentOption, "w2-bb")
+
+	// No client is attached, so there is nothing to switch; the window and pane
+	// of the other session are still selected, ready for the next attach.
+	if err := h.FocusAgent(ctx, "w2-bb"); err != nil {
+		t.Fatalf("FocusAgent across sessions with no client: %v", err)
+	}
+	active := runInTestServer(t, h.socket, "display-message", "-p", "-t", second, "#{window_id}")
+	if active != secondTab {
+		t.Fatalf("active window of %s = %s, want %s", second, active, secondTab)
+	}
+	activePane := runInTestServer(t, h.socket, "display-message", "-p", "-t", second, "#{pane_id}")
+	if activePane != secondPane {
+		t.Fatalf("active pane of %s = %s, want %s", second, activePane, secondPane)
+	}
 }
