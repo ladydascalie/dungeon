@@ -448,10 +448,10 @@ switches to the pane, `1` to `9` jump, `r` reloads, and `q` closes the rail.
 A click on a tile switches to that pane too, and the mouse wheel moves the
 selection. Agent panes get their own icon and kind; plain terminals appear as
 `zsh`, `bash`, or whatever shell is in front. The rail sees a dungeon lane by
-its `@dungeon_agent` option, then a known agent command, or an agent process
-below the pane's shell. A title alone is not proof: a stale `π - ...` title
-does not keep a shell in the agent list. The rail marks its own pane with
-`@agent_rail`, so it never lists itself.
+its `@dungeon_agent` option, a known agent command, or an OSC report that names
+the app; it does not walk the process tree. A title alone is not proof: a stale
+`π - ...` title does not keep a shell in the agent list. The rail marks its own
+pane with `@agent_rail`, so it never lists itself.
 
 When a pane's worktree belongs to an encounter, the rail reads that encounter's
 state and shows the unit and its status beside the agent. A lane in a worktree
@@ -463,6 +463,22 @@ starts a `dungeon osc-sink` parser only when the pane has no pipe, and shows the
 last root record as the harness state, with its message in the footer. Working
 and blocked records die with the process that reported them. `done` and `error`
 survive.
+
+The rail wakes on events, not on a clock. One long-lived tmux client in control mode,
+on dungeon's own socket, reports topology: window add, close and rename,
+layout and pane mode changes, session changes, and clients attaching or
+detaching. That client runs `refresh-client -f no-output`, so the pane stream
+is deliberately disabled; the rail reads pane state through its `pipe-pane`
+sink, never from that stream. fsnotify watches the repo's `.dungeon` tree:
+every encounter with its `plan.yaml`, `state.json`, `reports/` and `briefs/`,
+plus the OSC record directory, so a plan edit, a state write or a new report
+wakes the rail at once. A 10 second backstop, `--backstop`, re-reads in case an
+event was missed. A burst coalesces into one re-read 50ms later.
+
+When nothing changes the rail holds one idle tmux connection, two waiting event
+channels and one timer, and runs no command per second. Each backstop tick costs
+one `tmux list-panes` plus a read of the state files and OSC records it needs.
+The tick was one second before, with a process tree walk on every one.
 
 The renderer is bubbletea over a tmux snapshot. A refresh diffs cells instead
 of clearing and repainting the pane, which is why it does not flicker. A
