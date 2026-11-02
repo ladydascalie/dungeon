@@ -138,6 +138,16 @@ func (t tmux) Workspaces(ctx context.Context) []workspace {
 	return all
 }
 
+// requireTarget refuses an empty workspace, tab or pane id before tmux sees
+// it. tmux reads an empty -t as the current session, window or pane, which is
+// the operator's own, so an empty id is never a no-op.
+func requireTarget(kind, id string) error {
+	if id == "" {
+		return fmt.Errorf("tmux: refusing an empty %s id", kind)
+	}
+	return nil
+}
+
 // CreateWorkspace creates one detached session, names its first window and
 // records dungeon's ownership on the session.
 func (t tmux) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (wsID, tabID, rootPane string, err error) {
@@ -159,10 +169,10 @@ func (t tmux) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) 
 
 // CreateTab adds one detached window to a session and returns its root pane.
 func (t tmux) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, rootPane string, err error) {
-	args := []string{"new-window", "-d", "-c", cwd}
-	if ws != "" {
-		args = append(args, "-t", ws)
+	if err := requireTarget("workspace", ws); err != nil {
+		return "", "", err
 	}
+	args := []string{"new-window", "-d", "-c", cwd, "-t", ws}
 	if label != "" {
 		args = append(args, "-n", label)
 	}
@@ -183,6 +193,9 @@ func (t tmux) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, root
 // are inverted. Repeated splits of the same target use the same ratio and stay
 // equal. The new pane does not take focus.
 func (t tmux) SplitPane(ctx context.Context, target, direction, cwd string, ratio float64) (string, error) {
+	if err := requireTarget("pane", target); err != nil {
+		return "", err
+	}
 	percent := int(math.Round((1 - ratio) * 100))
 	if percent < 1 {
 		percent = 1
@@ -219,6 +232,9 @@ func (t tmux) SplitPane(ctx context.Context, target, direction, cwd string, rati
 // Pane reports one live pane's window and session. A pane that is gone is an
 // error.
 func (t tmux) Pane(ctx context.Context, id string) (pane, error) {
+	if err := requireTarget("pane", id); err != nil {
+		return pane{}, err
+	}
 	out, err := t.call(ctx, "display-message", "-p", "-t", id,
 		"#{pane_id}\t#{window_id}\t#{session_id}")
 	if err != nil {
@@ -235,7 +251,24 @@ func (t tmux) Pane(ctx context.Context, id string) (pane, error) {
 // foreground command to change from the shell that was there. The name is the
 // identity a restarted dungeon reads back through Agents; nothing here keeps a
 // map. A pane that never starts the agent is an error naming the pane.
+//
+// A name already live in a different pane is refused: every later lookup is by
+// name, so two panes on one name would make it ambiguous. A name already live
+// in this pane is the same agent, so the call is a no-op.
 func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) error {
+	if err := requireTarget("pane", pane); err != nil {
+		return err
+	}
+	agents, err := t.Agents(ctx)
+	if err != nil {
+		return err
+	}
+	if a, live := agents[name]; live {
+		if a.Pane == pane {
+			return nil
+		}
+		return fmt.Errorf("tmux: agent name %s is already live in pane %s", name, a.Pane)
+	}
 	before, err := t.paneCommand(ctx, pane)
 	if err != nil {
 		return err
@@ -259,7 +292,15 @@ func (t tmux) StartAgent(ctx context.Context, name, pane string, args []string) 
 	for i, arg := range command {
 		command[i] = shellQuote(arg)
 	}
-	if err := t.paste(ctx, pane, strings.Join(command, " ")); err != nil {
+	// The option lives in tmux, not in the agent process, so it would outlive a
+	// dead agent and make a ghost lane read live. Unset it after the agent
+	// exits, however it exits.
+	unset := append([]string{"tmux"}, t.argv("set-option", "-p", "-u", "-t", pane, paneAgentOption)...)
+	for i, arg := range unset {
+		unset[i] = shellQuote(arg)
+	}
+	line := strings.Join(command, " ") + "; " + strings.Join(unset, " ")
+	if err := t.paste(ctx, pane, line); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -349,13 +390,15 @@ func (t tmux) SendKeys(ctx context.Context, name string, keys ...string) error {
 }
 
 // PingCommand is a line a POSIX shell can run to deliver a message to pane.
-// The message is shell-quoted, so $, a backtick and a newline arrive literally.
+// The message is shell-quoted, so $, a backtick and a newline arrive literally,
+// and it is passed after `--` so a message that starts with a dash is not read
+// as a tmux flag.
 func (t tmux) PingCommand(pane, message string) string {
 	bin := "tmux"
 	if t.socket != "" {
 		bin += " -L " + shellQuote(t.socket)
 	}
-	return fmt.Sprintf("%s send-keys -t %s -l %s && %s send-keys -t %s Enter",
+	return fmt.Sprintf("%s send-keys -t %s -l -- %s && %s send-keys -t %s Enter",
 		bin, shellQuote(pane), shellQuote(message), bin, shellQuote(pane))
 }
 
@@ -372,12 +415,18 @@ func (t tmux) FocusAgent(ctx context.Context, name string) error {
 
 // FocusTab moves the operator to a window.
 func (t tmux) FocusTab(ctx context.Context, tab string) error {
+	if err := requireTarget("tab", tab); err != nil {
+		return err
+	}
 	_, err := t.call(ctx, "select-window", "-t", tab)
 	return err
 }
 
 // ClosePane kills one pane dungeon created. It kills whatever runs in it.
 func (t tmux) ClosePane(ctx context.Context, pane string) error {
+	if err := requireTarget("pane", pane); err != nil {
+		return err
+	}
 	_, err := t.call(ctx, "kill-pane", "-t", pane)
 	return err
 }
@@ -386,6 +435,9 @@ func (t tmux) ClosePane(ctx context.Context, pane string) error {
 // option. A session the operator or another project made is refused, never
 // killed.
 func (t tmux) CloseWorkspace(ctx context.Context, ws string) error {
+	if err := requireTarget("workspace", ws); err != nil {
+		return err
+	}
 	out, err := t.call(ctx, "display-message", "-p", "-t", ws, "#{"+sessionOwnerOption+"}")
 	if err != nil {
 		return err

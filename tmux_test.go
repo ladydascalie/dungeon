@@ -236,3 +236,232 @@ func TestTmuxCloseWorkspaceRefusesAForeignSession(t *testing.T) {
 		t.Fatalf("foreign session %s is gone; sessions: %s", foreign, got)
 	}
 }
+
+func TestTmuxPingCommandLeadingDash(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "shell", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	file := filepath.Join(t.TempDir(), "ping.txt")
+	runInTestServer(t, h.socket, "send-keys", "-t", root, "-l", "cat > "+shellQuote(file))
+	runInTestServer(t, h.socket, "send-keys", "-t", root, "Enter")
+	waitForFile(t, file)
+
+	msg := "-l is not a flag here, and neither is --"
+	ping := h.PingCommand(root, msg)
+	if out, err := exec.Command("sh", "-c", ping).CombinedOutput(); err != nil {
+		t.Fatalf("run ping command: %v: %s\n%s", err, out, ping)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _ := os.ReadFile(file)
+		if string(got) == msg+"\n" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ping delivered %q, want %q plus Enter", got, msg)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitForFile blocks until a shell started by a test has opened its redirect.
+func waitForFile(t *testing.T, file string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(file); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cat never started: %s never appeared", file)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTmuxEmptyTargetIsAnError(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	ws, _, root, err := h.CreateWorkspace(ctx, "enc", "shell", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	checks := []struct {
+		member string
+		err    error
+	}{
+		{"CreateTab", func() error { _, _, err := h.CreateTab(ctx, "", "tab", t.TempDir()); return err }()},
+		{"SplitPane", func() error { _, err := h.SplitPane(ctx, "", "right", t.TempDir(), 0.5); return err }()},
+		{"Pane", func() error { _, err := h.Pane(ctx, ""); return err }()},
+		{"StartAgent", h.StartAgent(ctx, "w1-aa", "", nil)},
+		{"FocusTab", h.FocusTab(ctx, "")},
+		{"ClosePane", h.ClosePane(ctx, "")},
+		{"CloseWorkspace", h.CloseWorkspace(ctx, "")},
+	}
+	for _, c := range checks {
+		if c.err == nil {
+			t.Errorf("%s accepted an empty target", c.member)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
+	// An empty target must not have resolved to the current session: both the
+	// workspace and its root pane are still there.
+	if got := runInTestServer(t, h.socket, "list-sessions", "-F", "#{session_id}"); !strings.Contains(got, ws) {
+		t.Fatalf("session %s is gone after an empty target; sessions: %s", ws, got)
+	}
+	if _, err := h.Pane(ctx, root); err != nil {
+		t.Fatalf("root pane %s is gone after an empty target: %v", root, err)
+	}
+}
+
+func TestTmuxStartAgentRefusesANameLiveInAnotherPane(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+
+	bin := t.TempDir()
+	script := filepath.Join(bin, "pi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec sleep 60\n"), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ws, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	other, err := h.SplitPane(ctx, root, "right", t.TempDir(), 0.5)
+	if err != nil {
+		t.Fatalf("SplitPane other: %v", err)
+	}
+
+	name := "w1-aa"
+	done := make(chan error, 1)
+	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartAgent: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("StartAgent did not start the agent")
+	}
+
+	// Same name, same pane: the agent is already there, so the call is a no-op.
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent on the same pane = %v, want nil", err)
+	}
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if a := agents[name]; a.Pane != root {
+		t.Fatalf("agent %s is at %s, want %s", name, a.Pane, root)
+	}
+
+	// Same name, different pane: refused, and the first pane keeps the name.
+	if err := h.StartAgent(ctx, name, other, nil); err == nil {
+		t.Fatal("StartAgent accepted a name already live in another pane")
+	}
+	agents, err = h.Agents(ctx)
+	if err != nil {
+		t.Fatalf("Agents after refusal: %v", err)
+	}
+	if a := agents[name]; a.Pane != root {
+		t.Fatalf("agent %s moved to %s after a refusal, want %s", name, a.Pane, root)
+	}
+	if _, err := h.Pane(ctx, other); err != nil {
+		t.Fatalf("refusing a duplicate name closed the other pane: %v", err)
+	}
+
+	if err := h.CloseWorkspace(ctx, ws); err != nil {
+		t.Fatalf("CloseWorkspace: %v", err)
+	}
+}
+
+// fakePi writes a fake pi into its own directory and puts it first on PATH.
+func fakePi(t *testing.T, body string) {
+	t.Helper()
+	bin := t.TempDir()
+	script := filepath.Join(bin, "pi")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatalf("write fake pi: %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// pollAgents samples the fleet until want agrees with whether name is listed.
+func pollAgents(t *testing.T, h tmux, name string, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		agents, err := h.Agents(context.Background())
+		if err != nil {
+			t.Fatalf("Agents: %v", err)
+		}
+		_, listed := agents[name]
+		if listed == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("agent %s listed = %v, want %v; fleet: %v", name, listed, want, agents)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestTmuxStartAgentLeavesNoGhostWhenTheAgentExits(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "started")
+	// The agent is seen to start, so the failed-start cleanup is not what
+	// unsets the name. It exits on its own a moment later.
+	fakePi(t, ": > "+shellQuote(marker)+"; sleep 1")
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	name := "w1-aa"
+	if err := h.StartAgent(ctx, name, root, nil); err != nil {
+		t.Fatalf("StartAgent: %v", err)
+	}
+	pollAgents(t, h, name, true)
+
+	waitForFile(t, marker)
+	pollAgents(t, h, name, false)
+}
+
+func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	fakePi(t, "exec sleep 60")
+
+	_, _, root, err := h.CreateWorkspace(ctx, "enc", "worker", t.TempDir())
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+
+	name := "w1-aa"
+	done := make(chan error, 1)
+	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("StartAgent: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("StartAgent did not start the agent")
+	}
+
+	pollAgents(t, h, name, true)
+}
