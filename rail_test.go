@@ -713,6 +713,7 @@ func TestRailWindowFollowsTheCursor(t *testing.T) {
 		agents = append(agents, railPaneInfo{Label: "pane", Pane: "%" + string(rune('a'+i)), Session: "fleet"})
 	}
 	m := railModel{agents: agents, width: 40, height: 12, cursor: 18}
+	m.clampCursor()
 	lay := m.layout()
 	start := m.window(lay)
 	top := -1
@@ -739,5 +740,48 @@ func TestRailDoesNotRepeatTheSessionAsItsEncounter(t *testing.T) {
 	if len(lay.lines) != 3 {
 		t.Fatalf("layout has %d lines, want one session header and two tile lines:\n%s",
 			len(lay.lines), strings.Join(lay.lines, "\n"))
+	}
+}
+
+func TestRailScrollsByOneTileNotAScreen(t *testing.T) {
+	var agents []railPaneInfo
+	for i := 0; i < 20; i++ {
+		agents = append(agents, railPaneInfo{Label: "pane", Pane: "%" + string(rune('a'+i)), Session: "fleet"})
+	}
+	m := railModel{agents: agents, width: 40, height: 16}
+	m.clampCursor()
+	if got := m.scroll; got != 0 {
+		t.Fatalf("start scroll %d, want 0", got)
+	}
+	before := m.scroll
+	for i := 1; i < 4; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = next.(railModel)
+	}
+	if m.scroll != before {
+		t.Fatalf("the window moved while the cursor was inside it: %d -> %d", before, m.scroll)
+	}
+	// Walk to the bottom edge of the window; one more step moves it by one tile.
+	for i := 0; i < 20; i++ {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = next.(railModel)
+	}
+	if m.cursor != len(agents)-1 {
+		t.Fatalf("cursor %d, want the last pane", m.cursor)
+	}
+	lay := m.layout()
+	start := m.window(lay)
+	top := -1
+	for i, pane := range lay.linePane {
+		if pane == m.cursor {
+			top = i
+			break
+		}
+	}
+	if top < start || top+1 >= start+m.railBody() {
+		t.Fatalf("the last pane is outside the window %d..%d (tile at %d)", start, start+m.railBody(), top)
+	}
+	if m.scroll > len(lay.lines)-m.railBody() {
+		t.Fatalf("scroll %d is past the end of %d lines", m.scroll, len(lay.lines))
 	}
 }

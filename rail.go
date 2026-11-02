@@ -243,6 +243,7 @@ type railModel struct {
 
 	agents     []railPaneInfo
 	cursor     int
+	scroll     int
 	lastActive string
 	notice     string
 	err        error
@@ -378,6 +379,7 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.clampCursor()
 		return m, nil
 
 	case tickMsg:
@@ -626,19 +628,28 @@ func (m railModel) railBody() int {
 	return max(1, m.height-3)
 }
 
-// window picks the first body line to show. It centres the selected pane, so a
-// cursor always paints the same window and a click maps back to the same pane.
+// window picks the first body line to show. The rail holds its place while the
+// cursor moves inside the window, and scrolls by the smallest step that brings
+// the selected pane back into view, so one j moves one tile, not a screen.
 func (m railModel) window(lay railLayout) int {
 	body := m.railBody()
 	if len(lay.lines) <= body {
 		return 0
 	}
-	start := 0
+	start := m.scroll
+	top := -1
 	for i, pane := range lay.linePane {
 		if pane == m.cursor {
-			start = i - body/2
+			top = i
 			break
 		}
+	}
+	switch {
+	case top < 0:
+	case top < start:
+		start = top
+	case top+1 >= start+body:
+		start = top + 2 - body
 	}
 	if start > len(lay.lines)-body {
 		start = len(lay.lines) - body
@@ -673,6 +684,7 @@ func (m *railModel) clampCursor() {
 	if n := len(m.agents); n > 0 && m.cursor >= n {
 		m.cursor = n - 1
 	}
+	m.scroll = m.window(m.layout())
 }
 
 func (m railModel) selectedPane() string {
