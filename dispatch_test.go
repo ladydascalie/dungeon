@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -741,5 +742,150 @@ func TestAChangeOutsideThePathsStillBlocks(t *testing.T) {
 	}
 	if subject, _ := gitRun(repo, "log", "-1", "--format=%s", "enc/w1"); subject != "root" {
 		t.Fatalf("an outside change must not be committed, head %q", subject)
+	}
+}
+
+// reconcileFixture builds one working unit beside a fake herdr. The plan is
+// built in memory: reconcile and dispatchUnit read the plan value, not the file.
+func reconcileFixture(t *testing.T, started string) (Plan, dispatchOpts, *State, string) {
+	t.Helper()
+	logPath := fakeHerdr(t, started)
+	dir := t.TempDir()
+	planPath := filepath.Join(dir, ".dungeon", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte("encounter: enc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := Plan{
+		Encounter: "enc",
+		Repo:      filepath.Join(dir, "repo"),
+		Base:      "main",
+		Minions:   []Minion{{ID: "w1", Role: RoleWorker}},
+		Units: []Unit{{
+			ID: "A", Minion: "w1", Paths: []string{"src/**"},
+			Goal: "Do the thing.", Accept: "true",
+		}},
+	}
+	st := &State{Encounter: "enc", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := st.SetUnit("A", "working", "brief "+briefPath(planPath, "A")); err != nil {
+		t.Fatal(err)
+	}
+	o := dispatchOpts{
+		planPath:      planPath,
+		statePath:     StatePath(planPath),
+		timeout:       time.Second,
+		acceptTimeout: time.Second,
+		poll:          time.Millisecond,
+		out:           io.Discard,
+	}
+	return p, o, st, logPath
+}
+
+func promptCalls(t *testing.T, logPath string) int {
+	t.Helper()
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(calls), "agent prompt")
+}
+
+// A working unit whose prompt was never confirmed is told its brief again.
+// The successful retry clears the marker, and a later pass leaves it alone.
+func TestReconcileRepromptsAnUnconfirmedWorkingUnit(t *testing.T) {
+	p, o, st, logPath := reconcileFixture(t, "w1:working\n")
+	st.SetPromptPending("A", true)
+
+	d := &digest{}
+	if !reconcile(t.Context(), newHerdr(), o, p, st, d) {
+		t.Fatal("a re-prompt is progress")
+	}
+	if st.PromptIsPending("A") {
+		t.Fatal("the marker must clear after Prompt succeeds")
+	}
+	if got := promptCalls(t, logPath); got != 1 {
+		t.Fatalf("prompted %d times, want once", got)
+	}
+	if len(d.Dispatched) != 1 || d.Dispatched[0] != "A" {
+		t.Fatalf("digest dispatched %v, want [A]", d.Dispatched)
+	}
+
+	reconcile(t.Context(), newHerdr(), o, p, st, &digest{})
+	if got := promptCalls(t, logPath); got != 1 {
+		t.Fatalf("a confirmed unit was prompted again: %d calls", got)
+	}
+}
+
+// A confirmed working unit is still working, not a retry candidate.
+func TestReconcileLeavesAConfirmedWorkingUnitAlone(t *testing.T) {
+	p, o, st, logPath := reconcileFixture(t, "w1:working\n")
+	st.SetPromptPending("A", false)
+
+	reconcile(t.Context(), newHerdr(), o, p, st, &digest{})
+
+	if got := promptCalls(t, logPath); got != 0 {
+		t.Fatalf("a confirmed unit was prompted %d times", got)
+	}
+	if got := st.UnitStatus("A"); got != "working" {
+		t.Fatalf("unit %q, want working", got)
+	}
+}
+
+// A report proves the lane got its brief, so the stale marker is cleared
+// without sending the prompt a second time.
+func TestReconcileDoesNotRepromptALaneThatReported(t *testing.T) {
+	p, o, st, logPath := reconcileFixture(t, "w1:working\n")
+	st.SetPromptPending("A", true)
+	if err := os.MkdirAll(filepath.Dir(reportPath(o.planPath, "A")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reportPath(o.planPath, "A"), []byte("done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcile(t.Context(), newHerdr(), o, p, st, &digest{})
+
+	if got := promptCalls(t, logPath); got != 0 {
+		t.Fatalf("a lane with a report was prompted %d times", got)
+	}
+	if st.PromptIsPending("A") {
+		t.Fatal("a report must clear the marker")
+	}
+}
+
+// A state written before prompt_pending existed reads as confirmed, so an old
+// encounter does not re-prompt a fleet that is already working.
+func TestReconcileLeavesALegacyWorkingStateUntouched(t *testing.T) {
+	p, o, _, logPath := reconcileFixture(t, "w1:working\n")
+	legacy := `{
+  "encounter": "enc",
+  "units": {"A": {"status": "working", "note": "old brief", "at": "2025-01-01T00:00:00Z"}},
+  "minions": {}
+}
+`
+	if err := os.WriteFile(o.statePath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(o.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.PromptIsPending("A") {
+		t.Fatal("a state without the field must read as confirmed")
+	}
+
+	reconcile(t.Context(), newHerdr(), o, p, &st, &digest{})
+
+	if got := promptCalls(t, logPath); got != 0 {
+		t.Fatalf("a legacy working unit was prompted %d times", got)
+	}
+	after, err := os.ReadFile(o.statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != legacy {
+		t.Fatalf("a legacy state was rewritten:\n%s", after)
 	}
 }

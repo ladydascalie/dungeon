@@ -29,6 +29,12 @@ type UnitState struct {
 	Files   []string `json:"files,omitempty"`
 	Link    string   `json:"link,omitempty"` // a pull request or any URL: forge agnostic, http(s) only
 	History []Change `json:"history,omitempty"`
+	// PromptPending is set when the unit is marked working and cleared once
+	// Prompt confirms the lane received the brief. A working unit with this set
+	// may never have got its prompt, so reconcile delivers it again. A state
+	// written before the field existed reads as confirmed, so an old encounter
+	// does not re-prompt a fleet that is already working.
+	PromptPending bool `json:"prompt_pending,omitempty"`
 }
 
 type MinionState struct {
@@ -202,8 +208,28 @@ func (s *State) SetUnit(id, status, note string) error {
 	u.Status = status
 	u.Note = note
 	u.At = now()
+	if status != "working" {
+		// The marker only means something on a working unit: leaving it set
+		// would tell a later run to re-prompt a lane that has moved on.
+		u.PromptPending = false
+	}
 	s.Units[id] = u
 	return nil
+}
+
+// SetPromptPending records whether a working unit's prompt is still
+// unconfirmed. dispatch calls it with true before the prompt is sent and with
+// false once Prompt reports the text submitted.
+func (s *State) SetPromptPending(id string, pending bool) {
+	u := s.Units[id]
+	u.PromptPending = pending
+	s.Units[id] = u
+}
+
+// PromptIsPending reports whether a unit was marked working with a prompt whose
+// delivery is not confirmed yet. A state without the field reads as confirmed.
+func (s State) PromptIsPending(id string) bool {
+	return s.Units[id].PromptPending
 }
 
 // Attach records a file the operator wants one click away from the unit: a
