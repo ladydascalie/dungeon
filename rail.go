@@ -3,12 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +41,7 @@ type railPaneInfo struct {
 	HarnessProgress *int   `json:"harness_progress,omitempty"`
 	Active          bool   `json:"active"`
 	Label           string `json:"label"`
+	OSCPiped        bool   `json:"-"`
 }
 
 // railStatus is the dungeon fact for one pane: which unit the lane is on and
@@ -50,6 +50,23 @@ type railStatus struct {
 	Status    string
 	Unit      string
 	Encounter string
+}
+
+// railSourceIssue is a source the rail could not read. It carries the file's
+// age, because a failure without a time reads like a value of zero.
+type railSourceIssue struct {
+	kind string
+	path string
+	err  error
+	at   time.Time
+}
+
+// railRead is one whole answer from tmux: the rows, what could not be read,
+// and when the read happened.
+type railRead struct {
+	agents []railPaneInfo
+	issues []railSourceIssue
+	at     time.Time
 }
 
 // railEncounterRoot finds the .dungeon a pane belongs to. A lane worktree sits
@@ -92,19 +109,38 @@ func dirExists(path string) bool {
 }
 
 // loadRailStatuses joins one .dungeon to the panes its state records. A broken
-// plan contributes no status; the rail still lists the pane.
-func loadRailStatuses(root string) map[string]railStatus {
+// plan or state contributes no status and is named as an issue, so an unknown
+// never renders as a value. The rail still lists the pane.
+func loadRailStatuses(root string) (map[string]railStatus, []railSourceIssue) {
 	out := map[string]railStatus{}
+	var issues []railSourceIssue
+	now := time.Now()
 	for _, e := range discoverPlansFrom(root) {
+		at := now
+		if info, err := os.Stat(e.Path); err == nil {
+			at = info.ModTime()
+		}
 		if e.Err != nil {
+			issues = append(issues, railSourceIssue{kind: "plan", path: e.Path, err: e.Err, at: at})
 			continue
 		}
 		plan, findings, err := DecodeFile(e.Path)
-		if err != nil || len(findings) > 0 {
+		if err != nil {
+			issues = append(issues, railSourceIssue{kind: "plan", path: e.Path, err: err, at: at})
 			continue
 		}
-		st, err := LoadState(StatePath(e.Path))
+		if len(findings) > 0 {
+			issues = append(issues, railSourceIssue{kind: "plan", path: e.Path, err: errors.New(findings[0].Message), at: at})
+			continue
+		}
+		statePath := StatePath(e.Path)
+		st, err := LoadState(statePath)
 		if err != nil {
+			stateAt := at
+			if info, statErr := os.Stat(statePath); statErr == nil {
+				stateAt = info.ModTime()
+			}
+			issues = append(issues, railSourceIssue{kind: "state", path: statePath, err: err, at: stateAt})
 			continue
 		}
 		name := plan.Encounter
@@ -123,7 +159,7 @@ func loadRailStatuses(root string) map[string]railStatus {
 			}
 		}
 	}
-	return out
+	return out, issues
 }
 
 // railAgentKinds maps a command name to the agent kind it belongs to. The rail
@@ -137,116 +173,26 @@ var railAgentKinds = map[string]string{
 	"copilot": "copilot", "crush": "crush", "charm": "charm", "omp": "omp",
 }
 
-type railProc struct {
-	pid  int
-	ppid int
-	comm string
-	args string
-}
-
-// loadRailProcs reads the process tree once per refresh. Agent detection needs
-// it because a TUI can run under node or bun, or be a child of an interactive
-// shell, while pane_current_command still says node or zsh.
-func loadRailProcs(ctx context.Context) map[int][]railProc {
-	out, err := exec.CommandContext(ctx, "ps", "-eo", "pid=,ppid=,comm=,args=").Output()
-	if err != nil {
-		return nil
-	}
-	byParent := map[int][]railProc{}
-	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		pid, err1 := strconv.Atoi(fields[0])
-		ppid, err2 := strconv.Atoi(fields[1])
-		if err1 != nil || err2 != nil {
-			continue
-		}
-		byParent[ppid] = append(byParent[ppid], railProc{
-			pid: pid, ppid: ppid, comm: fields[2],
-			args: strings.Join(fields[3:], " "),
-		})
-	}
-	return byParent
-}
-
 func railKindFromCommand(command string) string {
 	return railAgentKinds[filepath.Base(command)]
 }
 
-func railKindFromArgs(args string) string {
-	for _, field := range strings.Fields(args) {
-		field = strings.Trim(field, "\"'()[]{};,")
-		if kind := railKindFromCommand(field); kind != "" {
-			return kind
+// railAgentKind finds the identity behind a pane. A status report wins: the
+// report is the identity, and the process tree is not consulted. Otherwise the
+// dungeon pane option and the foreground command are the evidence.
+func railAgentKind(cmd, agent string, osc oscStatus, reported bool) string {
+	if reported && osc.State != "clear" {
+		if osc.App != "" {
+			return osc.App
 		}
-		// A node or bun invocation often names the agent in its first
-		// argument, not the runtime command itself.
-		if strings.Contains(field, "/") {
-			if kind := railKindFromCommand(field); kind != "" {
-				return kind
-			}
-		}
+		return "agent"
 	}
-	return ""
-}
-
-func railKindFromTitle(title string) string {
-	switch {
-	case strings.HasPrefix(title, "π - "):
-		return "pi"
-	case strings.HasPrefix(title, "Claude"):
-		return "claude"
-	case strings.HasPrefix(title, "Codex"):
-		return "codex"
-	case strings.HasPrefix(title, "Gemini"):
-		return "gemini"
-	case strings.HasPrefix(title, "Cursor"):
-		return "cursor"
-	}
-	return ""
-}
-
-// railAgentKind finds the agent behind a pane. The dungeon option wins, then
-// the pane command and title, then a descendant process. The last step is what
-// keeps pi visible when it was started from a shell.
-func railAgentKind(cmd, title, agent string, pid int, procs map[int][]railProc) string {
 	if agent != "" {
 		// dungeon only starts pi lanes today. Keep the option authoritative
 		// even when the foreground command is still a shell.
 		return "pi"
 	}
-	if kind := railKindFromCommand(cmd); kind != "" {
-		return kind
-	}
-	if kind := railKindBelow(pid, procs, 0); kind != "" {
-		return kind
-	}
-	// A title outlives the process that set it. Only trust it when the process
-	// table could not be read at all.
-	if procs == nil {
-		return railKindFromTitle(title)
-	}
-	return ""
-}
-
-func railKindBelow(pid int, procs map[int][]railProc, depth int) string {
-	if depth > 6 || procs == nil {
-		return ""
-	}
-	for _, p := range procs[pid] {
-		if kind := railKindFromCommand(p.comm); kind != "" {
-			return kind
-		}
-		if kind := railKindFromArgs(p.args); kind != "" {
-			return kind
-		}
-		if kind := railKindBelow(p.pid, procs, depth+1); kind != "" {
-			return kind
-		}
-	}
-	return ""
+	return railKindFromCommand(cmd)
 }
 
 func railAgentLabel(cmd, title, agent string) string {
@@ -263,13 +209,37 @@ func railAgentLabel(cmd, title, agent string) string {
 }
 
 type railSnapshotMsg struct {
-	agents []railPaneInfo
-	err    error
+	read railRead
+	err  error
+	at   time.Time
+}
+
+type railControlMsg struct {
+	event controlEvent
+	ok    bool
+}
+
+type railFileMsg struct {
+	event watchEvent
+	ok    bool
+}
+
+type railWakeMsg struct{}
+
+// railWakeDelay coalesces a burst: a SaveState rename and a report write can
+// arrive together, and one re-read answers both.
+const railWakeDelay = 50 * time.Millisecond
+
+type railSources struct {
+	events  <-chan controlEvent
+	files   <-chan watchEvent
+	control *tmuxControl
 }
 
 type railModel struct {
 	tmux     tmux
-	interval time.Duration
+	backstop time.Duration
+	sources  railSources
 
 	agents     []railPaneInfo
 	cursor     int
@@ -277,37 +247,122 @@ type railModel struct {
 	notice     string
 	err        error
 
+	wakeScheduled bool
+
+	readAt       time.Time
+	readErr      error
+	readErrAt    time.Time
+	watchErr     error
+	watchErrAt   time.Time
+	controlErr   error
+	controlErrAt time.Time
+	issues       []railSourceIssue
+
 	width  int
 	height int
 }
 
-func newRailModel(t tmux, interval time.Duration) railModel {
-	return railModel{tmux: t, interval: interval, width: 32, height: 30}
+func newRailModel(t tmux, backstop time.Duration, src railSources) railModel {
+	return railModel{tmux: t, backstop: backstop, sources: src, width: 32, height: 30}
 }
 
 func (m railModel) Init() tea.Cmd {
-	return tea.Batch(m.refresh(), tick(m.interval))
+	cmds := []tea.Cmd{m.refresh(), m.waitControl(), m.waitFiles()}
+	if m.backstop > 0 {
+		cmds = append(cmds, tick(m.backstop))
+	}
+	return tea.Batch(cmds...)
+}
+
+func (m railModel) waitControl() tea.Cmd {
+	ch := m.sources.events
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		e, ok := <-ch
+		return railControlMsg{event: e, ok: ok}
+	}
+}
+
+func (m railModel) waitFiles() tea.Cmd {
+	ch := m.sources.files
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		e, ok := <-ch
+		return railFileMsg{event: e, ok: ok}
+	}
+}
+
+// wake schedules one re-read shortly ahead. Events that arrive while it waits
+// join it instead of starting their own.
+func (m *railModel) wake() tea.Cmd {
+	if m.wakeScheduled {
+		return nil
+	}
+	m.wakeScheduled = true
+	return tea.Tick(railWakeDelay, func(time.Time) tea.Msg { return railWakeMsg{} })
 }
 
 func (m railModel) refresh() tea.Cmd {
 	t := m.tmux
+	c := m.sources.control
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		agents, err := t.railPanes(ctx)
+		read, err := t.railPanes(ctx)
 		if err == nil {
-			t.ensureRailOSC(ctx, agents)
+			read.issues = append(read.issues, railPipeOSC(ctx, t, c, read.agents)...)
 		}
-		return railSnapshotMsg{agents: agents, err: err}
+		return railSnapshotMsg{read: read, err: err, at: time.Now()}
 	}
 }
 
+// railPipeOSC attaches the status sink to a pane once. The @dungeon_osc option
+// records that the pipe exists, so a refresh does not re-issue it.
+func railPipeOSC(ctx context.Context, t tmux, c *tmuxControl, panes []railPaneInfo) []railSourceIssue {
+	exe, err := os.Executable()
+	if err != nil {
+		return []railSourceIssue{{kind: "osc", err: err, at: time.Now()}}
+	}
+	server := oscServerKey()
+	now := time.Now()
+	var issues []railSourceIssue
+	for _, p := range panes {
+		if p.Pane == "" || p.Kind == "shell" || p.OSCPiped {
+			continue
+		}
+		command := shellQuote(exe) + " osc-sink " + shellQuote(server) + " " + shellQuote(p.Pane)
+		var pipeErr error
+		if c != nil {
+			_, pipeErr = c.do(ctx, "pipe-pane", "-o", "-t", p.Pane, command)
+			if pipeErr == nil {
+				_, pipeErr = c.do(ctx, "set-option", "-p", "-t", p.Pane, "@dungeon_osc", "1")
+			}
+		} else {
+			_, pipeErr = t.call(ctx, "pipe-pane", "-o", "-t", p.Pane, command)
+			if pipeErr == nil {
+				_, pipeErr = t.call(ctx, "set-option", "-p", "-t", p.Pane, "@dungeon_osc", "1")
+			}
+		}
+		if pipeErr != nil {
+			issues = append(issues, railSourceIssue{kind: "osc", path: p.Pane, err: pipeErr, at: now})
+		}
+	}
+	return issues
+}
+
 func (m railModel) focusCmd(pane string) tea.Cmd {
-	t := m.tmux
+	c := m.sources.control
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := t.railFocus(ctx, pane); err != nil {
+		if c == nil {
+			return railNoticeMsg{text: "cannot focus", err: fmt.Errorf("tmux control is down")}
+		}
+		if err := c.railFocus(ctx, pane); err != nil {
 			return railNoticeMsg{text: "cannot focus", err: err}
 		}
 		return nil
@@ -326,13 +381,54 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(m.refresh(), tick(m.interval))
+		if m.backstop <= 0 {
+			return m, nil
+		}
+		return m, tea.Batch(m.refresh(), tick(m.backstop))
+
+	case railControlMsg:
+		if !msg.ok {
+			return m, nil
+		}
+		cmd := m.waitControl()
+		switch msg.event.Kind {
+		case controlExit:
+			m.controlErr = msg.event.Err
+			m.controlErrAt = msg.event.At
+			return m, cmd
+		default:
+			// connected and topology both mean the facts may have moved.
+			if msg.event.Kind == controlConnected {
+				m.controlErr = nil
+			}
+			return m, tea.Batch(cmd, m.wake())
+		}
+
+	case railFileMsg:
+		if !msg.ok {
+			return m, nil
+		}
+		cmd := m.waitFiles()
+		if msg.event.Err != nil {
+			m.watchErr = msg.event.Err
+			m.watchErrAt = msg.event.At
+			return m, cmd
+		}
+		m.watchErr = nil
+		return m, tea.Batch(cmd, m.wake())
+
+	case railWakeMsg:
+		m.wakeScheduled = false
+		return m, m.refresh()
 
 	case railSnapshotMsg:
 		keep := m.selectedPane()
 		m.err = msg.err
 		if msg.err == nil {
-			m.agents = msg.agents
+			m.readAt = msg.at
+			m.readErr = nil
+			m.issues = msg.read.issues
+			m.agents = msg.read.agents
 			for i := range m.agents {
 				if m.agents[i].Active {
 					m.lastActive = m.agents[i].Pane
@@ -356,6 +452,9 @@ func (m railModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.clampCursor()
+		} else {
+			m.readErr = msg.err
+			m.readErrAt = msg.at
 		}
 		return m, nil
 
@@ -634,6 +733,44 @@ func (m railModel) counts() (agents, shells int) {
 	return agents, shells
 }
 
+// railAge names how old a fact is. An empty time is unknown, never zero.
+func railAge(t time.Time) string {
+	if t.IsZero() {
+		return "unknown"
+	}
+	return age(t.UTC().Format(time.RFC3339))
+}
+
+// sourceWarning says which source failed, and how old it is. The rail renders
+// this instead of a value it does not have.
+func (m railModel) sourceWarning() string {
+	if m.readErr != nil {
+		msg := "tmux read failed " + railAge(m.readErrAt) + ": " + collapseSpace(m.readErr.Error())
+		if !m.readAt.IsZero() {
+			msg += " · rows " + railAge(m.readAt)
+		}
+		return msg
+	}
+	if m.watchErr != nil {
+		return "watch " + railAge(m.watchErrAt) + ": " + collapseSpace(m.watchErr.Error())
+	}
+	if len(m.issues) > 0 {
+		it := m.issues[0]
+		msg := it.kind + " " + filepath.Base(it.path) + " " + railAge(it.at)
+		if it.err != nil {
+			msg += ": " + collapseSpace(it.err.Error())
+		}
+		if len(m.issues) > 1 {
+			msg += fmt.Sprintf(" (+%d)", len(m.issues)-1)
+		}
+		return msg
+	}
+	if m.controlErr != nil {
+		return "control " + railAge(m.controlErrAt) + ": " + collapseSpace(m.controlErr.Error())
+	}
+	return ""
+}
+
 func (m railModel) render() string {
 	width := max(10, m.width)
 	height := max(3, m.height)
@@ -652,10 +789,12 @@ func (m railModel) render() string {
 		spread(titleStyle.Render("󰚩")+" "+boldStyle.Render("PANES"), dimStyle.Render(right), width),
 		ruleStyle.Render(strings.Repeat("─", width)),
 	}
-	if m.err != nil {
-		lines = append(lines, dimStyle.Render(truncate("tmux: "+m.err.Error(), width)))
-	} else if len(m.agents) == 0 {
-		lines = append(lines, dimStyle.Render("no panes"))
+	if len(m.agents) == 0 {
+		if m.err != nil {
+			lines = append(lines, dimStyle.Render(truncate("tmux: "+m.err.Error(), width)))
+		} else {
+			lines = append(lines, dimStyle.Render("no panes"))
+		}
 	} else {
 		start, end := m.tileRange()
 		for i := start; i < end; i++ {
@@ -669,13 +808,18 @@ func (m railModel) render() string {
 		lines = append(lines, "")
 	}
 	keys := "j/k  enter  r  q"
-	if m.notice != "" {
+	switch {
+	case m.notice != "":
 		keys = m.notice
-	} else if it, ok := m.selectedAgent(); ok {
-		if it.HarnessMsg != "" {
-			keys = it.HarnessMsg
-		} else if it.HarnessTitle != "" {
-			keys = it.HarnessTitle
+	case m.sourceWarning() != "":
+		keys = m.sourceWarning()
+	default:
+		if it, ok := m.selectedAgent(); ok {
+			if it.HarnessMsg != "" {
+				keys = it.HarnessMsg
+			} else if it.HarnessTitle != "" {
+				keys = it.HarnessTitle
+			}
 		}
 	}
 	lines = append(lines, dimStyle.Render(truncate(keys, width)))
@@ -707,7 +851,8 @@ func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return railToggleCmd(ctx, args[1:], stdout, stderr)
 	}
 	fs := newFlagSet("rail", stderr)
-	interval := fs.Duration("interval", time.Second, "how often to re-read the agent panes")
+	backstop := fs.Duration("backstop", 10*time.Second, "slow re-read so a missed event cannot freeze the rail")
+	legacy := fs.Duration("interval", 0, "deprecated alias for --backstop")
 	backend := muxFlag(fs)
 	once := fs.Bool("once", false, "print one frame and exit")
 	asJSON := fs.Bool("json", false, "print the agent rows as JSON")
@@ -720,19 +865,23 @@ func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "dungeon: rail takes no plan, got %q\n", fs.Arg(0))
 		return 2
 	}
+	if *legacy > 0 {
+		*backstop = *legacy
+	}
 	t, err := railBackend(ctx, *backend)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
 	}
-	m := newRailModel(t, *interval)
+	m := newRailModel(t, *backstop, railSources{})
 	m.width, m.height = *width, *height
 	if *asJSON {
-		agents, err := t.railPanes(ctx)
+		read, err := t.railPanes(ctx)
 		if err != nil {
 			fmt.Fprintf(stderr, "dungeon: %v\n", err)
 			return 2
 		}
+		agents := read.agents
 		if agents == nil {
 			agents = []railPaneInfo{}
 		}
@@ -745,16 +894,28 @@ func railCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	if *once || !isTerminal(stdout) {
-		agents, err := t.railPanes(ctx)
+		read, err := t.railPanes(ctx)
 		if err != nil {
 			fmt.Fprintf(stderr, "dungeon: %v\n", err)
 			return 2
 		}
-		m.agents = agents
+		m.agents = read.agents
+		m.issues = read.issues
+		m.readAt = read.at
 		fmt.Fprint(stdout, m.View())
 		return 0
 	}
-	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events := make(chan controlEvent, 64)
+	files := make(chan watchEvent, 256)
+	control := startTmuxControl(runCtx, t, events)
+	m.sources = railSources{events: events, files: files, control: control}
+	if _, err := railWatch(runCtx, files); err != nil {
+		m.watchErr = err
+		m.watchErrAt = time.Now()
+	}
+	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(runCtx))
 	if _, err := prog.Run(); err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2

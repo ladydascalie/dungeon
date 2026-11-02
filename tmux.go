@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -986,20 +987,29 @@ func (t tmux) CloseWorkspace(ctx context.Context, ws string) error {
 // railPanes reads the panes the agent rail shows. It is deliberately tmux-only:
 // the rail exists for lanes that herdr cannot see, so it reads tmux directly
 // instead of widening the mux interface for one view.
-func (t tmux) railPanes(ctx context.Context) ([]railPaneInfo, error) {
+//
+// The process tree is not walked. An agent that reports status identifies
+// itself through its OSC record, and the report is the identity.
+func (t tmux) railPanes(ctx context.Context) (railRead, error) {
 	const delim = "\x1f"
 	out, err := t.call(ctx, "list-panes", "-a", "-F",
 		"#{pane_id}"+delim+"#{session_name}"+delim+"#{window_id}"+delim+
 			"#{window_index}"+delim+"#{pane_index}"+delim+
 			"#{pane_current_command}"+delim+"#{pane_title}"+delim+
-			"#{@dungeon_agent}"+delim+"#{@agent_rail}"+delim+"#{pane_pid}"+delim+
-			"#{pane_current_path}"+delim+"#{pane_active}")
+			"#{@dungeon_agent}"+delim+"#{@agent_rail}"+delim+
+			"#{pane_current_path}"+delim+"#{pane_active}"+delim+
+			"#{@dungeon_osc}")
 	if err != nil {
-		return nil, err
+		return railRead{}, err
 	}
-	procs := loadRailProcs(ctx)
-	statusCache := map[string]map[string]railStatus{}
-	var panes []railPaneInfo
+	now := time.Now()
+	server := oscServerKey()
+	type cachedStatuses struct {
+		statuses map[string]railStatus
+		issues   []railSourceIssue
+	}
+	statusCache := map[string]cachedStatuses{}
+	read := railRead{at: now}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
 			continue
@@ -1011,8 +1021,13 @@ func (t tmux) railPanes(ctx context.Context) ([]railPaneInfo, error) {
 		if f[8] == "1" {
 			continue // the rail itself
 		}
-		pid, _ := strconv.Atoi(f[9])
-		kind := railAgentKind(f[5], f[6], f[7], pid, procs)
+		osc, reported, oscErr := readRailOSC(server, f[0])
+		if oscErr != nil {
+			read.issues = append(read.issues, railSourceIssue{
+				kind: "osc", path: oscStatePath(server, f[0]), err: oscErr, at: now,
+			})
+		}
+		kind := railAgentKind(f[5], f[7], osc, reported)
 		if kind == "" {
 			if !isRailShell(f[5]) {
 				continue
@@ -1033,20 +1048,22 @@ func (t tmux) railPanes(ctx context.Context) ([]railPaneInfo, error) {
 			Title:       f[6],
 			Agent:       f[7],
 			Kind:        kind,
-			Active:      f[11] == "1",
+			Active:      f[10] == "1",
+			OSCPiped:    f[11] == "1",
 			Label:       label,
 		}
-		if root, ok := railEncounterRoot(f[10]); ok {
-			statuses, cached := statusCache[root]
-			if !cached {
-				statuses = loadRailStatuses(root)
-				statusCache[root] = statuses
+		if root, ok := railEncounterRoot(f[9]); ok {
+			cached, found := statusCache[root]
+			if !found {
+				cached.statuses, cached.issues = loadRailStatuses(root)
+				statusCache[root] = cached
+				read.issues = append(read.issues, cached.issues...)
 			}
-			if status, found := statuses[row.Pane]; found {
+			if status, found := cached.statuses[row.Pane]; found {
 				row.Status, row.Unit, row.Encounter = status.Status, status.Unit, status.Encounter
 			}
 		}
-		if osc, found := readOSCStatus(row.Pane); found {
+		if reported {
 			row.Harness = osc.State
 			row.HarnessApp = osc.App
 			row.HarnessKind = osc.Kind
@@ -1054,9 +1071,31 @@ func (t tmux) railPanes(ctx context.Context) ([]railPaneInfo, error) {
 			row.HarnessTitle = osc.Title
 			row.HarnessProgress = osc.Progress
 		}
-		panes = append(panes, row)
+		read.agents = append(read.agents, row)
 	}
-	return panes, nil
+	return read, nil
+}
+
+// readRailOSC separates an absent record from an unreadable one. A missing
+// record means the pane never reported; a corrupt record is a source failure
+// and must be said out loud.
+func readRailOSC(server, pane string) (oscStatus, bool, error) {
+	path := oscStatePath(server, pane)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return oscStatus{}, false, nil
+	}
+	if err != nil {
+		return oscStatus{}, false, err
+	}
+	var st oscStatus
+	if err := json.Unmarshal(data, &st); err != nil {
+		return oscStatus{}, false, err
+	}
+	if st.State == "" {
+		return oscStatus{}, false, fmt.Errorf("empty state")
+	}
+	return st, true, nil
 }
 
 // railToggle opens, focuses, or closes the rail in the target's window. It
@@ -1159,32 +1198,4 @@ func (t tmux) railToggle(ctx context.Context, target string, width int, command 
 func (t tmux) callNoOutput(ctx context.Context, args ...string) error {
 	_, err := t.call(ctx, args...)
 	return err
-}
-
-// railFocus moves the operator to a rail target, following the same session
-// and window rules as FocusAgent.
-func (t tmux) railFocus(ctx context.Context, id string) error {
-	at, err := t.Pane(ctx, id)
-	if err != nil {
-		return err
-	}
-	return t.focus(ctx, at)
-}
-
-// ensureRailOSC attaches one raw-output parser to each agent pane. pipe-pane
-// -o never replaces a pipe the operator already opened, so a pane with its own
-// pipe simply contributes no OSC 7501 record.
-func (t tmux) ensureRailOSC(ctx context.Context, panes []railPaneInfo) {
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	server := oscServerKey()
-	for _, p := range panes {
-		if p.Pane == "" || p.Kind == "shell" {
-			continue
-		}
-		command := shellQuote(exe) + " osc-sink " + shellQuote(server) + " " + shellQuote(p.Pane)
-		_, _ = t.call(ctx, "pipe-pane", "-o", "-t", p.Pane, command)
-	}
 }
