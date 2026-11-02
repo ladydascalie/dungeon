@@ -1156,6 +1156,29 @@ func readRailOSC(server, pane string) (oscStatus, bool, error) {
 	return st, true, nil
 }
 
+// windowLayout reads one window's layout as tmux prints it. A layout it cannot
+// read is not fatal: the caller keeps the plain split it would have made.
+func (t tmux) windowLayout(ctx context.Context, window string) (windowLayout, error) {
+	out, err := t.call(ctx, "display-message", "-p", "-t", window, "#{window_layout}")
+	if err != nil {
+		return windowLayout{}, err
+	}
+	var lay windowLayout
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &lay); err != nil {
+		return windowLayout{}, fmt.Errorf("tmux layout is not JSON: %w", err)
+	}
+	if lay.V != 2 || lay.L.W <= 0 {
+		return windowLayout{}, fmt.Errorf("tmux layout has no size")
+	}
+	return lay, nil
+}
+
+// applyLayout declares a layout into a window, giving every pane the width the
+// layout names.
+func (t tmux) applyLayout(ctx context.Context, window, layout string) error {
+	return t.callNoOutput(ctx, "select-layout", "-t", window, layout)
+}
+
 // markRailPane records the rail on the pane it runs in. `rail restart` finds
 // rails by this option, so the rail marks itself rather than trusting whoever
 // opened it: a manual split or a launcher binding never sets it.
@@ -1228,6 +1251,7 @@ func (t tmux) railRestart(ctx context.Context, target string, all bool, width in
 		if anchor == "" {
 			continue
 		}
+		before, layoutErr := t.windowLayout(ctx, p.window)
 		if err := t.callNoOutput(ctx, "kill-pane", "-t", p.id); err != nil {
 			return restarted, err
 		}
@@ -1238,6 +1262,11 @@ func (t tmux) railRestart(ctx context.Context, target string, all bool, width in
 		rail, err := t.railToggle(ctx, anchor, w, command)
 		if err != nil {
 			return restarted, err
+		}
+		if layoutErr == nil {
+			if exact, err := railRetargetedLayout(before, p.id, rail); err == nil {
+				_ = t.applyLayout(ctx, p.window, exact)
+			}
 		}
 		restarted = append(restarted, rail)
 	}
@@ -1324,6 +1353,7 @@ func (t tmux) railToggle(ctx context.Context, target string, width int, command 
 			}
 		}
 	}
+	before, layoutErr := t.windowLayout(ctx, win)
 	railOut, err := t.call(ctx, "split-window", "-hb", "-l", strconv.Itoa(width),
 		"-t", leftPane, "-c", strings.TrimSpace(string(cwd)),
 		"-P", "-F", "#{pane_id}", command)
@@ -1336,6 +1366,11 @@ func (t tmux) railToggle(ctx context.Context, target string, width int, command 
 	}
 	if err := t.markRailPane(ctx, rail); err != nil {
 		return "", err
+	}
+	if layoutErr == nil {
+		if declared, err := railDeclaredLayout(before, rail, width); err == nil {
+			_ = t.applyLayout(ctx, win, declared)
+		}
 	}
 	if err := t.callNoOutput(ctx, "select-pane", "-t", rail); err != nil {
 		return "", err

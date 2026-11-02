@@ -471,6 +471,15 @@ group keeps its header with a `▸` mark and its pane count, and `z` again, or
 `enter` on the header, unfolds it. Folds survive a refresh, and a number jump
 unfolds the groups that hide its pane.
 
+The rail is declared into the window's layout, not split into it. A split takes
+its columns from the pane beside it, so that pane shrinks and every other pane
+keeps its width; opening the rail scales every pane in the window by the same
+factor instead, and `dungeon rail restart` puts the new rail where the old one
+stood with no pane resized. `rail toggle` reads `#{window_layout}`, writes the
+rail in as the first column, and applies the result with `select-layout`. tmux
+prints that layout as JSON from 3.4 on; a layout it cannot read falls back to
+the plain split.
+
 The rail is one process per window, so a new binary does not climb into the
 rails that are already open. Two things cover that: `dungeon rail restart`
 replaces the rail in this window, and `--all` walks every `@agent_rail` pane in

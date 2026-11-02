@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1063,5 +1066,231 @@ func TestRailMarksThePaneItRunsOn(t *testing.T) {
 	}
 	if err := h.markRailPane(ctx, ""); err == nil {
 		t.Fatal("markRailPane accepted an empty pane")
+	}
+}
+
+func TestRailDeclaredLayoutScalesThePanesAside(t *testing.T) {
+	var lay windowLayout
+	raw := `{"V":2,"L":{"t":"p","w":120,"h":40,"x":0,"y":0,"a":true,"i":0,"I":"%1"}}`
+	if err := json.Unmarshal([]byte(raw), &lay); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	declared, err := railDeclaredLayout(lay, "%9", 24)
+	if err != nil {
+		t.Fatalf("railDeclaredLayout: %v", err)
+	}
+	var got windowLayout
+	if err := json.Unmarshal([]byte(declared), &got); err != nil {
+		t.Fatalf("declared layout is not JSON: %v\n%s", err, declared)
+	}
+	if got.L.T != "h" || len(got.L.C) != 2 {
+		t.Fatalf("root %+v, want a horizontal split of two cells", got.L)
+	}
+	rail, content := got.L.C[0], got.L.C[1]
+	if rail.I != "%9" || rail.W != 24 || rail.X != 0 || !rail.A {
+		t.Fatalf("rail cell %+v, want %%9 24 wide at x 0 and active", rail)
+	}
+	if content.I != "%1" || content.W != 96 || content.X != 24 || content.A {
+		t.Fatalf("content cell %+v, want %%1 96 wide at x 24 and inactive", content)
+	}
+	if rail.Index == nil || content.Index == nil || *rail.Index != 0 || *content.Index != 1 {
+		t.Fatalf("pane indexes %v %v, want 0 and 1", rail.Index, content.Index)
+	}
+	if got.L.W != 120 || got.L.H != 40 {
+		t.Fatalf("window %dx%d, want 120x40", got.L.W, got.L.H)
+	}
+}
+
+func TestRailDeclaredLayoutKeepsAVerticalStack(t *testing.T) {
+	var lay windowLayout
+	raw := `{"V":2,"L":{"t":"h","w":120,"h":40,"x":0,"y":0,"c":[` +
+		`{"t":"p","w":60,"h":40,"x":0,"y":0,"i":0,"I":"%1"},` +
+		`{"t":"v","w":59,"h":40,"x":61,"y":0,"c":[` +
+		`{"t":"p","w":59,"h":20,"x":61,"y":0,"i":1,"I":"%2"},` +
+		`{"t":"p","w":59,"h":19,"x":61,"y":21,"a":true,"i":2,"I":"%3"}]}]}}`
+	if err := json.Unmarshal([]byte(raw), &lay); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	declared, err := railDeclaredLayout(lay, "%9", 24)
+	if err != nil {
+		t.Fatalf("railDeclaredLayout: %v", err)
+	}
+	var got windowLayout
+	if err := json.Unmarshal([]byte(declared), &got); err != nil {
+		t.Fatalf("declared layout is not JSON: %v", err)
+	}
+	content := got.L.C[1]
+	if content.T != "h" || len(content.C) != 2 {
+		t.Fatalf("content root %+v, want the old horizontal split", content)
+	}
+	stack := content.C[1]
+	if stack.T != "v" || len(stack.C) != 2 {
+		t.Fatalf("stack %+v, want the vertical split kept", stack)
+	}
+	if stack.C[0].H != 20 || stack.C[1].H != 19 || stack.C[1].Y != 21 {
+		t.Fatalf("stack heights changed: %+v", stack.C)
+	}
+	if stack.C[0].I != "%2" || stack.C[1].I != "%3" {
+		t.Fatalf("stack panes changed: %+v", stack.C)
+	}
+	active := 0
+	var walk func(c layoutCell)
+	walk = func(c layoutCell) {
+		if c.T == "p" && c.A {
+			active++
+		}
+		for _, child := range c.C {
+			walk(child)
+		}
+	}
+	walk(got.L)
+	if active != 1 {
+		t.Fatalf("%d active panes, tmux accepts exactly one", active)
+	}
+}
+
+func TestRailDeclaredLayoutRefusesAWindowWithNoRoom(t *testing.T) {
+	lay := windowLayout{V: 2, L: layoutCell{T: "p", W: 20, H: 10, I: "%1"}}
+	if _, err := railDeclaredLayout(lay, "%9", 24); err == nil {
+		t.Fatal("a rail wider than the window was accepted")
+	}
+}
+
+func TestRailRetargetedLayoutKeepsEveryWidth(t *testing.T) {
+	var lay windowLayout
+	raw := `{"V":2,"L":{"t":"h","w":120,"h":40,"x":0,"y":0,"c":[` +
+		`{"t":"p","w":24,"h":40,"x":0,"y":0,"a":true,"i":0,"I":"%9"},` +
+		`{"t":"p","w":60,"h":40,"x":25,"y":0,"i":1,"I":"%1"},` +
+		`{"t":"p","w":34,"h":40,"x":86,"y":0,"i":2,"I":"%2"}]}}`
+	if err := json.Unmarshal([]byte(raw), &lay); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	declared, err := railRetargetedLayout(lay, "%9", "%10")
+	if err != nil {
+		t.Fatalf("railRetargetedLayout: %v", err)
+	}
+	var got windowLayout
+	if err := json.Unmarshal([]byte(declared), &got); err != nil {
+		t.Fatalf("declared layout is not JSON: %v", err)
+	}
+	widths := map[string]int{}
+	for _, cell := range got.L.C {
+		widths[cell.I] = cell.W
+	}
+	if _, stale := widths["%9"]; stale {
+		t.Fatalf("the old rail is still in the layout: %+v", widths)
+	}
+	want := map[string]int{"%10": 24, "%1": 60, "%2": 34}
+	for id, w := range want {
+		if widths[id] != w {
+			t.Fatalf("pane %s is %d wide, want %d: %+v", id, widths[id], w, widths)
+		}
+	}
+	if _, err := railRetargetedLayout(lay, "%404", "%10"); err == nil {
+		t.Fatal("retargeting a pane that is not in the layout was accepted")
+	}
+}
+
+// paneWidths reads every pane of a window as id to width, and the window width.
+func paneWidths(t *testing.T, h tmux, ctx context.Context, window string) (map[string]int, int) {
+	t.Helper()
+	out, err := h.call(ctx, "list-panes", "-t", window, "-F", "#{pane_id}\x1f#{pane_width}")
+	if err != nil {
+		t.Fatalf("list-panes: %v", err)
+	}
+	widths := map[string]int{}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		f := strings.Split(line, "\x1f")
+		if len(f) != 2 {
+			continue
+		}
+		var w int
+		fmt.Sscan(f[1], &w)
+		widths[f[0]] = w
+	}
+	total, err := h.call(ctx, "display-message", "-p", "-t", window, "#{window_width}")
+	if err != nil {
+		t.Fatalf("window_width: %v", err)
+	}
+	var windowWidth int
+	fmt.Sscan(strings.TrimSpace(string(total)), &windowWidth)
+	return widths, windowWidth
+}
+
+func TestRailToggleScalesTheWindowInsteadOfStealing(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, tab, root, err := h.CreateWorkspace(ctx, "raillayout", "workers", dir)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	right, err := h.SplitPane(ctx, root, "right", dir, 0.5)
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	before, windowWidth := paneWidths(t, h, ctx, tab)
+	if _, err := h.railToggle(ctx, right, 20, "sleep 60"); err != nil {
+		t.Fatalf("railToggle: %v", err)
+	}
+	after, _ := paneWidths(t, h, ctx, tab)
+	contentWidth := windowWidth - 20
+	for id, had := range before {
+		want := int(math.Round(float64(had) * float64(contentWidth) / float64(windowWidth)))
+		got, ok := after[id]
+		if !ok {
+			t.Fatalf("pane %s vanished: %+v", id, after)
+		}
+		if got < want-2 || got > want+2 {
+			t.Fatalf("pane %s is %d wide, want about %d (had %d of %d, rail 20): %+v",
+				id, got, want, had, windowWidth, after)
+		}
+	}
+	for id, w := range after {
+		if _, had := before[id]; had {
+			continue
+		}
+		if w != 20 {
+			t.Fatalf("the rail is %d wide, want 20: %+v", w, after)
+		}
+	}
+}
+
+func TestRailRestartKeepsEveryWidth(t *testing.T) {
+	h := tmuxTest(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	_, tab, root, err := h.CreateWorkspace(ctx, "railkeep", "workers", dir)
+	if err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	right, err := h.SplitPane(ctx, root, "right", dir, 0.5)
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+	rail, err := h.railToggle(ctx, right, 20, "sleep 60")
+	if err != nil {
+		t.Fatalf("railToggle: %v", err)
+	}
+	before, _ := paneWidths(t, h, ctx, tab)
+	restarted, err := h.railRestart(ctx, right, false, 20, "sleep 60")
+	if err != nil {
+		t.Fatalf("railRestart: %v", err)
+	}
+	if len(restarted) != 1 {
+		t.Fatalf("restarted %d rails, want 1", len(restarted))
+	}
+	after, _ := paneWidths(t, h, ctx, tab)
+	for id, had := range before {
+		if id == rail {
+			continue
+		}
+		if after[id] != had {
+			t.Fatalf("pane %s changed width from %d to %d: before %+v after %+v",
+				id, had, after[id], before, after)
+		}
+	}
+	if got := after[restarted[0]]; got != before[rail] {
+		t.Fatalf("the new rail is %d wide, the old one was %d", got, before[rail])
 	}
 }
