@@ -44,5 +44,9 @@ func probeAgents(ctx context.Context, forced string) map[string]Agent {
 	if err != nil {
 		return nil
 	}
-	return h.Agents(ctx)
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return nil
+	}
+	return agents
 }

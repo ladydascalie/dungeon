@@ -96,32 +96,6 @@ func (h herdr) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, roo
 	return payload.Result.Tab.ID, payload.Result.Root.PaneID, nil
 }
 
-func (h herdr) Tabs(ctx context.Context, ws string) []tab {
-	if ws == "" {
-		return nil
-	}
-	out, err := h.call(ctx, "tab", "list", "--workspace", ws)
-	if err != nil {
-		return nil
-	}
-	var payload struct {
-		Result struct {
-			Tabs []struct {
-				ID    string `json:"tab_id"`
-				Label string `json:"label"`
-			} `json:"tabs"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil
-	}
-	all := make([]tab, 0, len(payload.Result.Tabs))
-	for _, t := range payload.Result.Tabs {
-		all = append(all, tab{ID: t.ID, Label: t.Label})
-	}
-	return all
-}
-
 // FocusTab moves the operator to a tab.
 func (h herdr) FocusTab(ctx context.Context, tab string) error {
 	_, err := h.call(ctx, "tab", "focus", tab)

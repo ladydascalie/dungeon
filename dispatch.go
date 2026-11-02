@@ -146,7 +146,6 @@ type briefData struct {
 	dir        string
 	report     string
 	depReports []depReport
-	parentPane string
 	ping       string
 	base       string
 	lane       MinionState
@@ -202,11 +201,10 @@ func briefText(d briefData) string {
 		b.WriteString("accept: none. This unit cannot be marked done, so say plainly what you did.\n")
 	}
 	fmt.Fprintf(&b, "\nreport: %s\n", d.report)
-	if d.parentPane != "" {
+	if d.ping != "" {
 		fmt.Fprintf(&b, "\n## Ping the parent when you finish\n\n")
 		b.WriteString("Write the report first, then wake the parent agent:\n\n")
-		fmt.Fprintf(&b, "    %s %q\n\n", d.ping,
-			fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, d.report))
+		fmt.Fprintf(&b, "    %s\n\n", d.ping)
 		b.WriteString("That pane runs the agent that dispatched you. Do not wait for a reply.\n")
 	}
 	b.WriteString(`
@@ -262,14 +260,18 @@ func writeBrief(h mux, in briefInput) (string, error) {
 			lane = st.Minions[m.Of]
 		}
 	}
+	ping := ""
+	if o.parentPane != "" {
+		ping = h.PingCommand(o.parentPane,
+			fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, absReport))
+	}
 	text := briefText(briefData{
 		minion:     m,
 		unit:       u,
 		dir:        minionDir(p, m),
 		report:     absReport,
 		depReports: depReports,
-		parentPane: o.parentPane,
-		ping:       h.PingCommand(o.parentPane),
+		ping:       ping,
 		base:       p.Base,
 		lane:       lane,
 	})
@@ -377,7 +379,12 @@ func lastLine(s string) string {
 // stopped. A lane that is still working, or that the multiplexer cannot
 // classify, is left alone: guessing would settle work that is still running.
 func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d *digest) bool {
-	agents := h.Agents(ctx)
+	// An unreadable fleet settles nothing: calling a working lane blocked
+	// because the backend blinked would be a false claim.
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return false
+	}
 	progressed := false
 	for _, u := range p.Units {
 		if st.UnitStatus(u.ID) != "working" {
@@ -395,11 +402,11 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			continue
 		}
 		switch a.Status {
-		case "blocked":
+		case AgentBlocked:
 			st.SetUnit(u.ID, "blocked", "lane is waiting on you in "+a.Pane)
 			d.Blocked = append(d.Blocked, u.ID)
 			progressed = true
-		case "idle", "done":
+		case AgentIdle, AgentDone:
 			switch settle(ctx, o, p, st, u, m) {
 			case "done":
 				StopLoopAfter(p, st, u.ID)
@@ -476,6 +483,9 @@ func workingCount(p Plan, st *State) int {
 // dispatch what is ready, wait, repeat.
 func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest, error) {
 	var d digest
+	if o.parentPane == "" {
+		o.parentPane = h.SelfPane(ctx)
+	}
 	deadline := time.Now().Add(o.timeout)
 
 	for {
@@ -485,7 +495,10 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 		if p.Concurrency > 0 {
 			slots = p.Concurrency - workingCount(p, st)
 		}
-		agents := h.Agents(ctx)
+		agents, err := h.Agents(ctx)
+		if err != nil {
+			return d, fmt.Errorf("could not read the fleet: %w", err)
+		}
 		busy := map[string]bool{}
 		for _, u := range p.Units {
 			if st.UnitStatus(u.ID) == "working" {

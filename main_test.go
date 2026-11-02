@@ -262,3 +262,29 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 		t.Fatalf("a read-only probe with no mux should see nothing, got %v", agents)
 	}
 }
+
+// A status word outside the boundary's vocabulary is unknown, never guessed.
+func TestParseAgentStateRefusesToGuess(t *testing.T) {
+	cases := map[string]AgentState{
+		"working": AgentWorking,
+		"idle":    AgentIdle,
+		"blocked": AgentBlocked,
+		"done":    AgentDone,
+		"busy":    AgentUnknown,
+		"":        AgentUnknown,
+	}
+	for in, want := range cases {
+		if got := parseAgentState(in); got != want {
+			t.Fatalf("parseAgentState(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// PingCommand owns the quoting, so the caller never builds the shell line.
+func TestPingCommandQuotesTheMessage(t *testing.T) {
+	got := newHerdr().PingCommand("w9:p1", `a "quoted" message`)
+	want := `herdr pane run w9:p1 "a \"quoted\" message"`
+	if got != want {
+		t.Fatalf("PingCommand = %q, want %q", got, want)
+	}
+}

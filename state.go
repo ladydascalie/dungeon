@@ -75,10 +75,11 @@ func toSet(in []string) map[string]bool {
 
 // An agent name is global. Two encounters that both declare w1 would
 // otherwise share one agent, so a run carries a two-character token and every
-// agent it starts is named <minion>-<token>.
+// agent it starts is named <minion>-<token>, within dungeon's own 32-character
+// name rule so every backend accepts it.
 const (
 	tokenLen      = 2
-	agentNameMax  = 32 // herdr's limit
+	agentNameMax  = 32 // dungeon's naming rule, not a backend's limit
 	agentIDMax    = agentNameMax - 1 - tokenLen
 	tokenTries    = 64
 	tokenAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"

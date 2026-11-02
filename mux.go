@@ -2,8 +2,8 @@ package main
 
 import "context"
 
-// mux is the terminal multiplexer dungeon needs: workspaces, tabs and panes, the
-// agents living in them, and nothing else.
+// mux is the terminal multiplexer dungeon needs: workspaces, panes, the agents
+// living in them, and nothing else.
 //
 // A second backend (tmux, for example) implements this interface and nothing
 // above it changes. The contracts below are what such a backend must honour:
@@ -17,20 +17,25 @@ import "context"
 //     agent in it.
 //   - Do not move the operator's focus unless the call says focus. Creation and
 //     splitting must not steal focus.
-//   - A read returns rendered text, as the terminal shows it. Never markup,
-//     escape sequences or raw cell data.
 //   - Listing calls report what exists now; dungeon caches nothing.
 //
 // Calls take a context. A backend must stop and return promptly when it is
-// cancelled; a missing multiplexer is reported as an error, except for the
-// read-only probes named below.
+// cancelled.
 type mux interface {
 	// Agents reports every live agent, keyed by the name its lane was given.
 	// This is the only source of liveness and status truth: a backend must read
-	// it from the multiplexer, not infer it from what it started. A missing or
-	// failing multiplexer returns nil, not an error, so plan checking and state
-	// editing work on a machine with no session.
-	Agents(ctx context.Context) map[string]Agent
+	// it from the multiplexer, not infer it from what it started, and must say
+	// AgentUnknown when it has no protocol to tell.
+	//
+	// A reachable multiplexer with no agents returns an empty map and no error.
+	// An error means the fleet could not be read at all, which is not the same
+	// as an empty fleet: a caller that decides on liveness must not mistake one
+	// for the other.
+	Agents(ctx context.Context) (map[string]Agent, error)
+
+	// SelfPane reports the pane dungeon itself is running in, so a brief can
+	// tell a lane where to ping. An empty string means the backend cannot tell.
+	SelfPane(ctx context.Context) string
 
 	// Workspaces lists every workspace, in the backend's own order. Empty is
 	// valid. A missing or failing multiplexer returns nil.
@@ -45,10 +50,6 @@ type mux interface {
 	// empty ws means the current one. It is created without focus and rooted at
 	// cwd.
 	CreateTab(ctx context.Context, ws, label, cwd string) (tabID, rootPane string, err error)
-
-	// Tabs lists the tabs of one workspace. An empty ws returns nil. A failing
-	// backend returns nil.
-	Tabs(ctx context.Context, ws string) []tab
 
 	// SplitPane splits target and returns the new pane, rooted at cwd. direction
 	// is one of right, down, left or up. ratio is the share of target the
@@ -74,18 +75,10 @@ type mux interface {
 	// writes and are not coalesced, so the caller controls that decision.
 	SendKeys(ctx context.Context, name string, keys ...string) error
 
-	// Read returns the rendered text currently visible in pane. It returns text
-	// only, never markup and never escape sequences.
-	Read(ctx context.Context, pane string) (string, error)
-
-	// Run types one command line into pane and submits it. The caller owns the
-	// text; the backend must not quote or rewrite it.
-	Run(ctx context.Context, pane, text string) error
-
-	// PingCommand returns the command line a shell can run to deliver text into
-	// pane, for briefs that tell another agent how to reach the dispatcher. The
-	// backend decides the wording; callers must not build it themselves.
-	PingCommand(pane string) string
+	// PingCommand returns the shell command that delivers message to pane, for
+	// briefs that tell another agent how to reach the dispatcher. The backend
+	// owns the wording, quoting included; callers must not build either.
+	PingCommand(pane, message string) string
 
 	// FocusAgent moves the operator's focus to the pane hosting the named agent.
 	// An agent that is not live is an error.
@@ -98,21 +91,33 @@ type mux interface {
 	// so the caller decides whether that is safe.
 	ClosePane(ctx context.Context, pane string) error
 
-	// CloseTab closes one tab dungeon created, and the panes in it.
-	CloseTab(ctx context.Context, tab string) error
-
 	// CloseWorkspace closes one workspace dungeon created, and the tabs in it.
 	CloseWorkspace(ctx context.Context, ws string) error
 }
 
-// workspace is one workspace: an opaque id and the label dungeon gave it.
-type workspace struct {
-	ID    string
-	Label string
+// Agent is one live agent: the name its lane was given, the pane hosting it,
+// and what the backend can say about it.
+type Agent struct {
+	Name   string
+	Pane   string
+	Status AgentState
 }
 
-// tab is one tab in a workspace: an opaque id and the label dungeon gave it.
-type tab struct {
+// AgentState is what a backend knows about an agent. A backend with no agent
+// protocol cannot know more than that a pane is alive, so it reports
+// AgentUnknown rather than guessing a state it does not have.
+type AgentState string
+
+const (
+	AgentUnknown AgentState = "unknown" // the backend cannot tell
+	AgentWorking AgentState = "working"
+	AgentIdle    AgentState = "idle"
+	AgentBlocked AgentState = "blocked"
+	AgentDone    AgentState = "done"
+)
+
+// workspace is one workspace: an opaque id and the label dungeon gave it.
+type workspace struct {
 	ID    string
 	Label string
 }

@@ -50,7 +50,16 @@ func stopPinned(ctx context.Context, h mux, agent string) error {
 // claim this tool refuses everywhere else.
 func verifyDown(ctx context.Context, h mux, st *State, stopped, refused []string) ([]string, []string) {
 	time.Sleep(500 * time.Millisecond)
-	after := h.Agents(ctx)
+	after, err := h.Agents(ctx)
+	if err != nil {
+		// Without the fleet there is no proof anything stopped, so nothing is
+		// called stopped.
+		for _, id := range stopped {
+			st.SetMinion(id, "lost", "could not read the fleet, so it cannot be called stopped")
+			refused = append(refused, id)
+		}
+		return nil, refused
+	}
 	var done []string
 	for _, id := range stopped {
 		if _, live := after[st.AgentName(id)]; live {

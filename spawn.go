@@ -156,7 +156,12 @@ func ensureToken(ctx context.Context, h mux, st *State, minions []Minion, gen fu
 	if st.Token != "" {
 		return nil
 	}
-	agents := h.Agents(ctx)
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		// Without the live fleet a token could collide with a running
+		// encounter, so the run waits for a readable backend.
+		return err
+	}
 	// A tokenless state is an in-flight legacy run only when this state records
 	// the pane its bare agent is in. A bare name live anywhere else belongs to
 	// another run, so adopting it would put two encounters on one agent.
@@ -204,7 +209,10 @@ func spawnMinions(ctx context.Context, h mux, in spawnInput) (spawnResult, error
 	if err := ensureToken(ctx, h, st, p.Minions, newToken); err != nil {
 		return res, err
 	}
-	agents := h.Agents(ctx)
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return res, err
+	}
 
 	if _, err := os.Stat(p.Repo); err != nil {
 		return res, fmt.Errorf("repo %s is not readable", p.Repo)

@@ -5,18 +5,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Agent is one live herdr agent, keyed by the name its lane was given.
-type Agent struct {
+// herdrAgent is herdr's wire shape for one agent. It stays private so no other
+// file has to know herdr's JSON.
+type herdrAgent struct {
 	Name   string `json:"name"`
 	Pane   string `json:"pane_id"`
 	Status string `json:"agent_status"`
-	Cwd    string `json:"cwd"`
 }
 
 // herdr is the herdr backend: the only file that speaks herdr's command line.
@@ -48,32 +49,50 @@ func (h herdr) call(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 // Agents reads herdr's own view of the fleet. It is the only source of pane and
-// liveness truth: dungeon never caches a pane id.
-//
-// A missing or failing herdr is not an error for the caller. A plan can be
-// checked and a state edited on a machine with no session; the pane column
-// then reads "-".
-func (h herdr) Agents(ctx context.Context) map[string]Agent {
+// liveness truth: dungeon never caches a pane id. An error means herdr could
+// not be read, which is not the same as an empty fleet.
+func (h herdr) Agents(ctx context.Context) (map[string]Agent, error) {
 	out, err := h.call(ctx, "agent", "list")
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var payload struct {
 		Result struct {
-			Agents []Agent `json:"agents"`
+			Agents []herdrAgent `json:"agents"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(out, &payload); err != nil {
-		return nil
+		return nil, fmt.Errorf("herdr agent list: %w", err)
 	}
 	byName := make(map[string]Agent, len(payload.Result.Agents))
 	for _, a := range payload.Result.Agents {
 		if a.Name == "" {
 			continue
 		}
-		byName[a.Name] = a
+		byName[a.Name] = Agent{Name: a.Name, Pane: a.Pane, Status: parseAgentState(a.Status)}
 	}
-	return byName
+	return byName, nil
+}
+
+// parseAgentState maps herdr's status words onto the boundary's vocabulary. A
+// word dungeon does not know is not guessed at.
+func parseAgentState(s string) AgentState {
+	switch AgentState(s) {
+	case AgentWorking:
+		return AgentWorking
+	case AgentIdle:
+		return AgentIdle
+	case AgentBlocked:
+		return AgentBlocked
+	case AgentDone:
+		return AgentDone
+	}
+	return AgentUnknown
+}
+
+// SelfPane is the pane dungeon runs in, which is where a lane pings its parent.
+func (h herdr) SelfPane(ctx context.Context) string {
+	return os.Getenv("HERDR_PANE_ID")
 }
 
 // StartAgent launches pi in a prepared pane and waits for it to be ready.
@@ -97,25 +116,10 @@ func (h herdr) SendKeys(ctx context.Context, name string, keys ...string) error 
 	return err
 }
 
-// Read returns the text herdr renders for a pane.
-func (h herdr) Read(ctx context.Context, pane string) (string, error) {
-	out, err := h.call(ctx, "pane", "read", pane)
-	if err != nil {
-		return "", err
-	}
-	return string(out), nil
-}
-
-// Run types one command line into a pane and submits it.
-func (h herdr) Run(ctx context.Context, pane, text string) error {
-	_, err := h.call(ctx, "pane", "run", pane, text)
-	return err
-}
-
-// PingCommand is the command a shell runs to deliver a message to pane. The
-// caller quotes the message and appends it.
-func (h herdr) PingCommand(pane string) string {
-	return fmt.Sprintf("%s pane run %s", h.bin, pane)
+// PingCommand is the command a shell runs to deliver a message to pane. Quoting
+// is herdr's, so the caller passes the message and gets a finished line.
+func (h herdr) PingCommand(pane, message string) string {
+	return fmt.Sprintf("%s pane run %s %s", h.bin, pane, strconv.Quote(message))
 }
 
 // FocusAgent moves the operator to the pane hosting the agent.
@@ -180,11 +184,6 @@ func (h herdr) SplitPane(ctx context.Context, target, direction, cwd string, rat
 
 func (h herdr) ClosePane(ctx context.Context, pane string) error {
 	_, err := h.call(ctx, "pane", "close", pane)
-	return err
-}
-
-func (h herdr) CloseTab(ctx context.Context, tab string) error {
-	_, err := h.call(ctx, "tab", "close", tab)
 	return err
 }
 

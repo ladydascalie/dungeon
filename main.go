@@ -163,7 +163,7 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 // muxFlag lets a command force a backend. It is read through openMux, never
 // here.
 func muxFlag(fs *flag.FlagSet) *string {
-	return fs.String("mux", "", "force the multiplexer backend: herdr")
+	return fs.String("mux", "", "force the multiplexer backend instead of reading the environment")
 }
 
 func planFlags(fs *flag.FlagSet) (*string, *string) {
@@ -402,13 +402,12 @@ func loadValidPlan(path string, stderr io.Writer) (Plan, int) {
 
 func dispatchFlags(fs *flag.FlagSet, statePath *string) (*dispatchOpts, *string) {
 	o := &dispatchOpts{}
-	o.parentPane = os.Getenv("HERDR_PANE_ID")
 	plan := fs.String("plan", "", "path to the plan")
 	fs.StringVar(statePath, "state", "", "path to state.json (default: beside the plan)")
 	fs.DurationVar(&o.timeout, "timeout", 30*time.Minute, "how long next may wait for lanes")
 	fs.DurationVar(&o.acceptTimeout, "accept-timeout", 10*time.Minute, "how long one accept command may run")
 	fs.DurationVar(&o.poll, "poll", 2*time.Second, "how often to look at the lanes")
-	fs.StringVar(&o.backend, "mux", "", "force the multiplexer backend: herdr")
+	fs.StringVar(&o.backend, "mux", "", "force the multiplexer backend instead of reading the environment")
 	return o, plan
 }
 

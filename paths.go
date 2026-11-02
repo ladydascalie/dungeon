@@ -22,7 +22,7 @@ func encounterDir(planPath string) string {
 
 // defaultPlan finds the encounter from wherever the command runs: the plan is
 // .dungeon/plan.yaml, searched up from the working directory the way git finds
-// its root. A herdr pane or a subdirectory of the repo then needs no flag.
+// its root. A multiplexer pane or a subdirectory of the repo then needs no flag.
 func defaultPlan() string {
 	dir, err := os.Getwd()
 	if err != nil {

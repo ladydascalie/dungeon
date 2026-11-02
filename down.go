@@ -19,7 +19,10 @@ type downOpts struct {
 }
 
 func down(ctx context.Context, h mux, o downOpts) (stopped, refused []string, err error) {
-	agents := h.Agents(ctx)
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not read the fleet: %w", err)
+	}
 
 	for _, m := range o.plan.Minions {
 		// The multiplexer knows the lane by the run's derived name, never the
@@ -30,9 +33,13 @@ func down(ctx context.Context, h mux, o downOpts) (stopped, refused []string, er
 			o.state.SetMinion(m.ID, "absent", "")
 			continue
 		}
-		if a.Status == "working" && !o.force {
+		// A working lane is refused, and so is one the backend cannot classify:
+		// closing a pane on a guess stops work silently, which is the one thing
+		// this command must not do.
+		if (a.Status == AgentWorking || a.Status == AgentUnknown) && !o.force {
 			refused = append(refused, m.ID)
-			fmt.Fprintf(o.out, "%s is working in %s; not closing it. pass --force to stop it anyway\n", m.ID, a.Pane)
+			fmt.Fprintf(o.out, "%s is %s in %s; not closing it. pass --force to stop it anyway\n",
+				m.ID, a.Status, a.Pane)
 			continue
 		}
 		if err := stopLane(ctx, h, agent, a.Pane, m.Pane != "" && m.Pane == a.Pane); err != nil {
