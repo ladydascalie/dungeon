@@ -1221,3 +1221,57 @@ func TestFocusUsesTheDerivedAgentName(t *testing.T) {
 		t.Fatalf("focus must not use the bare minion id:\n%s", calls)
 	}
 }
+
+func TestViewFocusOnADeadLaneOpensTheReport(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state.json")
+	st := State{Encounter: "st", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := SaveState(state, st); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(dir, "reports", "A.md")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("# Report\n\nthe lane is gone\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestView(t, plan, state)
+	m.snap.Units[0].Agent = "" // no live agent on A
+	m.cursor = 0
+	m = press(t, m, " ", "f")
+
+	if m.overlay != "reader" || m.reader != report {
+		t.Fatalf("focus on a dead lane should open %s, got overlay %q reader %q", report, m.overlay, m.reader)
+	}
+	out := m.View()
+	if !strings.Contains(out, "no live lane, opened the report") {
+		t.Fatalf("the notice should say the report opened:\n%s", out)
+	}
+	if !strings.Contains(out, "the lane is gone") {
+		t.Fatalf("the report body should be on screen:\n%s", out)
+	}
+}
+
+func TestViewFocusOnADeadLaneWithoutAReportSaysSo(t *testing.T) {
+	plan := writePlan(t, statusPlan)
+	state := filepath.Join(t.TempDir(), "state.json")
+	st := State{Encounter: "st", Units: map[string]UnitState{}, Minions: map[string]MinionState{}}
+	if err := SaveState(state, st); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newTestView(t, plan, state)
+	m.snap.Units[0].Agent = "" // no live agent on A
+	m.cursor = 0
+	m = press(t, m, " ", "f")
+
+	if m.overlay != "" {
+		t.Fatalf("focus without a report should not open an overlay, got %q", m.overlay)
+	}
+	if !strings.Contains(m.View(), "no live lane and no report") {
+		t.Fatalf("the notice should name both misses:\n%s", m.View())
+	}
+}
