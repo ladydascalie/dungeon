@@ -67,6 +67,14 @@ type mux interface {
 	// error; that is how a stale pin is detected.
 	Pane(ctx context.Context, id string) (pane, error)
 
+	// Read returns the pane's rendered text, without escape sequences. It is
+	// a read and nothing else: it must not write to the pane, resize it, or
+	// change focus. A pane that is gone is an error, so a preview can fall back
+	// to the lane's report. The text is what the operator would see, so a
+	// caller shows it as it is; the caller bounds the context and decides how
+	// often to look.
+	Read(ctx context.Context, pane string) (string, error)
+
 	// StartAgent starts an agent named name in pane, running the given command
 	// arguments, and returns when the multiplexer accepts it. name must be the
 	// name later calls use to address that agent, and the backend must record it

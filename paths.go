@@ -79,6 +79,12 @@ func discoverPlans() []Encounter {
 	if !ok {
 		return nil
 	}
+	return discoverPlansFrom(root)
+}
+
+// discoverPlansFrom is discoverPlans rooted at one .dungeon directory. The
+// rail uses it for a pane whose cwd is not the rail's cwd.
+func discoverPlansFrom(root string) []Encounter {
 	var out []Encounter
 	add := func(path string) {
 		if _, err := os.Stat(path); err != nil {

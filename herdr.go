@@ -164,6 +164,16 @@ func (h herdr) Pane(ctx context.Context, id string) (pane, error) {
 	return p, nil
 }
 
+// Read returns one pane's rendered text. It is the preview: a read, never a
+// write, and a pane herdr no longer knows is an error.
+func (h herdr) Read(ctx context.Context, pane string) (string, error) {
+	out, err := h.call(ctx, "pane", "read", pane)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // SplitPane carves one pane out of target. The ratio makes repeated splits of
 // the same pane produce equal shares instead of halving the remainder.
 func (h herdr) SplitPane(ctx context.Context, target, direction, cwd string, ratio float64) (string, error) {
