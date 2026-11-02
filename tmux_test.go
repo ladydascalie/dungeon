@@ -160,6 +160,7 @@ func TestTmuxStartAgentRecordsIdentity(t *testing.T) {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	done := make(chan error, 1)
 	go func() { done <- h.StartAgent(ctx, name, root, []string{"--no-skills"}) }()
@@ -367,6 +368,7 @@ func TestTmuxStartAgentRefusesANameLiveInAnotherPane(t *testing.T) {
 		t.Fatalf("SplitPane other: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	done := make(chan error, 1)
 	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
@@ -455,6 +457,7 @@ func TestTmuxStartAgentLeavesNoGhostWhenTheAgentExits(t *testing.T) {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	if err := h.StartAgent(ctx, name, root, nil); err != nil {
 		t.Fatalf("StartAgent: %v", err)
@@ -475,6 +478,7 @@ func TestTmuxLiveAgentStaysListedWhileItRuns(t *testing.T) {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
+	waitForShell(t, h, root)
 	name := "w1-aa"
 	done := make(chan error, 1)
 	go func() { done <- h.StartAgent(ctx, name, root, nil) }()
