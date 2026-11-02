@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -171,11 +172,61 @@ func (t tmux) paneOwned(ctx context.Context, pane string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
+// errSessionGone marks a workspace session that tmux destroyed while dungeon was
+// still creating it. CreateWorkspace retries only this error; any other failure
+// is a real one and a retry would hide its cause.
+var errSessionGone = errors.New("tmux: a new workspace session was destroyed while it was being created")
+
+// createTries bounds how many times CreateWorkspace creates a session. The
+// config can destroy a detached session faster than any follow-up call can
+// claim it, so one retry covers a loss that the chained options did not.
+const createTries = 2
+
+// createSessionArgv is the one tmux invocation that creates a workspace and
+// pins the session options that decide how long it lives. The operator's config
+// can set destroy-unattached and exit-unattached globally, and dungeon creates
+// every session detached, so a second invocation would leave a window in which
+// tmux destroys the session before dungeon can claim it.
+//
+// The set-options are chained after new-session and target the label: it is
+// unique among live sessions because tmux refuses a duplicate name, and tmux
+// tries an exact session name before a prefix. tmux stops the chain at the
+// first failing command, so a name collision leaves the foreign session alone.
+func createSessionArgv(label, tabLabel, cwd string) []string {
+	return []string{
+		"new-session", "-d", "-s", label, "-c", cwd, "-n", tabLabel,
+		"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}",
+		";",
+		"set-option", "-t", label, "destroy-unattached", "off",
+		";",
+		"set-option", "-t", label, "exit-unattached", "off",
+		";",
+		"set-option", "-t", label, sessionOwnerOption, label,
+	}
+}
+
 // CreateWorkspace creates one detached session, names its first window, and
-// records dungeon's ownership on the session and its root pane.
+// records dungeon's ownership on the session and its root pane. A session that
+// tmux destroyed anyway is retried once, then refused with the cause in the
+// error.
 func (t tmux) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (wsID, tabID, rootPane string, err error) {
-	out, err := t.call(ctx, "new-session", "-d", "-s", label, "-c", cwd, "-n", tabLabel,
-		"-P", "-F", "#{session_id}\t#{window_id}\t#{pane_id}")
+	for try := 1; try <= createTries; try++ {
+		wsID, tabID, rootPane, err = t.createWorkspaceOnce(ctx, label, tabLabel, cwd)
+		if err == nil {
+			return wsID, tabID, rootPane, nil
+		}
+		if !errors.Is(err, errSessionGone) {
+			return "", "", "", err
+		}
+	}
+	return "", "", "", fmt.Errorf("%w; workspace %s was destroyed on all %d tries because the tmux server still destroys detached sessions (destroy-unattached)", err, label, createTries)
+}
+
+// createWorkspaceOnce runs the chained creation and confirms the session lived
+// through it. The confirmation is a separate call because tmux reports a
+// destroyed session as a successful new-session.
+func (t tmux) createWorkspaceOnce(ctx context.Context, label, tabLabel, cwd string) (string, string, string, error) {
+	out, err := t.call(ctx, createSessionArgv(label, tabLabel, cwd)...)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -183,14 +234,46 @@ func (t tmux) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) 
 	if len(fields) != 3 || fields[0] == "" || fields[1] == "" || fields[2] == "" {
 		return "", "", "", fmt.Errorf("tmux new-session returned an incomplete layout")
 	}
-	wsID, tabID, rootPane = fields[0], fields[1], fields[2]
-	if _, err := t.call(ctx, "set-option", "-t", wsID, sessionOwnerOption, label); err != nil {
+	wsID, tabID, rootPane := fields[0], fields[1], fields[2]
+	alive, err := t.sessionAlive(ctx, wsID)
+	if err != nil {
 		return "", "", "", err
 	}
+	if !alive {
+		return "", "", "", errSessionGone
+	}
 	if err := t.markPane(ctx, rootPane); err != nil {
+		// A pane that went away with its session is the same loss, not a
+		// failure to mark the pane.
+		if alive, checkErr := t.sessionAlive(ctx, wsID); checkErr == nil && !alive {
+			return "", "", "", errSessionGone
+		}
 		return "", "", "", err
 	}
 	return wsID, tabID, rootPane, nil
+}
+
+// sessionAlive reports whether a session still exists. A session that is gone
+// is an answer, not an error; only a tmux that could not be asked is an error.
+func (t tmux) sessionAlive(ctx context.Context, id string) (bool, error) {
+	if err := requireTarget("workspace", id); err != nil {
+		return false, err
+	}
+	if _, err := t.call(ctx, "has-session", "-t", id); err != nil {
+		if isMissingSession(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// isMissingSession reports whether a tmux error says the target session does not
+// exist. tmux words it differently per command: has-session says "can't find
+// session" while set-option says "no such session".
+func isMissingSession(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "can't find session") || strings.Contains(msg, "no such session")
 }
 
 // CreateTab adds one detached window to a session and returns its root pane,
