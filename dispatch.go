@@ -376,8 +376,10 @@ func lastLine(s string) string {
 }
 
 // reconcile looks at every working unit and settles the ones whose lane has
-// stopped. A lane that is still working, or that the multiplexer cannot
-// classify, is left alone: guessing would settle work that is still running.
+// stopped. A lane that is still working is left alone: guessing would settle
+// work that is still running. A lane the multiplexer cannot classify is held
+// until its report exists, then judged by its accept command, because with no
+// status protocol the report is the only finish signal there is.
 func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d *digest) bool {
 	// An unreadable fleet settles nothing: calling a working lane blocked
 	// because the backend blinked would be a false claim.
@@ -406,25 +408,33 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			st.SetUnit(u.ID, "blocked", "lane is waiting on you in "+a.Pane)
 			d.Blocked = append(d.Blocked, u.ID)
 			progressed = true
-		case AgentIdle, AgentDone, AgentUnknown:
-			// With no status protocol the lane state says nothing, so the
-			// accept command is the only judge left.
-			switch settle(ctx, o, p, st, u, m) {
-			case "done":
-				StopLoopAfter(p, st, u.ID)
-				PromoteLoopFix(p, st, u.ID)
-				d.Done = append(d.Done, u.ID)
-			case "failed":
-				d.Failed = append(d.Failed, u.ID)
-			case "rejected":
-				d.Rejected = append(d.Rejected, u.ID)
-			case "unproven":
-				d.Unproven = append(d.Unproven, u.ID)
-			default:
-				d.Blocked = append(d.Blocked, u.ID)
+			continue
+		case AgentIdle, AgentDone:
+		case AgentUnknown:
+			// No status protocol: the report is the only finish signal, so the
+			// lane is held until it lands. Settling early would call a working
+			// unit blocked on the first poll and never look at it again.
+			if _, err := os.Stat(reportPath(o.planPath, u.ID)); err != nil {
+				continue
 			}
-			progressed = true
+		default:
+			continue
 		}
+		switch settle(ctx, o, p, st, u, m) {
+		case "done":
+			StopLoopAfter(p, st, u.ID)
+			PromoteLoopFix(p, st, u.ID)
+			d.Done = append(d.Done, u.ID)
+		case "failed":
+			d.Failed = append(d.Failed, u.ID)
+		case "rejected":
+			d.Rejected = append(d.Rejected, u.ID)
+		case "unproven":
+			d.Unproven = append(d.Unproven, u.ID)
+		default:
+			d.Blocked = append(d.Blocked, u.ID)
+		}
+		progressed = true
 	}
 	if progressed {
 		SaveState(o.statePath, *st)

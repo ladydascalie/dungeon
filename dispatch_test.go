@@ -610,3 +610,54 @@ func TestNextSettlesAnUnknownLaneByAccept(t *testing.T) {
 		t.Fatalf("unit %q, want done", got)
 	}
 }
+
+// An unknown lane is held until its report lands, then judged by accept. The
+// report is the only finish signal a backend with no status protocol has.
+func TestNextLeavesAnUnknownLaneUntilItsReportLands(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_STATUS", "busy") // a word dungeon does not know: unknown
+	t.Setenv("FAKE_REPORT", "0")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "60ms", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("first next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "timeout: lanes still working") {
+		t.Fatalf("an unknown lane with no report must be held, got:\n%s", stdout)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "working" {
+		t.Fatalf("unit %q, want working until the report lands", got)
+	}
+
+	// The report lands: the accept command is the judge now.
+	report := reportPath(planPath, "A")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("did the thing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runCLI("next", "--poll", "10ms", "--timeout", "2s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("second next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "done: A") {
+		t.Fatalf("the report should release the accept command, got:\n%s", stdout)
+	}
+	st, err = LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done", got)
+	}
+}
