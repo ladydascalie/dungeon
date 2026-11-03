@@ -20,10 +20,12 @@ func openMux(ctx context.Context, forced string) (mux, error) {
 	switch {
 	case os.Getenv("HERDR_ENV") == "1":
 		return newHerdr(), nil
+	case os.Getenv("DM_SESSION") != "":
+		return newDM(), nil
 	case os.Getenv("TMUX") != "":
 		return newTmux(), nil
 	}
-	return nil, fmt.Errorf("dungeon: no multiplexer detected: neither HERDR_ENV nor TMUX is set. pass --mux herdr")
+	return nil, fmt.Errorf("dungeon: no multiplexer detected: neither HERDR_ENV, DM_SESSION nor TMUX is set. pass --mux dm")
 }
 
 // backendByName is the backend table. tmux lands here when its backend exists.
@@ -31,10 +33,12 @@ func backendByName(name string) (mux, error) {
 	switch name {
 	case "herdr":
 		return newHerdr(), nil
+	case "dm":
+		return newDM(), nil
 	case "tmux":
 		return newTmux(), nil
 	}
-	return nil, fmt.Errorf("dungeon: unknown mux %q, want herdr or tmux", name)
+	return nil, fmt.Errorf("dungeon: unknown mux %q, want herdr, dm or tmux", name)
 }
 
 // probeAgents reads the fleet for a command that only displays it. No

@@ -30,6 +30,7 @@ worktree-path = "{{ repo_path }}/../{{ repo }}.worktrees/{{ branch | sanitize }}
 	}
 	os.Setenv("WORKTRUNK_CONFIG_PATH", cfg)
 	os.Setenv("HERDR_PANE_ID", "w9:p9") // every dispatch has a parent pane
+	os.Unsetenv("DM_SESSION")           // never inherit the operator's dm session
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
@@ -234,9 +235,13 @@ func TestStateEncounterMismatch(t *testing.T) {
 func TestOpenMuxSelectsTheBackend(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("TMUX", "")
+	t.Setenv("DM_SESSION", "")
 
 	if h, err := openMux(t.Context(), "herdr"); err != nil || h == nil {
 		t.Fatalf("--mux herdr: %v", err)
+	}
+	if h, err := openMux(t.Context(), "dm"); err != nil || h == nil {
+		t.Fatalf("--mux dm: %v", err)
 	}
 	if h, err := openMux(t.Context(), "tmux"); err != nil || h == nil {
 		t.Fatalf("--mux tmux: %v", err)
@@ -256,6 +261,11 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 		t.Fatalf("TMUX set: %v", err)
 	}
 	t.Setenv("TMUX", "")
+	t.Setenv("DM_SESSION", "main")
+	if h, err := openMux(t.Context(), ""); err != nil || h == nil {
+		t.Fatalf("DM_SESSION set: %v", err)
+	}
+	t.Setenv("DM_SESSION", "")
 	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "--mux") {
 		t.Fatalf("no multiplexer: %v", err)
 	}

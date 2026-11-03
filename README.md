@@ -9,8 +9,9 @@ that owns a worktree. Anything else fails validation.
 
 ## Status
 
-tmux is the supported backend. herdr still works behind `mux.go`, but it is an
-optional second backend and not the supported path.
+tmux and dm are the supported backends. herdr and dm both sit behind `mux.go`;
+dm is the one dungeon itself is developed in, so it is the reference for agent
+status. The tmux-only rail is the exception.
 
 Every command is built: `init`, `check`, `status`, `set`, `view`, `fleet`,
 `attach`, `up`, `next`, `land` and `down`.
@@ -423,12 +424,20 @@ description = "dungeon: open the encounter view"
 Change `--direction right` for `down` or `left`. Drop `--focus` if the graph
 should open without stealing the cursor.
 
-## In tmux
+## In tmux, dm and herdr
 
-dungeon drives either herdr or tmux. It picks the backend from `--mux
-herdr|tmux`, then `HERDR_ENV=1`, then `TMUX`, so a tmux session needs no flag.
-A tmux session is a workspace, a window is a tab, a pane is a pane. `up`
-creates the session detached; attach with `tmux attach -t <encounter>`.
+dungeon picks a backend from `--mux dm|herdr|tmux`, then `HERDR_ENV=1`, then
+`DM_SESSION`, then `TMUX`. A tmux session is a workspace, a window is a tab, a
+pane is a pane. `up` creates the session detached; attach with
+`tmux attach -t <encounter>`.
+
+dm is the same shape inside one session: a dm workspace, a dm window (the mux
+calls it a tab) and a dm pane. `up` creates the workspace without stealing the
+operator's focus, and `FocusAgent` switches workspace, window and pane as
+needed. dm answers OSC 7501 and persists the agent name in `state.json`, so
+`Agents` reports working, idle, blocked or done instead of `unknown`, and a
+restarted dungeon still finds the live lanes. The binary is `dm` on PATH
+(`DM_BIN` overrides it), and `DM_SESSION` names the session.
 
 tmux has no agent protocol, so the run looks different in four ways:
 
