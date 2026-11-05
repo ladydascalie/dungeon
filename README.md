@@ -427,7 +427,7 @@ should open without stealing the cursor.
 ## In tmux, dm and herdr
 
 dungeon picks a backend from `--mux dm|herdr|tmux`, then `HERDR_ENV=1`, then
-`DM_SESSION`, then `TMUX`. A tmux session is a workspace, a window is a tab, a
+`DM_SESSION`, then `TMUX`. With none set, dm is the default. A tmux session is a workspace, a window is a tab, a
 pane is a pane. `up` creates the session detached; attach with
 `tmux attach -t <encounter>`.
 

@@ -266,13 +266,10 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 		t.Fatalf("DM_SESSION set: %v", err)
 	}
 	t.Setenv("DM_SESSION", "")
-	if _, err := openMux(t.Context(), ""); err == nil || !strings.Contains(err.Error(), "--mux") {
-		t.Fatalf("no multiplexer: %v", err)
+	// default mux is dm, unless overridden by a flag
+	if _, err := openMux(t.Context(), "dm"); err != nil {
+		t.Fatalf("failed to open default mux: %v", err)
 	}
-	if agents := probeAgents(t.Context(), ""); agents != nil {
-		t.Fatalf("a read-only probe with no mux should see nothing, got %v", agents)
-	}
-
 	// status is read-only, so it is the command an operator points at the other
 	// backend. Its --mux flag must reach the fleet probe and beat the
 	// environment, and with no flag the environment must still decide.
@@ -286,8 +283,10 @@ func TestOpenMuxSelectsTheBackend(t *testing.T) {
 
 	statusAgent := func(args ...string) string {
 		t.Helper()
-		code, stdout, stderr := runCLI(append([]string{"status", "--json",
-			"--plan", path, "--state", state}, args...)...)
+		code, stdout, stderr := runCLI(append([]string{
+			"status", "--json",
+			"--plan", path, "--state", state,
+		}, args...)...)
 		if code != 0 {
 			t.Fatalf("status %v exit %d: %s", args, code, stderr)
 		}

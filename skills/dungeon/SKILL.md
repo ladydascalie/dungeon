@@ -44,10 +44,10 @@ Dungeon runs on tmux. herdr still works behind the same interface in `mux.go`,
 but it is an optional second backend and it is not the supported path. Write
 every instruction for a lane in tmux terms, because that is where it runs.
 
-Dungeon picks the backend from `--mux tmux|herdr` on the command, then
-`HERDR_ENV=1`, then `TMUX`. It reads your own pane from `$TMUX_PANE`, so run
-dungeon from the pane that should receive the pings. With no multiplexer and no
-`--mux`, say so and stop. Dungeon cannot spawn a lane without one.
+Dungeon picks the backend from `--mux dm|tmux|herdr` on the command, then
+`HERDR_ENV=1`, then `DM_SESSION`, then `TMUX`. It reads your own pane from
+`$TMUX_PANE` (or `$DM_PANE` for dm), so run dungeon from the pane that should
+receive the pings. With no multiplexer detected, dm is the default.
 
 What tmux gives you:
 
@@ -213,6 +213,10 @@ dungeon view          # live graph. d detail, space actions. picker when >1
 Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
 loop, and there is no daemon to keep alive.
 
+`next` runs one accept command at a time, inline and silent, up to
+`--accept-timeout` (10m by default). Do not abort it. A killed accept proves
+nothing and the unit stays `working`. Run `next` again instead.
+
 `up` builds one workspace per encounter, one tab per role and one pane per
 minion, so the layout reads like the plan. On tmux the workspace is a session,
 the tab is a window and the pane is a pane. The session is created detached;
@@ -263,6 +267,10 @@ A ping is a wake-up, not a verdict. Run `dungeon next` to settle the unit: the
 report and the unit's accept command or verdict still decide. Then read the
 report.
 
+A ping is text in your composer. A running tool call holds it until the call
+returns. Let the call finish, then read the ping. Do not abort the call to see
+it sooner: an accept running inside `next` dies with the call.
+
 Every brief lists the reports from the unit's deps under `reports from deps`,
 one absolute path per dep. Point the lane at those files instead of asking it
 to search. A fix unit's report path is the review report it must read.
@@ -285,7 +293,7 @@ so a stale plan never blocks a run.
 | --- | --- | --- |
 | `ready` | deps landed, no lane on it | nothing. `next` dispatches it |
 | `waiting` | deps not landed | nothing. `next` handles it |
-| `working` | a lane is on it | nothing. Do not help |
+| `working` | a lane is on it, or `next` is running its accept | nothing. Do not help |
 | `blocked` | needs a human, or the plan is wrong | read the note, then act |
 | `done` | proved: accept exited 0, or the verdict line was found | nothing |
 | `unproven` | settled, with no accept or verdict; a provisional fix lands here on purpose | nothing for a provisional fix. Otherwise add an `accept` or a `verdict` |

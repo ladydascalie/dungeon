@@ -302,6 +302,20 @@ func (d dm) CloseWorkspace(ctx context.Context, ws string) error {
 	return ignoreGone(d.call(ctx, map[string]any{"action": "close-workspace", "target": ws}, nil), "no workspace")
 }
 
+// MarkReadyToReap posts a done message to the lane's key, so the multiplexer
+// can actively find and reap the pane once the lane is no longer useful.
+func (d dm) MarkReadyToReap(ctx context.Context, name string) error {
+	return d.call(ctx, map[string]any{
+		"action": "msg-post",
+		"target": name,
+		"res": map[string]any{
+			"key":   name,
+			"state": "done",
+			"msg":   "lane done, ready to be reaped",
+		},
+	}, nil)
+}
+
 // ignoreGone treats closing something already closed as success. `down` may
 // close a workspace's panes and then each minion's pane; the second call is not
 // an error.

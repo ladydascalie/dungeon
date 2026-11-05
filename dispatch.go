@@ -460,6 +460,13 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			StopLoopAfter(p, st, u.ID)
 			PromoteLoopFix(p, st, u.ID)
 			d.Done = append(d.Done, u.ID)
+			if reaper, ok := h.(interface {
+				MarkReadyToReap(ctx context.Context, name string) error
+			}); ok {
+				if err := reaper.MarkReadyToReap(ctx, st.AgentName(m.ID)); err != nil {
+					fmt.Fprintf(o.out, "could not mark lane %s ready to be reaped: %v\n", st.AgentName(m.ID), err)
+				}
+			}
 		case "failed":
 			d.Failed = append(d.Failed, u.ID)
 		case "rejected":

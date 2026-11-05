@@ -25,7 +25,7 @@ func openMux(ctx context.Context, forced string) (mux, error) {
 	case os.Getenv("TMUX") != "":
 		return newTmux(), nil
 	}
-	return nil, fmt.Errorf("dungeon: no multiplexer detected: neither HERDR_ENV, DM_SESSION nor TMUX is set. pass --mux dm")
+	return newDM(), nil
 }
 
 // backendByName is the backend table. tmux lands here when its backend exists.
