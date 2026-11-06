@@ -368,8 +368,27 @@ func TestBriefHasNoPingWithoutAParentPane(t *testing.T) {
 	m := Minion{ID: "w1", Role: RoleWorker}
 	u := Unit{ID: "A", Goal: "Do it.", Paths: []string{"src/**"}}
 	text := briefText(briefData{minion: m, unit: u, dir: "/repo", report: "/enc/reports/A.md"})
-	if strings.Contains(text, "Ping the parent") {
+	if strings.Contains(text, "Notify the parent") {
 		t.Fatalf("no parent pane means no ping:\n%s", text)
+	}
+}
+
+func TestBriefNamesTheBoxWhenTheBackendPosts(t *testing.T) {
+	m := Minion{ID: "w1", Role: RoleWorker}
+	u := Unit{ID: "A", Goal: "Do it.", Paths: []string{"src/**"}}
+	text := briefText(briefData{
+		minion:   m,
+		unit:     u,
+		dir:      "/repo",
+		report:   "/enc/reports/A.md",
+		ping:     "dm msg post --key lane/w1 --state done --msg done",
+		pingNote: "The parent reads the session box. Do not wait for a reply.",
+	})
+	if !strings.Contains(text, "Notify the parent") {
+		t.Fatalf("brief has no notify section:\n%s", text)
+	}
+	if !strings.Contains(text, "The parent reads the session box") {
+		t.Fatalf("brief does not name the box:\n%s", text)
 	}
 }
 

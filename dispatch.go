@@ -147,6 +147,7 @@ type briefData struct {
 	report     string
 	depReports []depReport
 	ping       string
+	pingNote   string
 	base       string
 	lane       MinionState
 }
@@ -204,10 +205,10 @@ func briefText(d briefData) string {
 	}
 	fmt.Fprintf(&b, "\nreport: %s\n", d.report)
 	if d.ping != "" {
-		fmt.Fprintf(&b, "\n## Ping the parent when you finish\n\n")
-		b.WriteString("Write the report first, then wake the parent agent:\n\n")
+		fmt.Fprintf(&b, "\n## Notify the parent when you finish\n\n")
+		b.WriteString("Write the report first, then notify the parent:\n\n")
 		fmt.Fprintf(&b, "    %s\n\n", d.ping)
-		b.WriteString("That pane runs the agent that dispatched you. Do not wait for a reply.\n")
+		b.WriteString(d.pingNote + "\n")
 	}
 	b.WriteString(`
 ## What you may not do
@@ -263,9 +264,18 @@ func writeBrief(h mux, in briefInput) (string, error) {
 		}
 	}
 	ping := ""
+	pingNote := ""
 	if o.parentPane != "" {
-		ping = h.PingCommand(o.parentPane,
-			fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, absReport))
+		msg := fmt.Sprintf("%s: %s finished. Report: %s", u.ID, m.ID, absReport)
+		if boxer, ok := h.(interface {
+			BoxPing(key, message string) string
+		}); ok {
+			ping = boxer.BoxPing("lane/"+m.ID, msg)
+			pingNote = "The parent reads the session box. Do not wait for a reply."
+		} else {
+			ping = h.PingCommand(o.parentPane, msg)
+			pingNote = "That pane runs the agent that dispatched you. Do not wait for a reply."
+		}
 	}
 	text := briefText(briefData{
 		minion:     m,
@@ -274,6 +284,7 @@ func writeBrief(h mux, in briefInput) (string, error) {
 		report:     absReport,
 		depReports: depReports,
 		ping:       ping,
+		pingNote:   pingNote,
 		base:       p.Base,
 		lane:       lane,
 	})

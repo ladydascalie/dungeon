@@ -37,28 +37,17 @@ a branch.
 
 ```bash
 command -v dungeon          # required
-command -v tmux             # the backend you run on
+test -n "${DM_SESSION:-}"   # required: dungeon runs in a dm pane
 ```
 
-Dungeon runs on tmux. herdr still works behind the same interface in `mux.go`,
-but it is an optional second backend and it is not the supported path. Write
-every instruction for a lane in tmux terms, because that is where it runs.
+Dungeon runs in dm. Its lanes are dm panes in the same session. The dm backend
+reads your pane from `$DM_PANE` and the session from `$DM_SESSION`.
 
-Dungeon picks the backend from `--mux dm|tmux|herdr` on the command, then
-`HERDR_ENV=1`, then `DM_SESSION`, then `TMUX`. It reads your own pane from
-`$TMUX_PANE` (or `$DM_PANE` for dm), so run dungeon from the pane that should
-receive the pings. With no multiplexer detected, dm is the default.
+What dm gives you:
 
-What tmux gives you:
-
-- Every lane reports status `unknown`. tmux has no agent protocol, so dungeon
-  cannot tell working from idle.
+- Every lane reports OSC 7501 status, so dungeon can tell working from idle.
 - A unit settles on its report and its accept command, not on lane state.
-  `next` holds an unknown lane until its report lands. A verdict line still
-  decides a reviewer.
-- `down` refuses a lane it cannot classify. Pass `--force` to stop it anyway.
-- The brief's ping line is a `tmux send-keys` command to your pane. The lane
-  runs it as written.
+- The brief's notify line posts to the session box. The parent reads the box.
 
 ## Write the plan
 
@@ -217,11 +206,10 @@ loop, and there is no daemon to keep alive.
 `--accept-timeout` (10m by default). Do not abort it. A killed accept proves
 nothing and the unit stays `working`. Run `next` again instead.
 
-`up` builds one workspace per encounter, one tab per role and one pane per
-minion, so the layout reads like the plan. On tmux the workspace is a session,
-the tab is a window and the pane is a pane. The session is created detached;
-attach with `tmux attach -t <encounter>`. Panes grow to the right unless the
-plan says `split: down`, and they are equal shares of the tab.
+`up` builds one workspace per encounter, one window per role and one pane per
+minion, so the layout reads like the plan. The workspace lives in the current
+dm session. Panes grow to the right unless the plan says `split: down`, and
+they are equal shares of the window.
 
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
@@ -256,20 +244,33 @@ Consequences for you:
 Two minion ids that collide after truncation fail `dungeon check` with
 `E_DUPLICATE_AGENT`. Shorten one id.
 
-## Lanes ping you
+## Lanes notify you
 
-Every brief tells the lane to write its report and then run a `tmux send-keys`
-line that types `<unit>: <minion> finished. Report: <path>` into your pane and
-presses Enter. dungeon takes your pane from `$TMUX_PANE` at dispatch, so run
-dungeon from the pane that should receive the ping.
+Every brief tells the lane to write its report and then post to the session box:
 
-A ping is a wake-up, not a verdict. Run `dungeon next` to settle the unit: the
-report and the unit's accept command or verdict still decide. Then read the
+```sh
+dm msg post --key lane/<minion> --state done --msg "<unit>: <minion> finished. Report: <path>"
+```
+
+The parent reads the box. It does not type into your pane.
+
+A box entry is a wake-up, not a verdict. Run `dungeon next` to settle the unit:
+the report and the unit's accept command or verdict still decide. Then read the
 report.
 
-A ping is text in your composer. A running tool call holds it until the call
-returns. Let the call finish, then read the ping. Do not abort the call to see
-it sooner: an accept running inside `next` dies with the call.
+Read the box with a cursor:
+
+```sh
+dm msg list --prefix lane/ --after <cursor> --json
+```
+
+Persist the cursor. Do not use `dm msg wait --prefix lane/ --state blocked` for
+a fleet: without `--after` it reads the newest entry under the prefix, so a
+newer `done` on another lane masks an older `blocked`. Use `dm msg sub
+--prefix lane/ --json` for a stream, or wait per key.
+
+The box is durable. A lane that posts `done` and exits is still visible. The
+report file remains the record.
 
 Every brief lists the reports from the unit's deps under `reports from deps`,
 one absolute path per dep. Point the lane at those files instead of asking it
@@ -376,14 +377,14 @@ instead.
 anywhere in the repo. Run it in its own pane beside the lanes:
 
 ```bash
-tmux split-window -h -c "$PWD" "dungeon view"
+dm split <pane> --dir right
+dm write-to <new-pane> --msg "dungeon view" --enter
 ```
 
-Bind that line in `~/.tmux.conf` if you use it often. Rows are a two column
-table sized to their content, with a two column gap, so a wide terminal shows a
-block rather than a stretched line. `space f` then jumps from the graph to a
-lane. Tell the operator to look there when a unit is `blocked`; do not paste
-pane output into chat.
+Rows are a two column table sized to their content, with a two column gap, so a
+wide terminal shows a block rather than a stretched line. `space f` then jumps
+from the graph to a lane. Tell the operator to look there when a unit is
+`blocked`; do not paste pane output into chat.
 
 ## The fleet view
 
@@ -393,9 +394,9 @@ touch first. It takes no plan and needs no argument.
 Open it instead of `dungeon view` in two cases:
 
 - More than one encounter is live or parked. One window shows them all.
-- The lanes run in a detached tmux session, where dungeon reports every lane
-  status `unknown`. The fleet preview reads the pane itself, so it still says
-  what the lane is doing.
+
+- The lanes run in a workspace you are not watching. The fleet preview reads
+  the pane itself, so it still says what the lane is doing.
 
 Keys:
 
@@ -426,15 +427,8 @@ dispatches, settles or edits a lane.
 
 ## The rail
 
-`dungeon rail` does not poll. A long-lived tmux client in control mode wakes it
-when the topology changes: window add, close or rename, layout or pane mode,
-session changes, clients attaching. fsnotify on the repo's `.dungeon` tree wakes
-it when `plan.yaml`, any `state.json`, a report or a brief changes. A 10 second
-backstop, `--backstop`, re-reads in case an event was missed. The control client
-runs `refresh-client -f no-output`, so the pane stream is deliberately disabled:
-the rail takes pane state from its `pipe-pane` sink and OSC records, not from
-that stream. When nothing changes the rail waits on its event channels and one
-timer.
+`dungeon rail` is a tmux-only surface. It is not part of the dm path. Use
+`dungeon view` or `dungeon fleet` in a dm pane instead.
 
 ## Finishing
 
@@ -469,11 +463,11 @@ any pane exists, outside the checkout. It states the objective, repo and cwd,
 what the child may change, the acceptance criteria, and the stop conditions. The
 child prompt only points at that file.
 
-Split one pane in your own cwd and take the pane id tmux prints. Never derive it
+Split one pane in your own cwd and take the pane id dm prints. Never derive it
 from an example:
 
 ```bash
-pane=$(tmux split-window -d -h -t "$TMUX_PANE" -c "$PWD" -P -F '#{pane_id}')
+pane=$(dm split "$DM_PANE" --dir right)
 ```
 
 Start the child in that pane with an explicit tool allowlist. A read-only child
@@ -482,37 +476,33 @@ A writer child may keep a report under
 `${TMPDIR:-/tmp}/dungeon-handoffs/<slug>/`, outside the checkout:
 
 ```bash
-tmux send-keys -t "$pane" -l -- 'pi --no-skills --no-mcp --tools read,bash'
-tmux send-keys -t "$pane" Enter
+dm write-to "$pane" --msg 'pi --no-skills --no-mcp --tools read,bash' --enter
 ```
 
-Prompt it to read the handoff and do it, then wait a bounded time:
+Prompt it to read the handoff and do it, then wait on the box:
 
 ```bash
-tmux send-keys -t "$pane" -l -- "Read <abs>/handoff.md and do it."
-tmux send-keys -t "$pane" Enter
+dm write-to "$pane" --msg "Read <abs>/handoff.md and do it." --enter
+dm msg wait --key handoff/<slug> --state done --timeout 15m
 ```
 
-tmux has no completion signal. Poll the pane for the report path, with a cap:
+The child posts when it finishes:
 
 ```bash
-for i in $(seq 60); do
-  tmux capture-pane -p -t "$pane" | grep -q handoff.md && break
-  sleep 15
-done
+dm msg post --key handoff/<slug> --state done --msg "<report path>"
 ```
 
-A poll that runs out means the task is async, not that it failed. Check it again
+A wait that times out means the task is async, not that it failed. Check it again
 later.
 
 Read the child's reply from the pane. A writer child's report file comes first;
 fall back to the pane only when there is no report:
 
 ```bash
-tmux capture-pane -p -t "$pane" -S -120
+dm read "$pane" --lines 120
 ```
 
-Close only the pane you opened: `tmux kill-pane -t "$pane"`.
+Close only the pane you opened: `dm exec '{"action":"close-pane","target":"<pane>"}'`.
 
 Never commit, push or merge from a child, and keep one writer per checkout.
 
@@ -520,6 +510,5 @@ When the child is `blocked`, it is asking a question. Answer with raw pane input
 not another prompt, then wait again:
 
 ```bash
-tmux send-keys -t "$pane" -l -- "<answer>"
-tmux send-keys -t "$pane" Enter
+dm write-to "$pane" --msg "<answer>" --enter
 ```

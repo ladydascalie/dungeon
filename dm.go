@@ -282,6 +282,17 @@ func (d dm) PingCommand(pane, message string) string {
 	return strings.Join(args, " ")
 }
 
+// BoxPing is the line a lane runs to post its finish to the session box. The
+// parent reads the box; no pane is typed into. The key names the lane, so the
+// parent can filter with --prefix lane/ and map the entry back to a minion.
+func (d dm) BoxPing(key, message string) string {
+	args := []string{d.bin, "msg", "post", "--key", key, "--state", "done", "--msg", shellQuote(message)}
+	if d.session != "" {
+		args = append(args, "-s", d.session)
+	}
+	return strings.Join(args, " ")
+}
+
 func (d dm) FocusAgent(ctx context.Context, name string) error {
 	p, err := d.agentPane(ctx, name)
 	if err != nil {

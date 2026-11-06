@@ -166,6 +166,16 @@ func TestDMPingCommandQuotes(t *testing.T) {
 	}
 }
 
+func TestDMBoxPingQuotes(t *testing.T) {
+	t.Setenv("DM_SESSION", "main")
+	d := newDM()
+	got := d.BoxPing("lane/w1", "it's $HOME `x`")
+	want := `dm msg post --key lane/w1 --state done --msg 'it'\''s $HOME ` + "`x`" + `' -s main`
+	if got != want {
+		t.Fatalf("box ping = %q, want %q", got, want)
+	}
+}
+
 func TestDMSendKeysSendsEachKey(t *testing.T) {
 	_, log := fakeDM(t)
 	d := newDM()
