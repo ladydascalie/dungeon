@@ -121,10 +121,11 @@ export default function (pi: ExtensionAPI) {
 			const seconds = Math.max(1, Math.round(params.timeout ?? DEFAULT_TIMEOUT));
 			const file = cursorPath(ctx.cwd);
 
-			// A cursor argument wins. Otherwise read the persisted cursor. A first
-			// call with neither starts at the newest entry so old events do not replay.
+			// An explicit cursor wins. A reset reads from seq 0. Otherwise read the
+			// persisted cursor. A first call with neither starts at the newest entry
+			// so old events do not replay.
 			let cursor = params.cursor;
-			if (cursor === undefined && !params.reset) cursor = readCursor(file);
+			if (cursor === undefined) cursor = params.reset ? 0 : readCursor(file);
 
 			const base = ["msg"];
 			const filter = ["--prefix", prefix];
