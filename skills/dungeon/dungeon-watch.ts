@@ -19,7 +19,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_PREFIX = "lane/";
-const DEFAULT_TIMEOUT = 240;
+const DEFAULT_TIMEOUT = 60;
 const CURSOR_FILE = "box.cursor";
 
 type Entry = {
@@ -100,6 +100,7 @@ export default function (pi: ExtensionAPI) {
 			"Call dungeon_watch while dungeon lanes are running. It returns lane events past the last read and blocks when nothing is queued.",
 			"After a done or error event, run `dungeon next`. After a blocked event, read the lane's pane with `dm read <from>` and answer with `dm write-to <from> --msg \"...\" --enter`.",
 			"Do not use `dm msg wait --prefix lane/ --state blocked` to watch a fleet without --after: it reads the newest entry, so a newer done masks an older blocked. This tool uses the cursor.",
+			"Keep the wait short, 60 seconds or less. A long block hides a lane that is looping and burning context. A timeout is a cue to read the panes, not a failure.",
 		],
 		parameters: Type.Object({
 			timeout: Type.Optional(

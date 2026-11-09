@@ -14,7 +14,7 @@ dm is the one dungeon itself is developed in, so it is the reference for agent
 status. The tmux-only rail is the exception.
 
 Every command is built: `init`, `check`, `status`, `set`, `view`, `fleet`,
-`attach`, `up`, `next`, `land` and `down`.
+`attach`, `up`, `next`, `land`, `down` and `clear`.
 
 The loop: `dungeon up` spawns one pi lane per minion, `dungeon next` dispatches
 what is ready and settles what landed, `dungeon view` shows the graph while it
@@ -52,6 +52,11 @@ dungeon next --timeout 10m
 
 dungeon land                       # merge done units, re-run their accepts
 dungeon down                       # close the lanes, keep the run
+
+dungeon clear                      # delete the finished plans, keep the runs
+dungeon clear --remove             # delete the state, the briefs and the reports too
+dungeon clear --remove-worktrees   # delete the lane worktrees and their branches
+dungeon clear --dry-run            # say what would go, touch nothing
 ```
 
 A dispatch is five steps, and only proof can mark a unit `done`:
@@ -265,7 +270,15 @@ is provisional.
 
 One encounter is one directory: `.dungeon/` holds `plan.yaml`, `state.json`,
 `briefs/` and `reports/`. Nothing goes to `$XDG_STATE_HOME`, so a brief survives
-until the encounter is archived and `dungeon down` cannot lose it. The pane column comes from
+until the encounter is archived and `dungeon down` cannot lose it. `dungeon
+clear` archives a finished encounter: every unit done or canceled and no lane
+live. It deletes the plan only, because the run is the record of what was done;
+`--remove` deletes the state, the briefs, the reports and the sessions as well,
+and sweeps the run of a plan cleared earlier. `--remove-worktrees` deletes the
+lane worktrees and the `<encounter>/<minion>` branches. It is never implied by
+`--remove`, because a lane branch can hold work that never landed. A directory
+goes only when it is empty, so the default `.dungeon/` keeps its named
+encounters. The pane column comes from
 `herdr agent list` at read time, matched by the run's derived agent name, so it
 cannot go stale and cannot pick up another run's lane.
 
@@ -542,8 +555,7 @@ Link it where pi looks for skills:
 ln -s "$PWD/skills/dungeon" ~/.agents/skills/dungeon
 ```
 
-The skill covers writing a plan, the dispatch loop, what each state means,
-what to do when a unit is rejected, and the moves a parent must never make. It
+define fluid success criteria, kill stuck lanes, and supervise at short intervals so a doomloop is caught in a minute, not ten. It
 also carries its own recipe for a one-off pane, for the work that does not
 deserve an encounter, so the skill stands alone.
 

@@ -41,16 +41,24 @@ func backendByName(name string) (mux, error) {
 	return nil, fmt.Errorf("dungeon: unknown mux %q, want herdr, dm or tmux", name)
 }
 
-// probeAgents reads the fleet for a command that only displays it. No
-// multiplexer is not an error there: the pane column reads "-".
-func probeAgents(ctx context.Context, forced string) map[string]Agent {
+// probeFleet is the fleet read with the reason it failed, so a command that acts
+// on the answer can say why it judged on something else. A nil map with no
+// reason is an empty fleet; a non-empty reason is an unreadable one.
+func probeFleet(ctx context.Context, forced string) (map[string]Agent, string) {
 	h, err := openMux(ctx, forced)
 	if err != nil {
-		return nil
+		return nil, err.Error()
 	}
 	agents, err := h.Agents(ctx)
 	if err != nil {
-		return nil
+		return nil, err.Error()
 	}
+	return agents, ""
+}
+
+// probeAgents reads the fleet for a command that only displays it. No
+// multiplexer is not an error there: the pane column reads "-".
+func probeAgents(ctx context.Context, forced string) map[string]Agent {
+	agents, _ := probeFleet(ctx, forced)
 	return agents
 }

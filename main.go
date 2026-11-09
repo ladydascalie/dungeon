@@ -54,6 +54,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return landCmd(ctx, args[1:], stdout, stderr)
 	case "down":
 		return downCmd(ctx, args[1:], stdout, stderr)
+	case "clear":
+		return clearCmd(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		usage(stdout)
 		return 0
@@ -113,6 +115,17 @@ func usage(w io.Writer) {
   dungeon down   [--force] [--plan path] [--state path]
       Close the lanes and the encounter tab. A working lane is refused unless
       --force. The plan, the state, the briefs and the reports stay.
+
+  dungeon clear  [--plan path] [--remove] [--remove-worktrees] [--dry-run]
+      Delete the plan of every encounter whose units are all done or
+      canceled and whose lanes are gone. The state, the briefs, the reports
+      and the sessions stay, because they are the record of what was done;
+      --remove deletes those too, including the run of a plan cleared
+      earlier. --remove-worktrees deletes the lane worktrees and the
+      <encounter>/<minion> branches, which can hold work that never landed,
+      so it is never implied. A directory goes only when it is empty, so a
+      named encounter leaves nothing behind and the default one leaves
+      .dungeon itself alone.
 
   dungeon view   [--once] [--interval 2s] [--plan path] [--state path]
       The live table. j/k move, g/G ends, d detail, space actions.

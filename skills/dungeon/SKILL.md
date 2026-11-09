@@ -33,6 +33,13 @@ A unit that touches files names a minion that writes. You may write exactly two
 things: the plan, and your notes. You may not edit a unit's paths, a worktree, or
 a branch.
 
+## Orchestrator discipline
+
+- **Decompose into small, self-contained units.** Every piece of work must be split into small units. A unit should be one concern that can be finished in one sitting and reviewed in isolation.
+- **Prioritize parallel work.** Identify independent units and dispatch them in parallel. Maximize concurrency while respecting disjoint paths and dependencies.
+- **Define fluid success criteria upfront.** Set success criteria before dispatch. If a unit's tests are expected to fail until a later unit cleans up, mark it as provisional or unproven, or use a verdict instead of an accept command. Do not let a lane block on an expected failure.
+- **Kill and re-dispatch stuck lanes.** It is entirely fine for the orchestrator to stop a lane that is burning context or looping. Cancel the unit or run `dungeon down`, then re-dispatch the work as a new unit or assign it to a fresh lane. A stuck lane must never stall the encounter.
+
 ## Gate before you start
 
 ```bash
@@ -202,6 +209,9 @@ dungeon view          # live graph. d detail, space actions. picker when >1
 Run `dungeon next` until it says nothing to do. It is idempotent and safe in a
 loop, and there is no daemon to keep alive.
 
+Between rounds, watch the box at short intervals. See `## Supervise at short
+intervals` below. A long block is time a looping lane spends burning context.
+
 `next` runs one accept command at a time, inline and silent, up to
 `--accept-timeout` (10m by default). Do not abort it. A killed accept proves
 nothing and the unit stays `working`. Run `next` again instead.
@@ -213,6 +223,27 @@ they are equal shares of the window.
 
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
+
+## Supervise at short intervals
+
+A lane in a doomloop burns context and tokens fast. A five minute wait is five
+minutes of that. Never block longer than 60 to 90 seconds on a watch.
+
+- Pass the timeout explicitly. `dungeon_watch` defaults to 60 seconds, and a
+  bare `dm msg wait` defaults to whatever you typed. Set `timeout: 60` on every
+  call. Do not accept the default.
+- A timeout is not a failure. It is a cue to look. Run `dungeon status`, then
+  read the pane of every `working` lane.
+- Read the pane, not just the state. A lane can be `working` and looping. The
+  state only says a lane is alive.
+- Look for the loop: the same command twice, the same file read again, an error
+  that does not change, a retry of an accept that already failed, no new tool
+  call between two looks.
+- Kill and re-dispatch on the second look at the same loop. `dungeon down`, then
+  re-queue the unit or write a new one. Do not wait for the lane to recover.
+
+Between looks, do plan work: read reports, split units, answer `blocked` lanes.
+Do not idle on a long wait.
 
 ## Agent names
 
@@ -258,11 +289,11 @@ A box entry is a wake-up, not a verdict. Run `dungeon next` to settle the unit:
 the report and the unit's accept command or verdict still decide. Then read the
 report.
 
-In pi, call the `dungeon_watch` tool instead. It drains entries past the
-persisted cursor in `.dungeon/box.cursor`, then blocks for the next one. The
-first call starts at the box's newest entry, so a new encounter does not replay
-old events. After a `done` or `error` event, run `dungeon next`. After a
-`blocked` event, read the lane's pane and answer it.
+In pi, call the `dungeon_watch` tool instead, with `timeout: 60`. It drains
+entries past the persisted cursor in `.dungeon/box.cursor`, then blocks for the
+next one. The first call starts at the box's newest entry, so a new encounter
+does not replay old events. After a `done` or `error` event, run `dungeon next`.
+After a `blocked` event, read the lane's pane and answer it.
 
 The extension lives in this repo at `skills/dungeon/dungeon-watch.ts`. Symlink
 it into `~/.pi/agent/extensions/` and reload pi to load it.
@@ -444,10 +475,21 @@ dispatches, settles or edits a lane.
 ```bash
 dungeon land          # merge done units, re-run every accept against the result
 dungeon down          # close the workspace, keep the run
+dungeon clear         # delete the finished plans, keep the runs
 ```
 
 Report to the operator: what landed, what is blocked and why, and which branch
 holds the result. Name the units, not the files.
+
+`dungeon clear` retires an encounter once every unit is done or canceled and no
+lane is live. It deletes the plan and nothing else, because a brief and a report
+are the record of what was done. Add `--remove` to delete the state, the briefs,
+the reports and the sessions too, and to sweep the run of a plan cleared earlier.
+Add `--remove-worktrees` to delete the lane worktrees and their
+`<encounter>/<minion>` branches; it is never implied by `--remove`, because a
+lane branch can hold work that never landed. It sweeps every encounter under
+`.dungeon` unless `--plan` names one, and `--dry-run` says what would go without
+touching anything. A plan with a live lane is refused: run `dungeon down` first.
 
 ## A worked split
 
