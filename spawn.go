@@ -247,6 +247,9 @@ func spawnMinions(ctx context.Context, h mux, in spawnInput) (spawnResult, error
 			if err != nil {
 				return nil, err
 			}
+			if err := tagProject(ctx, h, id, p); err != nil {
+				return nil, err
+			}
 			ws, t.tab, t.root = id, tabID, root
 		} else {
 			tabID, root, err := h.CreateTab(ctx, ws, label, cwd)

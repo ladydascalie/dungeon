@@ -24,7 +24,7 @@ case "$2" in
   *'"action":"list-panes"'*)
     printf '{"panes":[{"id":"p9abc","name":"w1","status":"working"},{"id":"pX","status":"idle"}]}' ;;
   *'"action":"list-workspaces"'*)
-    printf '[{"id":"s1","name":"enc"}]' ;;
+      if [ -n "$FAKE_NO_WS" ]; then printf '[]'; else printf '[{"id":"s1","name":"enc"}]'; fi ;;
   *'"action":"split"'*)
     printf '{"pane":"pNEW"}' ;;
   *'"action":"new-workspace"'*)
@@ -332,5 +332,56 @@ func TestDMBackendAgainstRealDM(t *testing.T) {
 		if w.ID == ws {
 			t.Fatalf("workspace %s still listed", ws)
 		}
+	}
+}
+
+func TestDMSetProjectSendsTheAction(t *testing.T) {
+	_, log := fakeDM(t)
+	d := newDM()
+	if err := d.SetProject(t.Context(), "sNEW", "gitops"); err != nil {
+		t.Fatal(err)
+	}
+	line := callLog(t, log)
+	for _, want := range []string{`"action":"set-project"`, `"target":"sNEW"`, `"name":"gitops"`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("set-project call missing %s: %s", want, line)
+		}
+	}
+}
+
+func TestProjectNameDefaultsToTheRepoFolder(t *testing.T) {
+	if got := projectName(Plan{Repo: "/home/b/Code/LootLocker/gitops-cluster"}); got != "gitops-cluster" {
+		t.Fatalf("project = %q, want the repo folder name", got)
+	}
+	if got := projectName(Plan{Repo: "/home/b/Code/LootLocker/gitops-cluster", Project: "gitops"}); got != "gitops" {
+		t.Fatalf("project = %q, want the plan's project", got)
+	}
+	if got := projectName(Plan{Repo: "/"}); got != "" {
+		t.Fatalf("project = %q, want empty for a root repo", got)
+	}
+}
+
+// TestUpTagsTheEncounterWorkspace proves a fresh encounter workspace joins the
+// plan's project group, so a lane never inherits the project of whatever
+// workspace happened to be active.
+func TestUpTagsTheEncounterWorkspace(t *testing.T) {
+	repo := gitRepo(t)
+	_, log := fakeDM(t)
+	t.Setenv("FAKE_NO_WS", "1")
+	plan := strings.Replace(planFor(repo), "base: main", "base: main\nproject: gitops", 1)
+	planPath, _, _ := encounter(t, repo, plan)
+
+	code, stdout, stderr := runCLI("up", "--mux", "dm", "--no-dispatch", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	calls := callLog(t, log)
+	if !strings.Contains(calls, `"action":"new-workspace"`) {
+		t.Fatalf("no workspace was created:\n%s", calls)
+	}
+	if !strings.Contains(calls, `"action":"set-project"`) ||
+		!strings.Contains(calls, `"target":"sNEW"`) ||
+		!strings.Contains(calls, `"name":"gitops"`) {
+		t.Fatalf("the encounter workspace was not tagged:\n%s", calls)
 	}
 }

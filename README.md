@@ -128,6 +128,10 @@ one minion, plural for more, so the tabs say how many lanes are in each. One
 pane per minion, split equally from the tab's root pane. A pinned minion stays
 in its own pane and is not moved into the workspace.
 
+The encounter workspace joins a project group in dm's rail. `project:` in the
+plan names the group; with no `project:` the repo folder name is used. A
+backend with no project concept ignores it.
+
 Panes grow to the right by default, because tall and narrow beats short and
 wide. `split: down` in the plan, or `--split down` on `up`, changes it; `left`
 and `up` work too.

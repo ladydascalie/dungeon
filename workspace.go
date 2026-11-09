@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 )
 
 // One encounter, one workspace. Inside it, one tab per role, and one pane per
@@ -108,6 +109,34 @@ func (h herdr) CloseWorkspace(ctx context.Context, ws string) error {
 }
 
 // findWorkspace is the encounter's workspace, if it is still open.
+
+// projectName is the rail group the encounter workspace joins: the plan's
+// project, or the repo folder name when the plan names none.
+func projectName(p Plan) string {
+	if p.Project != "" {
+		return p.Project
+	}
+	name := filepath.Base(filepath.Clean(p.Repo))
+	if name == "." || name == string(filepath.Separator) {
+		return ""
+	}
+	return name
+}
+
+// tagProject puts a freshly created encounter workspace in its project group.
+// A backend with no project concept is left alone.
+func tagProject(ctx context.Context, h mux, ws string, p Plan) error {
+	t, ok := h.(projectTagger)
+	if !ok {
+		return nil
+	}
+	name := projectName(p)
+	if name == "" {
+		return nil
+	}
+	return t.SetProject(ctx, ws, name)
+}
+
 func findWorkspace(ctx context.Context, h mux, label string) string {
 	for _, ws := range h.Workspaces(ctx) {
 		if ws.Label == label {

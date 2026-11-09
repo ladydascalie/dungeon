@@ -110,6 +110,14 @@ type mux interface {
 	CloseWorkspace(ctx context.Context, ws string) error
 }
 
+// projectTagger is a mux that groups workspaces into projects. A backend with
+// no project concept does not implement it, and dungeon then leaves the
+// encounter workspace untagged.
+type projectTagger interface {
+	// SetProject puts ws in the named project group. An empty name clears it.
+	SetProject(ctx context.Context, ws, project string) error
+}
+
 // Agent is one live agent: the name its lane was given, the pane hosting it,
 // and what the backend can say about it.
 type Agent struct {

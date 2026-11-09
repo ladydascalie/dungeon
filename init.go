@@ -74,6 +74,8 @@ func initPlan(planPath, encounter, base string, force bool) error {
 encounter: %s
 repo: %s
 base: %s
+# project: the dm rail group the encounter workspace joins. Defaults to the
+# repo folder name.
 concurrency: 1
 
 minions:

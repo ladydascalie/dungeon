@@ -24,8 +24,11 @@ func PlanHash(path string) (string, error) {
 
 // Plan is one encounter: who exists, and what each unit of work is.
 type Plan struct {
-	Encounter   string   `yaml:"encounter"`
-	Repo        string   `yaml:"repo"`
+	Encounter string `yaml:"encounter"`
+	Repo      string `yaml:"repo"`
+	// Project is the rail group the encounter workspace joins. Empty means the
+	// repo folder name.
+	Project     string   `yaml:"project"`
 	Base        string   `yaml:"base"`
 	Concurrency int      `yaml:"concurrency"`
 	Split       string   `yaml:"split"` // right (default) or down/left/up: how a role's panes grow

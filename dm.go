@@ -35,7 +35,10 @@ func newDM() dm {
 	return dm{bin: bin, session: os.Getenv("DM_SESSION")}
 }
 
-var _ mux = dm{}
+var (
+	_ mux           = dm{}
+	_ projectTagger = dm{}
+)
 
 // call sends one action to the session and decodes its result. dm's exec prints
 // the result as JSON, and nothing at all when there is none.
@@ -138,6 +141,14 @@ func (d dm) CreateWorkspace(ctx context.Context, label, tabLabel, cwd string) (w
 		"cwd": cwd, "nofocus": true,
 	}, &res)
 	return res.Workspace, res.Window, res.Pane, err
+}
+
+// SetProject puts a workspace in a project group. dm keeps the workspace, its
+// tabs and its panes, and moves the row into that group's block.
+func (d dm) SetProject(ctx context.Context, ws, project string) error {
+	return d.call(ctx, map[string]any{
+		"action": "set-project", "target": ws, "name": project,
+	}, nil)
 }
 
 func (d dm) CreateTab(ctx context.Context, ws, label, cwd string) (tabID, rootPane string, err error) {
