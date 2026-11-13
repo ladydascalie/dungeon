@@ -137,10 +137,20 @@ Good units, in the order that matters:
 - **One concern.** If the goal needs an "and", it is two units.
 - **Disjoint paths.** Two units that touch one file are one unit, or they are
   ordered with `deps`.
+- **Paths wide enough to pass.** Paths must cover everything the accept
+  touches: generated docs, golden test frames, a README row. A worker's
+  worktree is cut from base and never contains a dep's work, so a unit that
+  builds on a dep's package carries it by copy, and its paths must say so.
+  Otherwise `land` hits an add/add conflict between the copy and the dep's
+  branch.
 - **A real acceptance command.** It runs in the lane's worktree. Exit 0 makes
   the unit done. A reviewer may give a `verdict` line instead, and that exact
   report line makes its unit done. No accept and no verdict means `unproven`,
   which blocks every dependent.
+- **An accept at the unit's own indent.** YAML folds a multi-line `goal: >`
+  into one string. An `accept:` indented inside that block is goal text, not
+  a field, and the unit settles `unproven` with nothing that proves it. Keep
+  `accept:` and `verdict:` at the unit's own level.
 - **A small unit.** A unit a lane can finish in one sitting gets a report worth
   reading.
 
@@ -177,7 +187,7 @@ after the first depends on the fix before it.
 
 A loop may declare `deps` for its first review, for example `deps: [recon]`.
 The ids must be declared units. The loop then reviews work that has landed
-instead of racing it. Without `deps` the first review has no deps.
+instead of racing it. Without `deps` the first review has no deps. A loop that reviews a writer's work must declare `deps` on that writer's first unit. Without them, round 1 reviews base, finds nothing real, and you cancel it.
 
 `rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
 a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
