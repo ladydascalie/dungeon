@@ -695,7 +695,7 @@ func TestLoopSummaryRow(t *testing.T) {
 	if strings.Contains(lines, "polish-review-1") {
 		t.Fatalf("a child row should drop the loop prefix:\n%s", lines)
 	}
-	if strings.Contains(lines, "Review round 1 of loop polish") {
+	if strings.Contains(lines, "Adversarial review of round 1 of loop polish") {
 		t.Fatalf("a child row should show the short label, not the long goal:\n%s", lines)
 	}
 }
@@ -711,7 +711,7 @@ func TestLoopChildCardKeepsTheFullGoal(t *testing.T) {
 	m := loopViewWith(t, map[string]string{"A": "done", "polish-review-1": "working"}, nil)
 	selectID(t, &m, "polish-review-1")
 	card := m.detailBox(120, 7)
-	if !strings.Contains(card, "Review round 1 of loop polish") {
+	if !strings.Contains(card, "Adversarial review of round 1 of loop polish") {
 		t.Fatalf("the card should show the full goal:\n%s", card)
 	}
 	if !strings.Contains(card, "polish-review-1") {
@@ -993,7 +993,7 @@ func TestLoopRoundCardOpensAndEscGoesBack(t *testing.T) {
 		t.Fatalf("card unit %q, want polish-review-1", m.cardID)
 	}
 	out := m.View()
-	if !strings.Contains(out, "polish-review-1") || !strings.Contains(out, "Review round 1 of loop polish") {
+	if !strings.Contains(out, "polish-review-1") || !strings.Contains(out, "Adversarial review of round 1 of loop polish") {
 		t.Fatalf("the round card should show the full unit:\n%s", out)
 	}
 
@@ -1095,7 +1095,7 @@ func TestDetailBoxShowsTheLoop(t *testing.T) {
 	}
 	for _, want := range []string{
 		"polish", "working", "focus: correctness", "round 1/2",
-		"now: review, round 1", "Review round 1 of loop polish",
+		"now: review, round 1", "Adversarial review of round 1 of loop polish",
 		"d opens the round timeline",
 	} {
 		if !strings.Contains(box, want) {

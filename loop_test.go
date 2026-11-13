@@ -60,6 +60,15 @@ func TestExpandLoops(t *testing.T) {
 	if review1.Minion != "r1" || review1.Verdict != "Merge verdict: PASS" || review1.Accept != "" {
 		t.Fatalf("review-1 %+v", review1)
 	}
+	if !strings.Contains(review1.Goal, "Adversarial review of round 1 of loop polish") {
+		t.Fatalf("the default review goal is adversarial: %q", review1.Goal)
+	}
+	if !strings.Contains(review1.Goal, "findings list is empty") {
+		t.Fatalf("the default review goal gates the pass line on findings: %q", review1.Goal)
+	}
+	if !strings.Contains(review1.Goal, "counter-example") {
+		t.Fatalf("the default review goal demands a repro per finding: %q", review1.Goal)
+	}
 	if !strings.Contains(review1.Goal, "error handling") {
 		t.Fatalf("review-1 goal should name the focus: %q", review1.Goal)
 	}

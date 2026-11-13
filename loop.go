@@ -61,7 +61,7 @@ func ExpandLoops(p Plan) (Plan, []Finding) {
 func loopReview(l Loop, round int) Unit {
 	goal := strings.TrimSpace(l.ReviewGoal)
 	if goal == "" {
-		goal = fmt.Sprintf("Review round %d of loop %s. Focus: %s", round, l.ID, strings.TrimSpace(l.Focus))
+		goal = fmt.Sprintf("Adversarial review of round %d of loop %s. Focus: %s. You are a hostile senior reviewer whose goal is to break the change. Assume the happy path works. Hunt edge cases, race conditions, malicious inputs, leaks and silent failures. Ignore style unless it breaks correctness or security. Give every finding a concrete counter-example or a minimal repro the fixer can run. Write the pass line only when the findings list is empty: a pass with findings is a bug.", round, l.ID, strings.TrimSpace(l.Focus))
 	}
 	u := Unit{
 		ID:      fmt.Sprintf("%s-review-%d", l.ID, round),

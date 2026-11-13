@@ -181,8 +181,11 @@ instead of racing it. Without `deps` the first review has no deps.
 
 `rounds` is 1 to 9. `focus`, `pass` and `paths` are required. `reviewer` must be
 a reviewer and `fixer` must be a writer. `paths` are the files the fixer owns.
-`review_goal` and `fix_goal` are optional. Without them the generated goals name
-the round, the focus and the report to read.
+`review_goal` and `fix_goal` are optional. The default review goal is
+adversarial: hostile senior reviewer, edge cases, races, malicious inputs,
+leaks, silent failures, one concrete counter-example or repro per finding, and
+the pass line only when the findings list is empty. The default fix goal names
+the review report to read. A plan overrides either.
 
 A review is proved by its verdict. The pass line marks it `done`. A report
 without that line, including a FAIL verdict, marks it `failed`. That failure
