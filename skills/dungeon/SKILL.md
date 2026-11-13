@@ -69,6 +69,7 @@ command. Units form a DAG through `deps`.
 encounter: fix-auth-timeouts      # lowercase: it becomes a branch prefix
 repo: /abs/path/to/repo
 base: main
+project: auth                     # dm rail group. Defaults to the repo folder name
 concurrency: 3
 
 minions:
@@ -91,6 +92,22 @@ units:
     deps: [api-timeout]
     verdict: "Verdict: PASS"          # the exact report line that proves it
 ```
+
+Set `project:` before you dispatch. The encounter workspace joins that group in
+dm's rail. With no `project:` it takes the repo folder name, which is usually
+right. Set it when the operator's group differs from the folder name: a
+`gitops-cluster` checkout under the `gitops` group needs `project: gitops`.
+
+Check the name against the session before dispatch:
+
+```bash
+dm list --json | jq -r '.snapshot.all[].project' | sort -u   # groups already in use
+```
+
+A lane in the wrong group is a plan bug. dm inherits the active workspace's
+project when a request names none, so an untagged plan lands wherever the
+operator happened to be. dungeon always names one now, and the plan is where
+the name comes from.
 
 Do not add an integrator unit with an `accept` command. Its worktree is cut
 from base and does not contain the other writers' work, so the gate can never pass.
