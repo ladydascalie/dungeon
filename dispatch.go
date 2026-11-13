@@ -72,6 +72,30 @@ type digest struct {
 	Unproven   []string
 	Blocked    []string
 	NoLane     []string
+	PlanFix    []string
+}
+
+// planFixes names the plan edit a blocked or unproven unit is waiting on, so
+// the parent asks for a plan change instead of narrating a stalled watch. A
+// loop fix settles unproven on purpose: the review after it is the judge, so it
+// never gets a hint.
+func planFixes(p Plan, st *State, d digest) []string {
+	var out []string
+	for _, id := range d.Unproven {
+		u, ok := findUnit(p, id)
+		if !ok || u.Provisional || u.Loop != "" {
+			continue
+		}
+		if strings.Contains(st.Units[id].Note, "no accept command") {
+			out = append(out, id+": add an accept command to the plan, or accept that this unit stays unproven")
+		}
+	}
+	for _, id := range d.Blocked {
+		if strings.Contains(st.Units[id].Note, "changed files outside your paths") {
+			out = append(out, id+": widen the unit's paths in the plan to cover the files it touched")
+		}
+	}
+	return out
 }
 
 func (d digest) empty() bool {
@@ -92,6 +116,7 @@ func (d digest) String() string {
 	line("unproven", d.Unproven)
 	line("blocked", d.Blocked)
 	line("no lane", d.NoLane)
+	line("plan fix", d.PlanFix)
 	if b.Len() == 0 {
 		return "nothing to do\n"
 	}
@@ -492,6 +517,7 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 	if progressed {
 		SaveState(o.statePath, *st)
 	}
+	d.PlanFix = planFixes(p, st, *d)
 	return progressed
 }
 

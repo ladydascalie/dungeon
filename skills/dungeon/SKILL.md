@@ -371,7 +371,11 @@ The lane owns the fix. Your moves, in order:
 
 1. Read the note, then the report: `dungeon view`, then `d` on the unit.
 2. If the note says the work is uncommitted or outside the unit's paths, the
-   brief or the plan is wrong. Fix the plan. Never edit the worktree.
+   brief or the plan is wrong. Fix the plan. Never edit the worktree. `next`
+   prints a `plan fix:` line when a blocked or unproven unit is waiting on a
+   plan edit: out-of-paths files want wider `paths`, a missing accept wants an
+   `accept` command. Lead your report to the operator with that line. It is a
+   plan change, not a stalled watch.
 3. Re-queue: `dungeon set unit <id> planned --note "retry: <why>"`, then
    `dungeon next`.
 4. If the unit itself is wrong, split it, reassign it, or cancel it. That is

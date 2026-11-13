@@ -809,6 +809,9 @@ func TestAChangeOutsideThePathsStillBlocks(t *testing.T) {
 	if !strings.Contains(stdout, "blocked: A") {
 		t.Fatalf("output:\n%s", stdout)
 	}
+	if !strings.Contains(stdout, "plan fix: A: widen the unit's paths") {
+		t.Fatalf("next must name the plan edit:\n%s", stdout)
+	}
 	st, _ := LoadState(statePath)
 	if got := st.Units["A"].Note; !strings.Contains(got, "outside your paths: elsewhere.txt") {
 		t.Fatalf("note %q", got)
@@ -960,5 +963,27 @@ func TestReconcileLeavesALegacyWorkingStateUntouched(t *testing.T) {
 	}
 	if string(after) != legacy {
 		t.Fatalf("a legacy state was rewritten:\n%s", after)
+	}
+}
+
+// A blocked or unproven unit whose reason lives in the plan gets a plan fix
+// hint. A loop fix is unproven on purpose, so it never gets one.
+func TestPlanFixesNameThePlanEdit(t *testing.T) {
+	p := expanded(t)
+	st := &State{Units: map[string]UnitState{}}
+	st.Units["polish-fix-1"] = UnitState{Status: "unproven", Note: "no accept command, so nothing can prove it"}
+	st.Units["A"] = UnitState{Status: "unproven", Note: "no accept command, so nothing can prove it"}
+	st.Units["A2"] = UnitState{Status: "blocked", Note: "changed files outside your paths: b/other.go"}
+	st.Units["A3"] = UnitState{Status: "blocked", Note: "lane is waiting on you in w9p1"}
+
+	fixes := planFixes(p, st, digest{Unproven: []string{"polish-fix-1", "A"}, Blocked: []string{"A2", "A3"}})
+	if len(fixes) != 2 {
+		t.Fatalf("plan fixes %v", fixes)
+	}
+	if !strings.Contains(fixes[0], "A: add an accept command") {
+		t.Fatalf("unproven hint %q", fixes[0])
+	}
+	if !strings.Contains(fixes[1], "A2: widen the unit's paths") {
+		t.Fatalf("blocked hint %q", fixes[1])
 	}
 }
