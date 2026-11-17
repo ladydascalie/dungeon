@@ -7,9 +7,12 @@
  * then waits for the next one. The agent runs `dungeon next` after a done or
  * error event. The report file and the accept command still decide.
  *
- * The cursor lives in the encounter's `.dungeon/box.cursor`, so a restart
- * resumes where the last read stopped. The first call with no cursor starts at
- * the box's newest entry, so a new encounter does not replay old events.
+ * The cursor lives in the encounter's `.dungeon/box.cursor.<session>`, so a
+ * restart resumes where the last read stopped. A box's seq restarts with its
+ * session, so a cursor is only valid against the box that wrote it: the tool
+ * reads the newest seq and resets a cursor that sits ahead of it, which is what
+ * a reset box or an earlier session leaves behind. A first call with no cursor
+ * starts at the newest entry, so a new encounter does not replay old events.
  */
 
 import * as fs from "node:fs";
@@ -45,12 +48,18 @@ function encounterDir(cwd: string): string | undefined {
 	}
 }
 
-/** The cursor file. Falls back to a cache keyed by cwd outside an encounter. */
+/** A box's seq restarts with its session, so the cursor is keyed by session name. */
+function sessionKey(session: string): string {
+	return /^[A-Za-z0-9_.-]+$/.test(session) ? session : Buffer.from(session).toString("base64url");
+}
+
+/** The cursor file for the session. Falls back to a cache keyed by cwd outside an encounter. */
 function cursorPath(cwd: string): string {
+	const session = sessionKey(process.env.DM_SESSION ?? "main");
 	const enc = encounterDir(cwd);
-	if (enc) return path.join(enc, ".dungeon", CURSOR_FILE);
-	const key = Buffer.from(path.resolve(cwd)).toString("base64url");
-	return path.join(os.homedir(), ".cache", "pi", "dungeon-box", `${key}.cursor`);
+	if (enc) return path.join(enc, ".dungeon", `${CURSOR_FILE}.${session}`);
+	const cwdKey = Buffer.from(path.resolve(cwd)).toString("base64url");
+	return path.join(os.homedir(), ".cache", "pi", "dungeon-box", `${cwdKey}.${session}.cursor`);
 }
 
 function readCursor(file: string): number | undefined {
@@ -122,32 +131,41 @@ export default function (pi: ExtensionAPI) {
 			const seconds = Math.max(1, Math.round(params.timeout ?? DEFAULT_TIMEOUT));
 			const file = cursorPath(ctx.cwd);
 
+			const base = ["msg"];
+			const filter = ["--prefix", prefix];
+			if (params.state) filter.push("--state", params.state);
+
+			// A cursor is a bare seq, so it is only valid against the box that
+			// wrote it. A reset box, or a cursor from another session, leaves it
+			// ahead of every entry, and dm's wait then never fires: the parent
+			// reads an empty fleet. The newest entry is the ceiling, so read it
+			// first and reset a cursor above it.
+			const newest = await pi.exec("dm", dmArgs([...base, "list", "--limit", "1", "--json"]), {
+				cwd: ctx.cwd,
+				signal,
+				timeout: 15_000,
+			});
+			if (newest.code !== 0) {
+				return {
+					content: [{ type: "text" as const, text: `dm msg list failed: ${(newest.stderr || newest.stdout).trim()}` }],
+					isError: true,
+				};
+			}
+			const ceiling = parseReply(newest.stdout).entries[0]?.seq ?? 0;
+
 			// An explicit cursor wins. A reset reads from seq 0. Otherwise read the
 			// persisted cursor. A first call with neither starts at the newest entry
 			// so old events do not replay.
 			let cursor = params.cursor;
 			if (cursor === undefined) cursor = params.reset ? 0 : readCursor(file);
-
-			const base = ["msg"];
-			const filter = ["--prefix", prefix];
-			if (params.state) filter.push("--state", params.state);
-
+			let snapNote = "";
 			if (cursor === undefined) {
-				const newest = await pi.exec("dm", dmArgs([...base, "list", ...filter, "--limit", "1", "--json"]), {
-					cwd: ctx.cwd,
-					signal,
-					timeout: 15_000,
-				});
-				if (newest.code !== 0) {
-					return {
-						content: [{ type: "text" as const, text: `dm msg list failed: ${(newest.stderr || newest.stdout).trim()}` }],
-						isError: true,
-					};
-				}
-				const top = parseReply(newest.stdout).entries[0];
-				cursor = top?.seq ?? 0;
-				writeCursor(file, cursor);
+				cursor = ceiling;
+			} else if (cursor > ceiling) {
+				snapNote = `\nThe cursor was ahead of the box (newest seq ${ceiling}), so it was reset. The box was reset or the cursor came from another session.`;
+				cursor = ceiling;
 			}
+			writeCursor(file, cursor);
 
 			// Drain what is already queued. One call returns the whole backlog.
 			const drained = await pi.exec("dm", dmArgs([...base, "list", ...filter, "--after", String(cursor), "--json"]), {
@@ -193,7 +211,7 @@ export default function (pi: ExtensionAPI) {
 							content: [
 								{
 									type: "text" as const,
-									text: `No lane events within ${seconds}s. Cursor stays at ${next}. Call again, or run \`dungeon next\` to check the fleet.`,
+									text: `No lane events within ${seconds}s. Cursor stays at ${next}. Call again, or run \`dungeon next\` to check the fleet.${snapNote}`,
 								},
 							],
 							details: { cursor: next, waited: true, trimmed: false, entries: [] },
@@ -222,7 +240,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text" as const,
-						text: `${entries.length} lane event${entries.length === 1 ? "" : "s"} since seq ${cursor}${waited ? " (waited)" : ""}:\n\n${lines}\n\nCursor now ${next}.${trimNote}${hint}`,
+						text: `${entries.length} lane event${entries.length === 1 ? "" : "s"} since seq ${cursor}${waited ? " (waited)" : ""}:\n\n${lines}\n\nCursor now ${next}.${trimNote}${snapNote}${hint}`,
 					},
 				],
 				details: { cursor: next, waited, trimmed, entries },

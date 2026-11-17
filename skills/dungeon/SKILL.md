@@ -262,6 +262,10 @@ minutes of that. Never block longer than 60 to 90 seconds on a watch.
 - Pass the timeout explicitly. `dungeon_watch` defaults to 60 seconds, and a
   bare `dm msg wait` defaults to whatever you typed. Set `timeout: 60` on every
   call. Do not accept the default.
+- A timeout that names the same cursor every time is not a quiet fleet. Check
+  the box's newest seq with `dm msg list --limit 1 --json`. A cursor ahead of it
+  means the box was reset, or it came from another session; call `dungeon_watch`
+  with `reset: true`.
 - A timeout is not a failure. It is a cue to look. Run `dungeon status`, then
   read the pane of every `working` lane.
 - Read the pane, not just the state. A lane can be `working` and looping. The
@@ -320,10 +324,13 @@ the report and the unit's accept command or verdict still decide. Then read the
 report.
 
 In pi, call the `dungeon_watch` tool instead, with `timeout: 60`. It drains
-entries past the persisted cursor in `.dungeon/box.cursor`, then blocks for the
-next one. The first call starts at the box's newest entry, so a new encounter
-does not replay old events. After a `done` or `error` event, run `dungeon next`.
-After a `blocked` event, read the lane's pane and answer it.
+entries past the persisted cursor in `.dungeon/box.cursor.<session>`, then
+blocks for the next one. The cursor is a bare seq, so it is only valid against
+the box that wrote it: the tool compares it with the newest entry and resets a
+cursor that sits ahead of the box, which is what a reset box or an earlier
+session leaves behind. The first call starts at the box's newest entry, so a
+new encounter does not replay old events. After a `done` or `error` event, run
+`dungeon next`. After a `blocked` event, read the lane's pane and answer it.
 
 The extension lives in this repo at `skills/dungeon/dungeon-watch.ts`. Symlink
 it into `~/.pi/agent/extensions/` and reload pi to load it.
@@ -334,10 +341,12 @@ Anywhere else, read the box with a cursor:
 dm msg list --prefix lane/ --after <cursor> --json
 ```
 
-Persist the cursor. Do not use `dm msg wait --prefix lane/ --state blocked` for
-a fleet: without `--after` it reads the newest entry under the prefix, so a
-newer `done` on another lane masks an older `blocked`. Use `dm msg sub
---prefix lane/ --json` for a stream, or wait per key.
+Persist the cursor. A cursor is a bare seq, so a box that was reset leaves it
+ahead of every entry and `dm msg wait --after` never fires. Do not use
+`dm msg wait --prefix lane/ --state blocked` for a fleet: without `--after` it
+reads the newest entry under the prefix, so a newer `done` on another lane
+masks an older `blocked`. Use `dm msg sub --prefix lane/ --json` for a stream,
+or wait per key.
 
 The box is durable. A lane that posts `done` and exits is still visible. The
 report file remains the record.
