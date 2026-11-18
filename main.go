@@ -32,6 +32,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return statusCmd(ctx, args[1:], stdout, stderr)
 	case "set":
 		return setCmd(ctx, args[1:], stdout, stderr)
+	case "edit":
+		return editCmd(args[1:], stdout, stderr)
 	case "view":
 		return viewCmd(ctx, args[1:], stdout, stderr)
 	case "fleet":
@@ -84,6 +86,17 @@ func usage(w io.Writer) {
       Record a change. Unit statuses: blocked, failed, working, planned,
       unproven, rejected, done, canceled.
       Minion statuses: spawned, busy, waiting, lost, absent.
+
+  dungeon edit unit <id>   [--minion m] [--goal text] [--accept cmd]
+                           [--verdict line] [--paths-add glob]... [--deps-add id]...
+  dungeon edit minion <id> [--role r] [--tools list] [--of id] [--worktree name]
+      Change the plan without hand-editing yaml. An empty value deletes the
+      field. --paths-set and --deps-set replace a list; --paths-rm and
+      --deps-rm remove an entry, and refuse one the unit never had. An add
+      that changes nothing writes nothing. The edit is surgical: comments,
+      blank lines and the rest of the file are untouched, and the diff is
+      printed. Nothing is written unless the plan still parses and adds no
+      finding. --dry-run shows the diff and writes nothing.
 
   dungeon link <unit> <url> | --clear
       Pin a pull request, review or any http(s) url to a unit. The view shows

@@ -13,7 +13,7 @@ tmux and dm are the supported backends. herdr and dm both sit behind `mux.go`;
 dm is the one dungeon itself is developed in, so it is the reference for agent
 status. The tmux-only rail is the exception.
 
-Every command is built: `init`, `check`, `status`, `set`, `view`, `fleet`,
+Every command is built: `init`, `check`, `status`, `set`, `edit`, `view`, `fleet`,
 `attach`, `up`, `next`, `land`, `down` and `clear`.
 
 The loop: `dungeon up` spawns one pi lane per minion, `dungeon next` dispatches
@@ -32,6 +32,11 @@ dungeon status --json
 
 dungeon set unit ATOM1 working --note "brief written"
 dungeon set minion w-atom1 busy
+
+dungeon edit unit ATOM1 --paths-add 'apps/api/**'   # widen what a unit owns
+dungeon edit unit ATOM1 --accept 'go test ./apps/api/...'
+dungeon edit unit ATOM1 --deps-add RECON --dry-run
+dungeon edit minion w-atom1 --tools 'read,bash,edit,write'
 
 dungeon view                       # the live table, refreshes every 2s
 dungeon view --once --width 120    # one frame, for a screenshot or a pipe
@@ -296,6 +301,13 @@ verdicts; `worker` and `integrator` own a worktree and write.
 An integrator unit must not set `accept`: its worktree is cut from base and
 does not contain the other writers' work, so the gate can never pass. `dungeon land`
 merges and re-gates.
+
+`dungeon edit` changes one field of one unit or one minion without editing yaml
+by hand. It edits the text, so comments, blank lines and the rest of the file
+survive, and it prints the diff. It refuses a change that adds a finding, and
+an empty value deletes the field. `--dry-run` prints the diff and writes
+nothing. The hash guard still applies: a plan edited after dispatch makes
+`next` and `land` refuse until `--force`.
 
 ## Loops
 

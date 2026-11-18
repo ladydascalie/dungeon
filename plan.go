@@ -18,8 +18,12 @@ func PlanHash(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return hashPlan(data), nil
+}
+
+func hashPlan(data []byte) string {
 	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:])
 }
 
 // Plan is one encounter: who exists, and what each unit of work is.

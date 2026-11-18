@@ -114,6 +114,20 @@ from base and does not contain the other writers' work, so the gate can never pa
 `dungeon land` merges the done units and re-runs their accepts against the
 merged result. It is the merge gate.
 
+Change a plan with `dungeon edit`, never with a heredoc over the yaml. It edits
+one field of one unit or one minion in place, keeps the comments and the blank
+lines, prints the diff, and refuses a change that adds a finding:
+
+```bash
+dungeon edit unit <id> --paths-add 'apps/api/**'      # widen what it owns
+dungeon edit unit <id> --accept 'go test ./apps/api/...'
+dungeon edit unit <id> --deps-add <unit>              # repeatable
+dungeon edit unit <id> --goal '...'                   # long text folds itself
+dungeon edit unit <id> --verdict ''                   # empty deletes the field
+dungeon edit minion <w1> --tools 'read,bash,edit,write'
+dungeon edit unit <id> --paths-add 'x/**' --dry-run    # diff, write nothing
+```
+
 `dungeon check` must pass before anything runs. A plan that does not validate is
 a plan that cannot dispatch.
 
@@ -390,11 +404,13 @@ The lane owns the fix. Your moves, in order:
 
 1. Read the note, then the report: `dungeon view`, then `d` on the unit.
 2. If the note says the work is uncommitted or outside the unit's paths, the
-   brief or the plan is wrong. Fix the plan. Never edit the worktree. `next`
-   prints a `plan fix:` line when a blocked or unproven unit is waiting on a
-   plan edit: out-of-paths files want wider `paths`, a missing accept wants an
-   `accept` command. Lead your report to the operator with that line. It is a
-   plan change, not a stalled watch.
+   brief or the plan is wrong. Fix the plan with `dungeon edit`, never by hand
+   and never the worktree: `dungeon edit unit <id> --paths-add '<glob>'` widens
+   what it owns, `--accept '<cmd>'` gives it a gate. `next` prints a `plan fix:`
+   line when a blocked or unproven unit is waiting on a plan edit: out-of-paths
+   files want wider `paths`, a missing accept wants an `accept` command. Lead
+   your report to the operator with that line. It is a plan change, not a
+   stalled watch.
 3. Re-queue: `dungeon set unit <id> planned --note "retry: <why>"`, then
    `dungeon next`.
 4. If the unit itself is wrong, split it, reassign it, or cancel it. That is
