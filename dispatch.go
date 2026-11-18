@@ -246,6 +246,13 @@ func briefText(d briefData) string {
 
 Write the report to the path above. Keep it short: what changed, what you ran,
 what you did not do.
+
+## Before you settle
+
+Verify the work before you settle. Run the accept command when the brief gives
+one. Otherwise run the narrowest command that shows the change does what it
+claims. If you cannot verify it, write "unverified" in the report and name
+what is missing. A command you ran is evidence; a summary is not.
 `)
 	return b.String()
 }

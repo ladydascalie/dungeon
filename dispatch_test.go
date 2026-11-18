@@ -645,6 +645,19 @@ func TestNoVerdictStillRunsTheAcceptCommand(t *testing.T) {
 	}
 }
 
+// The brief asks a lane to verify before it settles, and to say so when it
+// cannot. A confident summary is not evidence: most failed runs end with one.
+func TestBriefAsksTheLaneToVerifyBeforeSettling(t *testing.T) {
+	u := Unit{ID: "A", Goal: "Change it.", Accept: "go test ./..."}
+	m := Minion{ID: "a1", Role: RoleWorker}
+	text := briefText(briefData{minion: m, unit: u, dir: "/repo", report: "/enc/reports/A.md"})
+	for _, want := range []string{"## Before you settle", "write \"unverified\" in the report"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("brief should carry %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestBriefStatesTheVerdictInsteadOfAccept(t *testing.T) {
 	u := Unit{ID: "R", Goal: "Review it.", Verdict: "Merge verdict: PASS", Accept: "should not appear"}
 	m := Minion{ID: "r1", Role: RoleReviewer}
