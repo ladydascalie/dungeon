@@ -239,7 +239,7 @@ func parsePorcelainZ(out []byte) []string {
 // checked out. The parent does this, not the lane: a lane leaves its work in
 // the worktree and never commits.
 func commitLaneWork(dir, message string, files []string) error {
-	args := append([]string{"add", "--"}, files...)
+	args := append([]string{"add", "-A", "--"}, files...)
 	if _, err := gitRun(dir, args...); err != nil {
 		return err
 	}
