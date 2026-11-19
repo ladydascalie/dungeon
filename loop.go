@@ -57,6 +57,16 @@ func ExpandLoops(p Plan) (Plan, []Finding) {
 	return p, f
 }
 
+// localDeps makes a loop's deps local: a loop is one plan, so it cannot reach
+// another plan's unit.
+func localDeps(ids []string) []Dep {
+	out := make([]Dep, len(ids))
+	for i, id := range ids {
+		out[i] = Dep{Unit: id}
+	}
+	return out
+}
+
 // loopReview is the unit where the reviewer judges one round.
 func loopReview(l Loop, round int) Unit {
 	goal := strings.TrimSpace(l.ReviewGoal)
@@ -75,9 +85,9 @@ func loopReview(l Loop, round int) Unit {
 	if round == 1 {
 		// The first review may wait on declared work, so the loop does not
 		// review a unit that has not landed yet.
-		u.Deps = append([]string(nil), l.Deps...)
+		u.Deps = localDeps(l.Deps)
 	} else {
-		u.Deps = []string{fmt.Sprintf("%s-fix-%d", l.ID, round-1)}
+		u.Deps = localDeps([]string{fmt.Sprintf("%s-fix-%d", l.ID, round-1)})
 	}
 	return u
 }
@@ -94,7 +104,7 @@ func loopFix(l Loop, round int) Unit {
 		ID:          fmt.Sprintf("%s-fix-%d", l.ID, round),
 		Minion:      l.Fixer,
 		Paths:       append([]string(nil), l.Paths...),
-		Deps:        []string{reviewID},
+		Deps:        localDeps([]string{reviewID}),
 		Goal:        goal,
 		Provisional: true,
 		Loop:        l.ID,
@@ -178,6 +188,9 @@ func loadPlan(path string) (Plan, []Finding, error) {
 		return p, findings, err
 	}
 	if findings = Validate(p); len(findings) > 0 {
+		return p, findings, nil
+	}
+	if findings = ValidateDeps(path, p); len(findings) > 0 {
 		return p, findings, nil
 	}
 	p, findings = ExpandLoops(p)

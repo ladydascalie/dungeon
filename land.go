@@ -130,6 +130,7 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 		return res, err
 	}
 
+	commit := map[string]string{} // the merge each unit landed at
 	for _, g := range groupByMinion(units) {
 		branch := p.Encounter + "/" + g.Minion
 		ids := make([]string, 0, len(g.Units))
@@ -142,8 +143,10 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 			gitRun(res.Worktree, "merge", "--abort")
 			return res, nil
 		}
+		head, _ := gitRun(res.Worktree, "rev-parse", "--short", "HEAD")
 		for _, u := range g.Units {
 			res.Merged = append(res.Merged, u.ID)
+			commit[u.ID] = head
 		}
 	}
 
@@ -164,6 +167,23 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 		if err != nil {
 			break
 		}
+	}
+
+	// A unit is landed when its gate passed, it has no gate, or the gate was
+	// skipped. A failed gate leaves that unit and every unit after it unlanded,
+	// so land exits 1 and claims nothing about them.
+	passed := map[string]bool{}
+	for _, g := range res.Gate {
+		passed[g.Unit] = g.OK
+	}
+	for _, u := range units {
+		switch {
+		case o.skipGate || u.Accept == "":
+		case passed[u.ID]:
+		default:
+			return res, nil
+		}
+		st.SetLanded(u.ID, res.Branch, commit[u.ID])
 	}
 	return res, nil
 }
@@ -207,6 +227,12 @@ func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 	res, err := land(ctx, *o, p, &st)
 	if err != nil {
+		fmt.Fprintf(stderr, "dungeon: %v\n", err)
+		return 2
+	}
+	// land records what landed, so the state must be written even when a
+	// conflict or a failed gate stopped it early.
+	if err := SaveState(statePath, st); err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
 	}

@@ -35,6 +35,25 @@ type UnitState struct {
 	// written before the field existed reads as confirmed, so an old encounter
 	// does not re-prompt a fleet that is already working.
 	PromptPending bool `json:"prompt_pending,omitempty"`
+	// Landed records the merge that put this unit on an integration branch. A
+	// cross-plan dep reads it: done alone does not mean the code is there.
+	Landed *Landed `json:"landed,omitempty"`
+}
+
+// Landed is where a unit landed: the integration branch, the commit it was
+// merged at, and when.
+type Landed struct {
+	Ref    string `json:"ref"`
+	Commit string `json:"commit,omitempty"`
+	At     string `json:"at"`
+}
+
+// String is the ref and commit as one token: ref@commit.
+func (l Landed) String() string {
+	if l.Commit == "" {
+		return l.Ref
+	}
+	return l.Ref + "@" + l.Commit
 }
 
 type MinionState struct {
@@ -215,6 +234,14 @@ func (s *State) SetUnit(id, status, note string) error {
 	}
 	s.Units[id] = u
 	return nil
+}
+
+// SetLanded records the merge a unit landed on. A unit that never landed has
+// no Landed, which is what a cross-plan dep checks.
+func (s *State) SetLanded(id, ref, commit string) {
+	u := s.Units[id]
+	u.Landed = &Landed{Ref: ref, Commit: commit, At: now()}
+	s.Units[id] = u
 }
 
 // SetPromptPending records whether a working unit's prompt is still

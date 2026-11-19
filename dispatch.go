@@ -157,10 +157,21 @@ func lanePath(p Plan, minion string) string {
 }
 
 // depReport is one dep's report, named by unit so the lane knows which report
-// answers which dependency.
+// answers which dependency. A cross-plan dep also says the ref and commit it
+// landed on: that report is the contract the lane reads.
 type depReport struct {
 	ID   string
 	Path string
+	Note string
+}
+
+// depLabels is every dep as one token, for a brief line or a status row.
+func depLabels(deps []Dep) []string {
+	out := make([]string, len(deps))
+	for i, d := range deps {
+		out[i] = d.String()
+	}
+	return out
 }
 
 // briefData is everything a brief says. It is grouped so the callers pass one
@@ -209,12 +220,16 @@ func briefText(d briefData) string {
 		}
 	}
 	if len(u.Deps) > 0 {
-		fmt.Fprintf(&b, "deps that landed: %s\n", strings.Join(u.Deps, " "))
+		fmt.Fprintf(&b, "deps that landed: %s\n", strings.Join(depLabels(u.Deps), " "))
 	}
 	if len(d.depReports) > 0 {
 		b.WriteString("\n## reports from deps\n\n")
 		for _, r := range d.depReports {
-			fmt.Fprintf(&b, "- %s: %s\n", r.ID, r.Path)
+			fmt.Fprintf(&b, "- %s: %s", r.ID, r.Path)
+			if r.Note != "" {
+				fmt.Fprintf(&b, " (%s)", r.Note)
+			}
+			b.WriteString("\n")
 		}
 	}
 	b.WriteString("\n## If this dispatch arrives again\n\n")
@@ -280,11 +295,16 @@ func writeBrief(h mux, in briefInput) (string, error) {
 	}
 	depReports := make([]depReport, 0, len(u.Deps))
 	for _, dep := range u.Deps {
-		abs, err := filepath.Abs(reportPath(o.planPath, dep))
+		planPath, note := o.planPath, ""
+		if !dep.Local() {
+			planPath = resolveDepPlan(o.planPath, dep)
+			note = landedNote(planPath, dep.Unit)
+		}
+		abs, err := filepath.Abs(reportPath(planPath, dep.Unit))
 		if err != nil {
 			return "", err
 		}
-		depReports = append(depReports, depReport{ID: dep, Path: abs})
+		depReports = append(depReports, depReport{ID: dep.String(), Path: abs, Note: note})
 	}
 	lane := MinionState{}
 	if st != nil {
@@ -531,7 +551,7 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 // readyUnits returns the planned units whose deps have all landed. A failed
 // dep counts: it may be the review that tells the fixer what to do. So does an
 // unproven dep when the dep is provisional, because the next review judges it.
-func readyUnits(p Plan, st *State) []Unit {
+func readyUnits(planPath string, p Plan, st *State) []Unit {
 	var out []Unit
 	for _, u := range p.Units {
 		if st.UnitStatus(u.ID) != "planned" {
@@ -539,7 +559,7 @@ func readyUnits(p Plan, st *State) []Unit {
 		}
 		ready := true
 		for _, d := range u.Deps {
-			if !depSatisfied(p, st, d) {
+			if !depSatisfied(planPath, p, st, d) {
 				ready = false
 				break
 			}
@@ -553,18 +573,69 @@ func readyUnits(p Plan, st *State) []Unit {
 
 // depSatisfied answers whether a dep releases its dependants. A provisional
 // unit is unproven on purpose: the review after it is the judge.
-func depSatisfied(p Plan, st *State, dep string) bool {
-	switch st.UnitStatus(dep) {
+//
+// A cross-plan dep needs the other plan to be done with the unit. A unit that
+// produced a branch must also be landed: done alone means proven, not merged. A
+// staff unit has no branch to merge, so done is the whole proof, which is what
+// lets one repo wait on another's review.
+func depSatisfied(planPath string, p Plan, st *State, dep Dep) bool {
+	if !dep.Local() {
+		otherPath := resolveDepPlan(planPath, dep)
+		other, err := LoadState(StatePath(otherPath))
+		if err != nil {
+			return false // an unreadable state satisfies nothing and is no error here
+		}
+		u, ok := other.Units[dep.Unit]
+		if !ok || u.Status != "done" {
+			return false
+		}
+		staff, known := depStaff(otherPath, dep.Unit)
+		return (known && staff) || u.Landed != nil
+	}
+	switch st.UnitStatus(dep.Unit) {
 	case "done", "failed":
 		return true
 	case "unproven":
 		for _, u := range p.Units {
-			if u.ID == dep {
+			if u.ID == dep.Unit {
 				return u.Provisional
 			}
 		}
 	}
 	return false
+}
+
+// depStaff reports whether the named unit of another plan has no branch to
+// merge. known is false when the plan or the unit cannot be read, and the dep
+// then needs Landed: a claim nothing backs is not a claim.
+func depStaff(planPath, unit string) (staff, known bool) {
+	p, findings, err := DecodeFile(planPath)
+	if err != nil || len(findings) > 0 {
+		return false, false
+	}
+	p, _ = ExpandLoops(p)
+	u, ok := findUnit(p, unit)
+	if !ok {
+		return false, false
+	}
+	m, ok := findMinion(p, u.Minion)
+	if !ok {
+		return false, false
+	}
+	return !writes(m.Role), true
+}
+
+// landedNote names the ref and commit a cross-plan dep landed on, so the brief
+// points at a report that is really on a branch. A missing state says nothing.
+func landedNote(planPath, unit string) string {
+	other, err := LoadState(StatePath(planPath))
+	if err != nil {
+		return ""
+	}
+	if l := other.Units[unit].Landed; l != nil {
+		return "landed on " + l.String()
+	}
+	return ""
 }
 
 func workingCount(p Plan, st *State) int {
@@ -604,7 +675,7 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 			}
 		}
 
-		for _, u := range readyUnits(p, st) {
+		for _, u := range readyUnits(o.planPath, p, st) {
 			if slots <= 0 {
 				break
 			}

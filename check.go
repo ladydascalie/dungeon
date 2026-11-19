@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -26,6 +28,9 @@ const (
 	ENoPaths          Code = "E_NO_PATHS"
 	EMissingDep       Code = "E_MISSING_DEP"
 	ECycle            Code = "E_CYCLE"
+	EDepPlan          Code = "E_DEP_PLAN"
+	EDepUnit          Code = "E_DEP_UNIT"
+	EDepSelf          Code = "E_DEP_SELF"
 	ESplitInvalid     Code = "E_SPLIT_INVALID"
 	ESplitNoMinion    Code = "E_SPLIT_NO_MINION"
 	EUnknownSplit     Code = "E_UNKNOWN_SPLIT"
@@ -240,15 +245,19 @@ func Validate(p Plan) []Finding {
 		}
 
 		for j, d := range u.Deps {
+			if !d.Local() {
+				// A cross-plan dep is ValidateDeps's job: this pass sees one plan.
+				continue
+			}
 			where := fmt.Sprintf("%s.deps[%d]", at, j)
-			if d == u.ID {
+			if d.Unit == u.ID {
 				f = append(f, Finding{ECycle, where, "unit depends on itself"})
 				continue
 			}
-			if !unitIDs[d] {
+			if !unitIDs[d.Unit] {
 				f = append(f, Finding{
 					EMissingDep, where,
-					fmt.Sprintf("dep %q is not a declared unit", d),
+					fmt.Sprintf("dep %q is not a declared unit", d.Unit),
 				})
 			}
 		}
@@ -258,6 +267,196 @@ func Validate(p Plan) []Finding {
 	f = append(f, duplicatePanes(p.Minions)...)
 	f = append(f, duplicateAgentNames(p.Minions)...)
 	return append(f, cycles(p.Units, rep)...)
+}
+
+// resolveDepPlan is the plan file a dep names. An absolute plan is used as it
+// is. A relative one resolves against the plan that names it, because a
+// committed plan should carry a relative path.
+func resolveDepPlan(planPath string, d Dep) string {
+	if filepath.IsAbs(d.Plan) {
+		return filepath.Clean(d.Plan)
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(planPath), d.Plan))
+}
+
+// absPath is the key a plan is cached and compared by: one file, one key.
+func absPath(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+// depPlan is another plan as a dep sees it: decoded and expanded, so a dep may
+// name a generated loop unit such as auth-review-3.
+type depPlan struct {
+	plan     Plan
+	findings []Finding
+	err      error
+}
+
+// depPlans decodes each plan once, however many deps name it.
+type depPlans map[string]depPlan
+
+func (c depPlans) get(path string) depPlan {
+	if d, ok := c[path]; ok {
+		return d
+	}
+	var d depPlan
+	data, err := os.ReadFile(path)
+	switch {
+	case err != nil:
+		d.err = err
+	default:
+		p, f := Decode(data)
+		if len(f) > 0 {
+			d.findings = f
+			break
+		}
+		d.plan, _ = ExpandLoops(p)
+	}
+	c[path] = d
+	return d
+}
+
+// ValidateDeps checks the deps that leave the plan. Validate checks a local dep
+// against the units it can see; a cross-plan dep is checked against the plan it
+// names, and the cycle that crosses plans is caught here because cycles() sees
+// one plan.
+func ValidateDeps(planPath string, p Plan) []Finding {
+	var f []Finding
+	self := absPath(planPath)
+	cache := depPlans{}
+	local, _ := ExpandLoops(p)
+	cache[self] = depPlan{plan: local}
+
+	for i, u := range p.Units {
+		for j, d := range u.Deps {
+			if d.Local() {
+				continue
+			}
+			where := fmt.Sprintf("units[%d].deps[%d]", i, j)
+			path := absPath(resolveDepPlan(planPath, d))
+			if path == self {
+				f = append(f, Finding{
+					EDepSelf, where,
+					fmt.Sprintf("dep %s names this plan's own file: write %q as a local dep", d, d.Unit),
+				})
+				continue
+			}
+			other := cache.get(path)
+			switch {
+			case other.err != nil:
+				f = append(f, Finding{
+					EDepPlan, where,
+					fmt.Sprintf("dep %s: cannot read %s: %v", d, path, other.err),
+				})
+			case len(other.findings) > 0:
+				f = append(f, Finding{
+					EDepPlan, where,
+					fmt.Sprintf("dep %s: %s is not a valid plan: %s", d, path, other.findings[0]),
+				})
+			default:
+				if _, ok := findUnit(other.plan, d.Unit); !ok {
+					f = append(f, Finding{
+						EDepUnit, where,
+						fmt.Sprintf("dep %s: %s declares no unit %q", d, path, d.Unit),
+					})
+				}
+			}
+		}
+	}
+	return append(f, crossPlanCycles(self, local, cache)...)
+}
+
+// crossDepthCap bounds the walk. A chain deeper than this is not a plan, and
+// stopping keeps a runaway dep graph from hanging check.
+const crossDepthCap = 8
+
+// crossPlanCycles reports a cycle that leaves the plan and comes back. Each
+// distinct chain is reported once.
+//
+// The walk is memoised by (plan, unit, remaining depth): a node is walked once
+// per remaining budget, so the cost stays bounded by the cap times the graph
+// however many paths reach it. A node found on the stack is a back edge: its
+// cycle is reported and the node is not walked, because its own frame is still
+// exploring it with a larger budget. Nothing is memoised for a back edge: only
+// the frame that owns the node records a result, once its subtree is walked.
+func crossPlanCycles(self string, p Plan, cache depPlans) []Finding {
+	type node struct{ key, label string }
+	type visitKey struct {
+		key       string
+		remaining int
+	}
+	var out []Finding
+	reported := map[string]bool{}
+	done := map[visitKey]bool{}
+	var stack []node
+
+	var visit func(planPath, unit string, remaining int)
+	visit = func(planPath, unit string, remaining int) {
+		if remaining < 0 {
+			return
+		}
+		key := planPath + "|" + unit
+		at := visitKey{key, remaining}
+		if done[at] {
+			return
+		}
+		label := unit
+		if planPath != self {
+			label = planPath + "#" + unit
+		}
+		for i, n := range stack {
+			if n.key != key {
+				continue
+			}
+			chain := make([]string, 0, len(stack)-i+1)
+			for _, m := range stack[i:] {
+				chain = append(chain, m.label)
+			}
+			chain = append(chain, label)
+			if k := loopKey(chain); !reported[k] {
+				reported[k] = true
+				out = append(out, Finding{
+					ECycle, "units." + unit + ".deps",
+					"cycle across plans: " + strings.Join(chain, " -> "),
+				})
+			}
+			return
+		}
+		stack = append(stack, node{key, label})
+		if u, ok := findUnit(cache.get(planPath).plan, unit); ok {
+			for _, d := range u.Deps {
+				next := planPath
+				if !d.Local() {
+					next = absPath(resolveDepPlan(planPath, d))
+					if next == planPath {
+						continue // a dep on the plan's own file is E_DEP_SELF's finding
+					}
+				}
+				visit(next, d.Unit, remaining-1)
+			}
+		}
+		stack = stack[:len(stack)-1]
+		done[at] = true
+	}
+
+	for _, u := range p.Units {
+		if hasCrossDep(u) {
+			visit(self, u.ID, crossDepthCap)
+		}
+	}
+	return out
+}
+
+func hasCrossDep(u Unit) bool {
+	for _, d := range u.Deps {
+		if !d.Local() {
+			return true
+		}
+	}
+	return false
 }
 
 // duplicateAgentNames reports minion ids whose derived agent names collide
@@ -426,7 +625,11 @@ func cycles(units []Unit, byID map[string]Unit) []Finding {
 	visit = func(id string) {
 		color[id] = grey
 		stack = append(stack, id)
-		for _, d := range byID[id].Deps {
+		for _, dep := range byID[id].Deps {
+			if !dep.Local() {
+				continue // a cycle across plans is ValidateDeps's job
+			}
+			d := dep.Unit
 			if d == id {
 				continue // the dep pass already named it
 			}

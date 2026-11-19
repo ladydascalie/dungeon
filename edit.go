@@ -80,9 +80,9 @@ func editCmd(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&pathsAdd, "paths-add", "append a path the unit owns (repeatable)")
 	fs.Var(&pathsSet, "paths-set", "replace the unit's paths (repeatable)")
 	fs.Var(&pathsRm, "paths-rm", "remove a path the unit owns (repeatable)")
-	fs.Var(&depsAdd, "deps-add", "append a unit this unit waits on (repeatable)")
-	fs.Var(&depsSet, "deps-set", "replace the unit's deps (repeatable)")
-	fs.Var(&depsRm, "deps-rm", "remove a dep this unit lists (repeatable)")
+	fs.Var(&depsAdd, "deps-add", "append a dep this unit waits on: <unit> or <plan>#<unit> (repeatable)")
+	fs.Var(&depsSet, "deps-set", "replace the unit's deps: <unit> or <plan>#<unit> (repeatable)")
+	fs.Var(&depsRm, "deps-rm", "remove a dep this unit lists: <unit> or <plan>#<unit> (repeatable)")
 
 	role := fs.String("role", "", "scout, worker, reviewer or integrator")
 	tools := fs.String("tools", "", "the minion's tool allowlist")
@@ -192,8 +192,8 @@ func editCmd(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	_, beforeFindings := validPlanBytes(src)
-	after, afterFindings := validPlanBytes(text)
+	_, beforeFindings := validPlanBytes(*planPath, src)
+	after, afterFindings := validPlanBytes(*planPath, text)
 	if added := newFindings(beforeFindings, afterFindings); len(added) > 0 {
 		for _, f := range added {
 			fmt.Fprintf(stderr, "dungeon: edit refused, it adds %s\n", f)
@@ -236,13 +236,18 @@ func anyList(lists []listEdit) bool {
 }
 
 // validPlanBytes decodes and validates a plan the way every command does, from
-// bytes, so an edit is checked before it reaches the disk.
-func validPlanBytes(text []byte) (Plan, []Finding) {
+// bytes, so an edit is checked before it reaches the disk. The plan path is
+// what a cross-plan dep resolves against, so a dep on a missing plan or a
+// missing unit is refused the way check refuses it.
+func validPlanBytes(planPath string, text []byte) (Plan, []Finding) {
 	p, findings := Decode(text)
 	if len(findings) > 0 {
 		return p, findings
 	}
 	if findings = Validate(p); len(findings) > 0 {
+		return p, findings
+	}
+	if findings = ValidateDeps(planPath, p); len(findings) > 0 {
 		return p, findings
 	}
 	_, findings = ExpandLoops(p)
@@ -341,6 +346,10 @@ func editList(src []byte, t target, e listEdit) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	spec := stringListSpec
+	if e.key == "deps" {
+		spec = depListSpec
+	}
 	field, found := mapField(obj, e.key)
 	var current []string
 	flow := false
@@ -348,14 +357,17 @@ func editList(src []byte, t target, e listEdit) ([]byte, bool, error) {
 		if field.value.Kind != yaml.SequenceNode && !isNull(field.value) {
 			return nil, false, fmt.Errorf("%s: %s is not a list", t, e.key)
 		}
-		current, err = stringSeq(field.value)
+		current, err = spec.read(field.value)
 		if err != nil {
 			return nil, false, fmt.Errorf("%s: %v", t, err)
 		}
 		flow = field.value.Style&yaml.FlowStyle != 0
 	}
 
-	next, missing := buildList(current, e)
+	next, missing, err := buildList(current, e, spec.parse)
+	if err != nil {
+		return nil, false, err
+	}
 	if len(missing) > 0 {
 		return nil, false, fmt.Errorf("%s: %s does not list %q", t, e.key, missing[0])
 	}
@@ -366,7 +378,10 @@ func editList(src []byte, t target, e listEdit) ([]byte, bool, error) {
 	if isFlow(obj) {
 		var value *yaml.Node
 		if len(next) > 0 {
-			value = seqNode(next)
+			value, err = spec.node(next)
+			if err != nil {
+				return nil, false, err
+			}
 		}
 		out, err := applyFlow(obj, lines, e.key, value)
 		if err != nil {
@@ -381,7 +396,7 @@ func editList(src []byte, t target, e listEdit) ([]byte, bool, error) {
 	}
 	var repl []string
 	if len(next) > 0 {
-		repl, err = listLines(e.key, next, indent, flow)
+		repl, err = spec.lines(e.key, next, indent, flow)
 		if err != nil {
 			return nil, false, err
 		}
@@ -394,26 +409,54 @@ func editList(src []byte, t target, e listEdit) ([]byte, bool, error) {
 }
 
 // buildList returns the list after the edit, and the first rm entry the list
-// never had.
-func buildList(current []string, e listEdit) ([]string, []string) {
+// never had. canon puts a flag value in the list's canonical form, so a dep
+// compares by value and an add that changes nothing is not a change.
+func buildList(current []string, e listEdit, canon func(string) (string, error)) ([]string, []string, error) {
 	out := slices.Clone(current)
 	if e.set != nil {
-		out = slices.Clone([]string(e.set))
+		set, err := canonical(e.set, canon)
+		if err != nil {
+			return nil, nil, err
+		}
+		out = set
 	}
-	for _, v := range e.add {
+	add, err := canonical(e.add, canon)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, v := range add {
 		if !slices.Contains(out, v) {
 			out = append(out, v)
 		}
 	}
-	for _, v := range e.rm {
+	rm, err := canonical(e.rm, canon)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, v := range rm {
 		if !slices.Contains(out, v) {
-			return nil, []string{v}
+			return nil, []string{v}, nil
 		}
 		for i := len(out) - 1; i >= 0; i-- {
 			if out[i] == v {
 				out = slices.Delete(out, i, i+1)
 			}
 		}
+	}
+	return out, nil, nil
+}
+
+func canonical(values repeatable, canon func(string) (string, error)) ([]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		c, err := canon(v)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
 	}
 	return out, nil
 }
@@ -467,6 +510,131 @@ func isFlow(n *yaml.Node) bool { return n.Style&yaml.FlowStyle != 0 }
 
 func isNull(n *yaml.Node) bool {
 	return n.Kind == yaml.ScalarNode && n.Tag == "!!null"
+}
+
+// listSpec is how one list field is read, compared and written. A paths list
+// holds strings; a deps list holds Dep, so an entry is a unit id locally and
+// {plan, unit} across plans. Both work on a canonical string form, so the edit
+// machinery compares entries by value.
+type listSpec struct {
+	parse func(string) (string, error)                        // a flag value, in canonical form
+	read  func(*yaml.Node) ([]string, error)                  // the yaml list, in canonical form
+	node  func([]string) (*yaml.Node, error)                  // canonical forms as a flow sequence
+	lines func(string, []string, int, bool) ([]string, error) // canonical forms as list lines
+}
+
+var stringListSpec = listSpec{
+	parse: func(v string) (string, error) { return v, nil },
+	read:  stringSeq,
+	node:  func(vs []string) (*yaml.Node, error) { return seqNode(vs), nil },
+	lines: listLines,
+}
+
+var depListSpec = listSpec{
+	parse: canonicalDep,
+	read:  depSeq,
+	node:  depSeqNode,
+	lines: depLines,
+}
+
+// parseDep reads one dep value: <unit> is local, <plan>#<unit> crosses plans.
+// The split is on the first '#', because a path may hold one.
+func parseDep(v string) (Dep, error) {
+	plan, unit, ok := strings.Cut(v, "#")
+	if !ok {
+		return Dep{Unit: v}, nil
+	}
+	if strings.TrimSpace(plan) == "" || strings.TrimSpace(unit) == "" {
+		return Dep{}, fmt.Errorf("dep %q: a cross-plan dep is <plan>#<unit>, with both sides", v)
+	}
+	return Dep{Plan: plan, Unit: unit}, nil
+}
+
+func canonicalDep(v string) (string, error) {
+	d, err := parseDep(v)
+	if err != nil {
+		return "", err
+	}
+	return d.String(), nil
+}
+
+// depSeq reads a deps list in canonical form. A scalar entry is a local dep and
+// a mapping entry is {plan, unit}; Dep's own unmarshaler refuses anything else.
+func depSeq(n *yaml.Node) ([]string, error) {
+	if n == nil || isNull(n) {
+		return nil, nil
+	}
+	out := make([]string, 0, len(n.Content))
+	for _, item := range n.Content {
+		var d Dep
+		if err := item.Decode(&d); err != nil {
+			return nil, err
+		}
+		out = append(out, d.String())
+	}
+	return out, nil
+}
+
+func depSeqNode(values []string) (*yaml.Node, error) {
+	n := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle}
+	for _, v := range values {
+		d, err := parseDep(v)
+		if err != nil {
+			return nil, err
+		}
+		n.Content = append(n.Content, depEntryNode(d))
+	}
+	return n, nil
+}
+
+// depEntryNode writes a dep the way a plan writes it: a bare scalar locally, a
+// flow mapping across plans.
+func depEntryNode(d Dep) *yaml.Node {
+	if d.Local() {
+		return scalarNode(d.Unit)
+	}
+	return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Style: yaml.FlowStyle, Content: []*yaml.Node{
+		scalarNode("plan"), scalarNode(d.Plan),
+		scalarNode("unit"), scalarNode(d.Unit),
+	}}
+}
+
+// depText is one dep as a single list entry.
+func depText(d Dep) (string, error) {
+	out, err := marshalNode(&yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		scalarNode("v"), depEntryNode(d),
+	}})
+	if err != nil {
+		return "", err
+	}
+	head, rest, _ := strings.Cut(out, "\n")
+	if !strings.HasPrefix(head, "v: ") || rest != "" {
+		return "", fmt.Errorf("cannot write %s as a dep", d)
+	}
+	return strings.TrimPrefix(head, "v: "), nil
+}
+
+func depLines(key string, values []string, indent int, flow bool) ([]string, error) {
+	entries := make([]string, 0, len(values))
+	for _, v := range values {
+		d, err := parseDep(v)
+		if err != nil {
+			return nil, err
+		}
+		text, err := depText(d)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, text)
+	}
+	if flow {
+		return []string{spaces(indent) + key + ": [" + strings.Join(entries, ", ") + "]"}, nil
+	}
+	out := []string{spaces(indent) + key + ":"}
+	for _, e := range entries {
+		out = append(out, spaces(indent+2)+"- "+e)
+	}
+	return out, nil
 }
 
 func stringSeq(n *yaml.Node) ([]string, error) {

@@ -80,7 +80,7 @@ func TestExpandLoops(t *testing.T) {
 	if fix1.Minion != "w1" || strings.Join(fix1.Paths, ",") != "a/**" {
 		t.Fatalf("fix-1 %+v", fix1)
 	}
-	if len(fix1.Deps) != 1 || fix1.Deps[0] != "polish-review-1" {
+	if len(fix1.Deps) != 1 || fix1.Deps[0].Unit != "polish-review-1" {
 		t.Fatalf("fix-1 must follow its review, got %v", fix1.Deps)
 	}
 	if !strings.Contains(fix1.Goal, "polish-review-1") {
@@ -92,16 +92,16 @@ func TestExpandLoops(t *testing.T) {
 	}
 
 	review2, _ := unitByID(p, "polish-review-2")
-	if len(review2.Deps) != 1 || review2.Deps[0] != "polish-fix-1" {
+	if len(review2.Deps) != 1 || review2.Deps[0].Unit != "polish-fix-1" {
 		t.Fatalf("review-2 deps %v, want [polish-fix-1]", review2.Deps)
 	}
 	fix2, _ := unitByID(p, "polish-fix-2")
-	if len(fix2.Deps) != 1 || fix2.Deps[0] != "polish-review-2" {
+	if len(fix2.Deps) != 1 || fix2.Deps[0].Unit != "polish-review-2" {
 		t.Fatalf("fix-2 deps %v, want [polish-review-2]", fix2.Deps)
 	}
 	// The last fix must be judged, so rounds N produce a final review.
 	review3, _ := unitByID(p, "polish-review-3")
-	if len(review3.Deps) != 1 || review3.Deps[0] != "polish-fix-2" {
+	if len(review3.Deps) != 1 || review3.Deps[0].Unit != "polish-fix-2" {
 		t.Fatalf("review-3 deps %v, want [polish-fix-2]", review3.Deps)
 	}
 }
@@ -254,7 +254,7 @@ func TestReviewOutcomeDrivesTheLoop(t *testing.T) {
 			}
 			// A failed review must reach the fixer: fix-1 is ready.
 			ready := map[string]bool{}
-			for _, u := range readyUnits(p, st) {
+			for _, u := range readyUnits(planPath, p, st) {
 				ready[u.ID] = true
 			}
 			if tc.want == "planned" && !ready["polish-fix-1"] {
@@ -279,7 +279,7 @@ func TestProvisionalReadiness(t *testing.T) {
 	st.SetUnit("polish-fix-1", "unproven", "provisional")
 
 	ready := map[string]bool{}
-	for _, u := range readyUnits(p, st) {
+	for _, u := range readyUnits("", p, st) {
 		ready[u.ID] = true
 	}
 	if !ready["polish-review-2"] {
@@ -292,7 +292,7 @@ func TestProvisionalReadiness(t *testing.T) {
 			p.Units[i].Provisional = false
 		}
 	}
-	for _, u := range readyUnits(p, st) {
+	for _, u := range readyUnits("", p, st) {
 		if u.ID == "polish-review-2" {
 			t.Fatalf("an unproven dep that is not provisional must not release a unit")
 		}
@@ -354,12 +354,12 @@ func TestLoopDepsReachTheFirstReview(t *testing.T) {
 		t.Fatalf("expand: %v", f)
 	}
 	review1, _ := unitByID(e, "polish-review-1")
-	if strings.Join(review1.Deps, " ") != "A" {
+	if len(review1.Deps) != 1 || review1.Deps[0].Unit != "A" {
 		t.Fatalf("the first review waits on %v, want [A]", review1.Deps)
 	}
 	// Only the first review takes the loop deps: later rounds follow the fix.
 	review2, _ := unitByID(e, "polish-review-2")
-	if strings.Join(review2.Deps, " ") != "polish-fix-1" {
+	if len(review2.Deps) != 1 || review2.Deps[0].Unit != "polish-fix-1" {
 		t.Fatalf("review-2 deps %v, want [polish-fix-1]", review2.Deps)
 	}
 }

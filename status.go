@@ -36,6 +36,7 @@ type UnitRow struct {
 	Goal      string   `json:"goal"`
 	Note      string   `json:"note,omitempty"`
 	Link      string   `json:"link,omitempty"`
+	Landed    string   `json:"landed,omitempty"` // ref@commit of the merge that put this unit on a branch
 }
 
 type MinionRow struct {
@@ -110,19 +111,22 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 		}
 		if us, ok := st.Units[u.ID]; ok {
 			row.Note, row.Link = us.Note, us.Link
+			if us.Landed != nil {
+				row.Landed = us.Landed.String()
+			}
 		}
 		if a, ok := agents[st.AgentName(u.Minion)]; ok {
 			row.Pane, row.Agent = a.Pane, string(a.Status)
 		} else if hint := st.Minions[u.Minion].Pane; hint != "" {
 			row.Pane = hint
 		}
-		row.Inputs = u.Deps
+		row.Inputs = depLabels(u.Deps)
 		for _, d := range u.Deps {
 			row.DepsTotal++
-			if depSatisfied(plan, &st, d) {
+			if depSatisfied(planPath, plan, &st, d) {
 				row.DepsDone++
 			} else {
-				row.WaitsOn = append(row.WaitsOn, d)
+				row.WaitsOn = append(row.WaitsOn, d.String())
 			}
 		}
 		if status == "planned" {
@@ -171,14 +175,14 @@ func buildSnapshot(plan Plan, planPath string, st State, agents map[string]Agent
 		row.Resumed, row.Recreated = ms.Resumed, ms.Recreated
 		s.Minions = append(s.Minions, row)
 	}
-	s.Loops = buildLoopRows(plan, &st)
+	s.Loops = buildLoopRows(planPath, plan, &st)
 	return s
 }
 
 // buildLoopRows reads the expanded plan, so a generated unit is found by its
 // Loop tag. A plan that was never expanded has no loop units: the row still
 // names the loop and waits.
-func buildLoopRows(p Plan, st *State) []LoopRow {
+func buildLoopRows(planPath string, p Plan, st *State) []LoopRow {
 	var rows []LoopRow
 	for _, l := range p.Loops {
 		row := LoopRow{
@@ -203,7 +207,7 @@ func buildLoopRows(p Plan, st *State) []LoopRow {
 			}
 		}
 		row.Round = loopRound(p, st, row.Units, l.Rounds)
-		row.State = loopState(p, st, row.Units)
+		row.State = loopState(planPath, p, st, row.Units)
 		rows = append(rows, row)
 	}
 	return rows
@@ -249,7 +253,7 @@ func loopRound(p Plan, st *State, units []string, cap int) int {
 // final review done, final review failed, last live unit failed, ready,
 // waiting, done. A failed round that a later round superseded must not
 // dominate the summary.
-func loopState(p Plan, st *State, units []string) string {
+func loopState(planPath string, p Plan, st *State, units []string) string {
 	if len(units) == 0 {
 		return "waiting"
 	}
@@ -262,7 +266,7 @@ func loopState(p Plan, st *State, units []string) string {
 		switch status {
 		case "done", "canceled", "failed":
 		case "planned":
-			if u, ok := findUnit(p, id); ok && unitReady(p, st, u) {
+			if u, ok := findUnit(p, id); ok && unitReady(planPath, p, st, u) {
 				ready = true
 			} else {
 				waiting = true
@@ -317,9 +321,9 @@ func lastLiveFailed(st *State, units []string) bool {
 	return false
 }
 
-func unitReady(p Plan, st *State, u Unit) bool {
+func unitReady(planPath string, p Plan, st *State, u Unit) bool {
 	for _, d := range u.Deps {
-		if !depSatisfied(p, st, d) {
+		if !depSatisfied(planPath, p, st, d) {
 			return false
 		}
 	}

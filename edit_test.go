@@ -345,3 +345,232 @@ func TestUnifiedDiffGroupsHunks(t *testing.T) {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// depEditPlan takes deps in both list forms. The plan it names is written beside
+// it, so a cross-plan dep resolves.
+const depEditPlan = `encounter: cross
+repo: ~/src/api
+base: main
+
+minions:
+  - {id: w1, role: worker, worktree: w1}
+
+units:
+  - id: block-unit
+    minion: w1
+    deps:
+      - local-one
+    paths: [a/**]
+    goal: Block deps.
+
+  - id: flow-unit
+    minion: w1
+    deps: [local-one]
+    paths: [b/**]
+    goal: Flow deps.
+
+  - id: local-one
+    minion: w1
+    paths: [c/**]
+    goal: Local.
+`
+
+const depEditOtherPlan = `encounter: other
+repo: ~/src/other
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+units:
+  - id: rates
+    minion: w1
+    paths: [rates/**]
+    goal: Rates.
+`
+
+// depPlanFile writes the dep plan and the plan it names into one directory, so
+// a cross-plan dep has a file to resolve. A second edit reads what the first
+// wrote.
+func depPlanFile(t *testing.T, src string) string {
+	t.Helper()
+	dir := t.TempDir()
+	other := filepath.Join(dir, "other", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte(depEditOtherPlan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "plan.yaml")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func editDepFile(t *testing.T, path string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
+	return runCLI(append([]string{"edit", "--plan", path}, args...)...)
+}
+
+func readPlan(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// withDep is depEditPlan with one unit's deps line replaced, so a test states the
+// file it starts from.
+func withDep(old, next string) string {
+	return strings.Replace(depEditPlan, old, next, 1)
+}
+
+const crossDepFlag = "other/plan.yaml#rates"
+
+func TestEditAddsACrossPlanDepToABlockList(t *testing.T) {
+	path := depPlanFile(t, depEditPlan)
+	code, stdout, stderr := editDepFile(t, path, "unit", "block-unit", "--deps-add", crossDepFlag)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	want := withDep("    deps:\n      - local-one\n",
+		"    deps:\n      - local-one\n      - {plan: other/plan.yaml, unit: rates}\n")
+	if got := readPlan(t, path); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if !strings.Contains(stdout, "+      - {plan: other/plan.yaml, unit: rates}") {
+		t.Fatalf("the diff should show the new dep: %s", stdout)
+	}
+}
+
+func TestEditAddsACrossPlanDepToAFlowList(t *testing.T) {
+	path := depPlanFile(t, depEditPlan)
+	code, _, stderr := editDepFile(t, path, "unit", "flow-unit", "--deps-add", crossDepFlag)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	want := withDep("    deps: [local-one]",
+		"    deps: [local-one, {plan: other/plan.yaml, unit: rates}]")
+	if got := readPlan(t, path); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestEditRemovesACrossPlanDep(t *testing.T) {
+	for _, c := range []struct {
+		name, unit, src string
+	}{
+		{
+			name: "block",
+			unit: "block-unit",
+			src: withDep("    deps:\n      - local-one\n",
+				"    deps:\n      - local-one\n      - {plan: other/plan.yaml, unit: rates}\n"),
+		},
+		{
+			name: "flow",
+			unit: "flow-unit",
+			src: withDep("    deps: [local-one]",
+				"    deps: [local-one, {plan: other/plan.yaml, unit: rates}]"),
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			path := depPlanFile(t, c.src)
+			code, _, stderr := editDepFile(t, path, "unit", c.unit, "--deps-rm", crossDepFlag)
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, stderr)
+			}
+			if got := readPlan(t, path); got != depEditPlan {
+				t.Fatalf("removing the dep should restore the plan:\n%s", got)
+			}
+		})
+	}
+}
+
+// An add that changes nothing writes nothing: the flag value and the mapping
+// entry must compare equal.
+func TestEditAddIsIdempotentForADep(t *testing.T) {
+	src := withDep("    deps: [local-one]",
+		"    deps: [local-one, {plan: other/plan.yaml, unit: rates}]")
+	path := depPlanFile(t, src)
+	code, stdout, stderr := editDepFile(t, path, "unit", "flow-unit", "--deps-add", crossDepFlag)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "nothing to change") {
+		t.Fatalf("stdout %q", stdout)
+	}
+	if got := readPlan(t, path); got != src {
+		t.Fatalf("an add that changes nothing must not write:\n%s", got)
+	}
+}
+
+// A flow list that holds a mapping entry survives a set.
+func TestEditSetsADepListThatHoldsAMapping(t *testing.T) {
+	src := withDep("    deps: [local-one]",
+		"    deps: [local-one, {plan: other/plan.yaml, unit: rates}]")
+	path := depPlanFile(t, src)
+	code, _, stderr := editDepFile(t, path, "unit", "flow-unit", "--deps-set", "local-one")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if got := readPlan(t, path); got != depEditPlan {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, depEditPlan)
+	}
+}
+
+func TestEditRefusesToRemoveADepTheUnitLacks(t *testing.T) {
+	path := depPlanFile(t, depEditPlan)
+	code, _, stderr := editDepFile(t, path, "unit", "block-unit", "--deps-rm", crossDepFlag)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if !strings.Contains(stderr, `deps does not list "other/plan.yaml#rates"`) {
+		t.Fatalf("stderr %q", stderr)
+	}
+	if got := readPlan(t, path); got != depEditPlan {
+		t.Fatal("the plan changed")
+	}
+}
+
+func TestEditRefusesACrossPlanDepOnAMissingPlan(t *testing.T) {
+	path := depPlanFile(t, depEditPlan)
+	code, _, stderr := editDepFile(t, path, "unit", "block-unit", "--deps-add", "nope/plan.yaml#rates")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (a refused edit)", code)
+	}
+	if !strings.Contains(stderr, "E_DEP_PLAN") || !strings.Contains(stderr, "unchanged") {
+		t.Fatalf("the refusal should name the finding: %q", stderr)
+	}
+	if got := readPlan(t, path); got != depEditPlan {
+		t.Fatal("a refused edit must not touch the plan")
+	}
+}
+
+func TestEditRefusesACrossPlanDepOnAMissingUnit(t *testing.T) {
+	path := depPlanFile(t, depEditPlan)
+	code, _, stderr := editDepFile(t, path, "unit", "block-unit", "--deps-add", "other/plan.yaml#nope")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (a refused edit)", code)
+	}
+	if !strings.Contains(stderr, "E_DEP_UNIT") {
+		t.Fatalf("the refusal should name the finding: %q", stderr)
+	}
+}
+
+func TestEditRefusesADepWithAnEmptySide(t *testing.T) {
+	for _, v := range []string{"other/plan.yaml#", "#rates"} {
+		path := depPlanFile(t, depEditPlan)
+		code, _, stderr := editDepFile(t, path, "unit", "block-unit", "--deps-add", v)
+		if code != 2 {
+			t.Fatalf("%q: exit %d, want 2", v, code)
+		}
+		if !strings.Contains(stderr, "both sides") {
+			t.Fatalf("%q: stderr %q", v, stderr)
+		}
+		if got := readPlan(t, path); got != depEditPlan {
+			t.Fatalf("%q: the plan changed", v)
+		}
+	}
+}
