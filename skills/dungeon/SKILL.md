@@ -93,6 +93,40 @@ units:
     verdict: "Verdict: PASS"          # the exact report line that proves it
 ```
 
+A dep names a unit in this plan, or a unit in another plan:
+
+```yaml
+  - id: rates-screen
+    minion: w2
+    paths: [apps/web/**]
+    deps:
+      - recon
+      - {plan: ../../api-core/.dungeon/billing-api/plan.yaml, unit: rates-endpoint}
+```
+
+A relative plan path resolves against the directory of the plan that names it.
+Keep it relative: an absolute path breaks every other checkout.
+
+`dungeon check` refuses `E_DEP_PLAN` for a plan that is missing, `E_DEP_UNIT`
+for a unit that is not there, `E_DEP_SELF` for a dep on its own plan, and a
+cycle that crosses plans with `E_CYCLE`.
+
+A cross-plan dep on a writing unit is satisfied only when the other plan's state
+says the unit is done and landed. A dep on a unit whose minion does not write, a
+reviewer or a scout, is satisfied by done alone: a verdict or a recon report has
+no branch, so there is nothing to merge. `land` records
+`landed {ref, commit, at}` for a merged unit whose gate passed. A conflict or a
+failed gate records nothing, so nothing downstream starts.
+
+The lane gets the other plan's report path under `reports from deps`, and, for a
+writing dep, the ref and commit it landed on. That report is the contract: read
+the response shape there instead of guessing it.
+
+A dep does not deliver the other repo's code. It orders work and hands over the
+contract. A unit that needs the other repo's source still needs its own merge.
+
+Loops stay local. `loops[].deps` names declared units in the same plan.
+
 Set `project:` before you dispatch. The encounter workspace joins that group in
 dm's rail. With no `project:` it takes the repo folder name, which is usually
 right. Set it when the operator's group differs from the folder name: a
@@ -121,7 +155,8 @@ lines, prints the diff, and refuses a change that adds a finding:
 ```bash
 dungeon edit unit <id> --paths-add 'apps/api/**'      # widen what it owns
 dungeon edit unit <id> --accept 'go test ./apps/api/...'
-dungeon edit unit <id> --deps-add <unit>              # repeatable
+dungeon edit unit <id> --deps-add <unit>              # repeatable, local
+dungeon edit unit <id> --deps-add <plan>#<unit>       # a dep in another plan
 dungeon edit unit <id> --goal '...'                   # long text folds itself
 dungeon edit unit <id> --verdict ''                   # empty deletes the field
 dungeon edit minion <w1> --tools 'read,bash,edit,write'

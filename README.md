@@ -396,6 +396,47 @@ opens it directly.
 id, focus, `round N/cap` and state. `status --json` carries the same rows under
 `loops`.
 
+## Cross-plan deps
+
+A dep accepts a bare unit id or a mapping that names another plan:
+
+```yaml
+units:
+  - id: rates-screen
+    deps:
+      - recon
+      - {plan: ../../api-core/.dungeon/billing-api/plan.yaml, unit: rates-endpoint}
+```
+
+A relative plan path resolves against the directory of the plan that names it.
+Keep the path relative. An absolute path breaks every other checkout.
+
+`dungeon check` resolves the path, decodes the other plan, expands its loops and
+requires the unit id to exist. It refuses a missing plan with `E_DEP_PLAN`, a
+missing unit with `E_DEP_UNIT`, a dep on its own plan with `E_DEP_SELF`, and a
+cycle that crosses plans with `E_CYCLE`.
+
+A cross-plan dep on a writing unit is satisfied only when the other plan's state
+says the unit is done and landed. A dep on a unit whose minion does not write, a
+reviewer or a scout, is satisfied by done alone: a verdict or a recon report has
+no branch, so there is nothing to merge. `dungeon land` records
+`landed {ref, commit, at}` in its own `state.json` for every merged unit whose
+gate passed. A conflict or a failed gate records nothing, so nothing downstream
+starts.
+
+The lane gets the other plan's report path under `reports from deps`, and, for a
+writing dep, the ref and commit it landed on. That report is the contract. Read
+the response shape there instead of guessing it. This is the fix for a screen
+built against an assumed API.
+
+This does not put the other repo's code in this repo's worktree. A dep orders
+work and hands over the contract. A unit that needs the other repo's source still
+needs its own merge.
+
+`dungeon edit` takes the form `--deps-add <plan>#<unit>`.
+
+Loops stay local. `loops[].deps` names declared units in the same plan.
+
 ## More than one encounter
 
 The default encounter is `.dungeon/plan.yaml`. A second one lives in its own
