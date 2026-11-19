@@ -88,15 +88,18 @@ func usage(w io.Writer) {
       Minion statuses: spawned, busy, waiting, lost, absent.
 
   dungeon edit unit <id>   [--minion m] [--goal text] [--accept cmd]
-                           [--verdict line] [--paths-add glob]... [--deps-add id]...
+                           [--verdict line] [--paths-add glob]...
+                           [--deps-add id|plan#unit]...
   dungeon edit minion <id> [--role r] [--tools list] [--of id] [--worktree name]
       Change the plan without hand-editing yaml. An empty value deletes the
       field. --paths-set and --deps-set replace a list; --paths-rm and
-      --deps-rm remove an entry, and refuse one the unit never had. An add
-      that changes nothing writes nothing. The edit is surgical: comments,
-      blank lines and the rest of the file are untouched, and the diff is
-      printed. Nothing is written unless the plan still parses and adds no
-      finding. --dry-run shows the diff and writes nothing.
+      --deps-rm remove an entry, and refuse one the unit never had. A dep is
+      a bare id in this plan, or plan#unit for a unit in another plan, and
+      --deps-add, --deps-set and --deps-rm all take either form. An add that
+      changes nothing writes nothing. The edit is surgical: comments, blank
+      lines and the rest of the file are untouched, and the diff is printed.
+      Nothing is written unless the plan still parses and adds no finding.
+      --dry-run shows the diff and writes nothing.
 
   dungeon link <unit> <url> | --clear
       Pin a pull request, review or any http(s) url to a unit. The view shows
