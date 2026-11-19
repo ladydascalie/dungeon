@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -475,5 +476,59 @@ func TestValidateDepsFindsACyclePastTheDepthCap(t *testing.T) {
 	}
 	if cycles != 1 {
 		t.Fatalf("want the y/z cycle reported once, got %v", codes(ValidateDeps(paths[0], p)))
+	}
+}
+
+// A fan-out graph has one path per choice. Without a visit memo the walk is
+// exponential in the number of plans: six plans of six units took about 11
+// seconds before the memo, so a five second ceiling catches the blow-up and
+// leaves the memoised walk, which is microseconds, far below it.
+func TestValidateDepsWalksAFanOutOnce(t *testing.T) {
+	const n = 6
+	dir := t.TempDir()
+	paths := make([]string, 10)
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("p%d.yaml", i))
+	}
+	// Every unit of plan i waits on every unit of plan i+1, so the paths from
+	// p0's first unit multiply: n^8 of them.
+	for i := 0; i <= 8; i++ {
+		var b strings.Builder
+		fmt.Fprintf(&b, "encounter: p%d\nrepo: /r\nunits:\n", i)
+		for u := 0; u < n; u++ {
+			fmt.Fprintf(&b, "  - {id: u%d, deps: [", u)
+			if i == 8 {
+				fmt.Fprintf(&b, "{plan: %s, unit: tail}", paths[9])
+			} else {
+				for v := 0; v < n; v++ {
+					if v > 0 {
+						b.WriteString(", ")
+					}
+					fmt.Fprintf(&b, "{plan: %s, unit: u%d}", paths[i+1], v)
+				}
+			}
+			b.WriteString("]}\n")
+		}
+		writeDepFile(t, paths[i], b.String())
+	}
+	writeDepFile(t, paths[9], "encounter: p9\nrepo: /r\nunits:\n  - {id: tail}\n")
+
+	src, err := os.ReadFile(paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, findings := Decode(src)
+	if len(findings) > 0 {
+		t.Fatalf("decode: %v", findings)
+	}
+
+	start := time.Now()
+	f := ValidateDeps(paths[0], p)
+	elapsed := time.Since(start)
+	if len(f) > 0 {
+		t.Fatalf("this graph has no cycle, got %v", codes(f))
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the walk took %s: the visit memo is gone", elapsed)
 	}
 }

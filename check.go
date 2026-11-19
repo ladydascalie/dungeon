@@ -375,24 +375,33 @@ const crossDepthCap = 8
 
 // crossPlanCycles reports a cycle that leaves the plan and comes back. Each
 // distinct chain is reported once.
+//
+// The walk is memoised by (plan, unit, remaining depth): a node is walked once
+// per remaining budget, so the cost stays bounded by the cap times the graph
+// however many paths reach it. A node found on the stack is a back edge: its
+// cycle is reported and the node is not walked, because its own frame is still
+// exploring it with a larger budget. Nothing is memoised for a back edge: only
+// the frame that owns the node records a result, once its subtree is walked.
 func crossPlanCycles(self string, p Plan, cache depPlans) []Finding {
 	type node struct{ key, label string }
+	type visitKey struct {
+		key       string
+		remaining int
+	}
 	var out []Finding
 	reported := map[string]bool{}
-	done := map[string]bool{}
+	done := map[visitKey]bool{}
 	var stack []node
 
-	// visit reports whether it walked the node's whole subtree. A subtree cut
-	// short by the depth cap must not mark its node done: a later start would
-	// then skip the node and miss a cycle below it.
-	var visit func(planPath, unit string, depth int) bool
-	visit = func(planPath, unit string, depth int) bool {
-		key := planPath + "|" + unit
-		if done[key] {
-			return true
+	var visit func(planPath, unit string, remaining int)
+	visit = func(planPath, unit string, remaining int) {
+		if remaining < 0 {
+			return
 		}
-		if depth > crossDepthCap {
-			return false
+		key := planPath + "|" + unit
+		at := visitKey{key, remaining}
+		if done[at] {
+			return
 		}
 		label := unit
 		if planPath != self {
@@ -414,10 +423,9 @@ func crossPlanCycles(self string, p Plan, cache depPlans) []Finding {
 					"cycle across plans: " + strings.Join(chain, " -> "),
 				})
 			}
-			return true
+			return
 		}
 		stack = append(stack, node{key, label})
-		complete := true
 		if u, ok := findUnit(cache.get(planPath).plan, unit); ok {
 			for _, d := range u.Deps {
 				next := planPath
@@ -427,21 +435,16 @@ func crossPlanCycles(self string, p Plan, cache depPlans) []Finding {
 						continue // a dep on the plan's own file is E_DEP_SELF's finding
 					}
 				}
-				if !visit(next, d.Unit, depth+1) {
-					complete = false
-				}
+				visit(next, d.Unit, remaining-1)
 			}
 		}
 		stack = stack[:len(stack)-1]
-		if complete {
-			done[key] = true
-		}
-		return complete
+		done[at] = true
 	}
 
 	for _, u := range p.Units {
 		if hasCrossDep(u) {
-			visit(self, u.ID, 0)
+			visit(self, u.ID, crossDepthCap)
 		}
 	}
 	return out
