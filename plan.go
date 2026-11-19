@@ -88,8 +88,20 @@ func (d *Dep) UnmarshalYAML(n *yaml.Node) error {
 		return nil
 	case yaml.MappingNode:
 		var plan, unit string
+		seen := map[string]bool{}
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			key, value := n.Content[i], n.Content[i+1]
+			// yaml.v3 refuses a duplicate key everywhere else in the plan, and
+			// reading the keys by hand must not be a way around that.
+			if seen[key.Value] {
+				return fmt.Errorf("dep at line %d: key %q is already defined", key.Line, key.Value)
+			}
+			seen[key.Value] = true
+			// A list or a mapping here would otherwise vanish into an empty
+			// string, and the dep would quietly become a local one.
+			if value.Kind != yaml.ScalarNode {
+				return fmt.Errorf("dep at line %d: %s must be a plain value", key.Line, key.Value)
+			}
 			switch key.Value {
 			case "plan":
 				plan = value.Value
@@ -101,6 +113,12 @@ func (d *Dep) UnmarshalYAML(n *yaml.Node) error {
 		}
 		if strings.TrimSpace(unit) == "" {
 			return fmt.Errorf("dep at line %d names no unit", n.Line)
+		}
+		// A mapping is the cross-plan form, so it must name a plan. A dep with
+		// no plan is written as a bare unit id, and saying so beats a silent
+		// local dep.
+		if strings.TrimSpace(plan) == "" {
+			return fmt.Errorf("dep at line %d names no plan: write %q as a bare unit id for a local dep, or {plan: <path>, unit: %s}", n.Line, unit, unit)
 		}
 		d.Plan, d.Unit = plan, unit
 		return nil

@@ -572,17 +572,25 @@ func readyUnits(planPath string, p Plan, st *State) []Unit {
 }
 
 // depSatisfied answers whether a dep releases its dependants. A provisional
-// unit is unproven on purpose: the review after it is the judge. A cross-plan
-// dep is satisfied only when the other plan says the unit is done and landed:
-// done alone means proven, not merged.
+// unit is unproven on purpose: the review after it is the judge.
+//
+// A cross-plan dep needs the other plan to be done with the unit. A unit that
+// produced a branch must also be landed: done alone means proven, not merged. A
+// staff unit has no branch to merge, so done is the whole proof, which is what
+// lets one repo wait on another's review.
 func depSatisfied(planPath string, p Plan, st *State, dep Dep) bool {
 	if !dep.Local() {
-		other, err := LoadState(StatePath(resolveDepPlan(planPath, dep)))
+		otherPath := resolveDepPlan(planPath, dep)
+		other, err := LoadState(StatePath(otherPath))
 		if err != nil {
 			return false // an unreadable state satisfies nothing and is no error here
 		}
 		u, ok := other.Units[dep.Unit]
-		return ok && u.Status == "done" && u.Landed != nil
+		if !ok || u.Status != "done" {
+			return false
+		}
+		staff, known := depStaff(otherPath, dep.Unit)
+		return (known && staff) || u.Landed != nil
 	}
 	switch st.UnitStatus(dep.Unit) {
 	case "done", "failed":
@@ -595,6 +603,26 @@ func depSatisfied(planPath string, p Plan, st *State, dep Dep) bool {
 		}
 	}
 	return false
+}
+
+// depStaff reports whether the named unit of another plan has no branch to
+// merge. known is false when the plan or the unit cannot be read, and the dep
+// then needs Landed: a claim nothing backs is not a claim.
+func depStaff(planPath, unit string) (staff, known bool) {
+	p, findings, err := DecodeFile(planPath)
+	if err != nil || len(findings) > 0 {
+		return false, false
+	}
+	p, _ = ExpandLoops(p)
+	u, ok := findUnit(p, unit)
+	if !ok {
+		return false, false
+	}
+	m, ok := findMinion(p, u.Minion)
+	if !ok {
+		return false, false
+	}
+	return !writes(m.Role), true
 }
 
 // landedNote names the ref and commit a cross-plan dep landed on, so the brief
