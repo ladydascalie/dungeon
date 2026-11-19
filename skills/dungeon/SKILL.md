@@ -111,13 +111,16 @@ Keep it relative: an absolute path breaks every other checkout.
 for a unit that is not there, `E_DEP_SELF` for a dep on its own plan, and a
 cycle that crosses plans with `E_CYCLE`.
 
-A cross-plan dep is satisfied only when the other plan's state says the unit is
-done and landed. `land` records `landed {ref, commit, at}` for a merged unit
-whose gate passed. A conflict or a failed gate records nothing, so nothing
-downstream starts.
+A cross-plan dep on a writing unit is satisfied only when the other plan's state
+says the unit is done and landed. A dep on a unit whose minion does not write, a
+reviewer or a scout, is satisfied by done alone: a verdict or a recon report has
+no branch, so there is nothing to merge. `land` records
+`landed {ref, commit, at}` for a merged unit whose gate passed. A conflict or a
+failed gate records nothing, so nothing downstream starts.
 
-The lane gets the other plan's report path under `reports from deps`. That
-report is the contract: read the response shape there instead of guessing it.
+The lane gets the other plan's report path under `reports from deps`, and, for a
+writing dep, the ref and commit it landed on. That report is the contract: read
+the response shape there instead of guessing it.
 
 A dep does not deliver the other repo's code. It orders work and hands over the
 contract. A unit that needs the other repo's source still needs its own merge.
