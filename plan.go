@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -54,7 +56,7 @@ type Unit struct {
 	ID          string   `yaml:"id"`
 	Minion      string   `yaml:"minion"`
 	Paths       []string `yaml:"paths"`
-	Deps        []string `yaml:"deps"`
+	Deps        []Dep    `yaml:"deps"`
 	Goal        string   `yaml:"goal"`
 	Accept      string   `yaml:"accept"`
 	Verdict     string   `yaml:"verdict"` // optional: the report line that proves this reviewer unit
@@ -63,6 +65,70 @@ type Unit struct {
 	Round       int      `yaml:"-"`       // generated only: 1-based round inside that loop
 	Kind        string   `yaml:"-"`       // generated only: review or fix
 	Split       *Split   `yaml:"split"`
+}
+
+// Dep is one unit this unit waits on. A bare scalar names a unit in the same
+// plan. A mapping names a unit in another plan, so a repo can wait on work that
+// landed somewhere else.
+type Dep struct {
+	Plan string `yaml:"plan,omitempty"`
+	Unit string `yaml:"unit"`
+}
+
+// UnmarshalYAML reads either form. The mapping keys are read by hand because
+// Node.Decode bypasses KnownFields: a misspelled key must fail the plan, not
+// vanish.
+func (d *Dep) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		if strings.TrimSpace(n.Value) == "" {
+			return fmt.Errorf("dep at line %d names no unit", n.Line)
+		}
+		d.Plan, d.Unit = "", n.Value
+		return nil
+	case yaml.MappingNode:
+		var plan, unit string
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key, value := n.Content[i], n.Content[i+1]
+			switch key.Value {
+			case "plan":
+				plan = value.Value
+			case "unit":
+				unit = value.Value
+			default:
+				return fmt.Errorf("dep at line %d has unknown key %q: a dep is a unit id or {plan, unit}", key.Line, key.Value)
+			}
+		}
+		if strings.TrimSpace(unit) == "" {
+			return fmt.Errorf("dep at line %d names no unit", n.Line)
+		}
+		d.Plan, d.Unit = plan, unit
+		return nil
+	}
+	return fmt.Errorf("dep at line %d is neither a unit id nor {plan, unit}", n.Line)
+}
+
+// MarshalYAML writes a local dep back as the bare scalar it was written as, so
+// a plan with only local deps round trips unchanged.
+func (d Dep) MarshalYAML() (any, error) {
+	if d.Local() {
+		return d.Unit, nil
+	}
+	return struct {
+		Plan string `yaml:"plan"`
+		Unit string `yaml:"unit"`
+	}{d.Plan, d.Unit}, nil
+}
+
+// Local reports whether the dep names a unit in the same plan.
+func (d Dep) Local() bool { return d.Plan == "" }
+
+// String is the dep as one token: a unit id locally, plan#unit across plans.
+func (d Dep) String() string {
+	if d.Local() {
+		return d.Unit
+	}
+	return d.Plan + "#" + d.Unit
 }
 
 // Loop is a review and fix cycle between two minions. The scheduler expands it

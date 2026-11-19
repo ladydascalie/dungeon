@@ -87,7 +87,7 @@ func TestForestCapsTheIndent(t *testing.T) {
 	for i := 1; i < 20; i++ {
 		units = append(units, Unit{
 			ID: fmt.Sprintf("U%d", i), Minion: "w1", Paths: []string{"a/**"},
-			Deps: []string{fmt.Sprintf("U%d", i-1)},
+			Deps: []Dep{{Unit: fmt.Sprintf("U%d", i-1)}},
 		})
 	}
 	p := Plan{
