@@ -125,6 +125,10 @@ the response shape there instead of guessing it.
 A dep does not deliver the other repo's code. It orders work and hands over the
 contract. A unit that needs the other repo's source still needs its own merge.
 
+`dungeon status` names a cross-plan dep as `plan#unit` under `waits on`.
+A dep on a unit the other plan marked `failed` never releases. Read that plan
+and re-queue or cancel the unit there.
+
 Loops stay local. `loops[].deps` names declared units in the same plan.
 
 Set `project:` before you dispatch. The encounter workspace joins that group in
@@ -421,7 +425,7 @@ so a stale plan never blocks a run.
 | state | meaning | your move |
 | --- | --- | --- |
 | `ready` | deps landed, no lane on it | nothing. `next` dispatches it |
-| `waiting` | deps not landed | nothing. `next` handles it |
+| `waiting` | deps not landed | nothing. `next` handles it. A cross-plan dep on a `failed` unit never releases: fix it there |
 | `working` | a lane is on it, or `next` is running its accept | nothing. Do not help |
 | `blocked` | needs a human, or the plan is wrong | read the note, then act |
 | `done` | proved: accept exited 0, or the verdict line was found | nothing |
@@ -571,6 +575,10 @@ dungeon land          # merge done units, re-run every accept against the result
 dungeon down          # close the workspace, keep the run
 dungeon clear         # delete the finished plans, keep the runs
 ```
+
+`land` records `landed {ref, commit, at}` for every merged unit whose gate
+passed. A plan in another repo waits on that record, so a cross-plan dep
+releases only after land runs here. Marking a unit done is not enough.
 
 Report to the operator: what landed, what is blocked and why, and which branch
 holds the result. Name the units, not the files.

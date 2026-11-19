@@ -424,6 +424,12 @@ no branch, so there is nothing to merge. `dungeon land` records
 gate passed. A conflict or a failed gate records nothing, so nothing downstream
 starts.
 
+To release a downstream plan, run `dungeon land` in the upstream encounter:
+marking a unit done is not enough.
+
+A dep on a unit the other plan marked `failed` never releases. Waiting is
+honest but silent, so read that plan and re-queue or cancel the unit there.
+
 The lane gets the other plan's report path under `reports from deps`, and, for a
 writing dep, the ref and commit it landed on. That report is the contract. Read
 the response shape there instead of guessing it. This is the fix for a screen
@@ -432,6 +438,9 @@ built against an assumed API.
 This does not put the other repo's code in this repo's worktree. A dep orders
 work and hands over the contract. A unit that needs the other repo's source still
 needs its own merge.
+
+`dungeon status` names a cross-plan dep as `plan#unit` under `waits on`, and
+`status --json` carries the `landed` ref and commit of a done unit.
 
 `dungeon edit` takes the form `--deps-add <plan>#<unit>`.
 
