@@ -499,10 +499,19 @@ exits 1 and says `N of M encounters skipped`.
 `timeout: lanes still working, run dungeon next --all again`. An interrupt prints
 `interrupted: lanes still working, run dungeon next --all again` and exits 2.
 The unit it cut short stays `working`, because a gate cut short was never judged.
+An interrupt stops the sweep at once, even in the middle of a `--poll` wait: the
+loop waits on the signal and the timer together, so a long poll never delays the
+stop.
 
 `up --all` loads the targets once, spawns every plan's minions, one workspace
 per encounter as `up` does today, then runs one `next --all` round unless
 `--no-dispatch` is passed or a spawn failed.
+
+A settled encounter is one whose units are all `done` or `canceled`: nothing is
+ready, working or blocked. `up --all` leaves it alone. It spawns no lane, writes
+no state and prints `<encounter>: settled, no lanes spawned`. A settled
+encounter does not fail the sweep, so a finished plan under `.dungeon` never
+wakes a fleet of idle agents.
 
 `land --all` lands each plan exactly as `land` does, and `--accept-timeout`
 bounds every gate it runs, the per-plan one and the combined one. It refuses

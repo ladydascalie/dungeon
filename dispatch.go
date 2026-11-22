@@ -838,9 +838,29 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next"))
 			break
 		}
-		time.Sleep(o.poll)
+		// The wait watches the context as well as the clock, so an interrupt
+		// stops the loop instead of sleeping out the rest of the interval.
+		if !waitPoll(ctx, o.poll) {
+			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next"))
+			break
+		}
 	}
 	return d, nil
+}
+
+// waitPoll waits one poll interval and reports whether it ran out. It returns
+// false as soon as the context is done, so an interrupt during a poll sleep
+// returns at once instead of waiting the interval out. It starts no goroutine,
+// so nothing outlives the call.
+func waitPoll(ctx context.Context, poll time.Duration) bool {
+	t := time.NewTimer(poll)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
 }
 
 // stopLine says why a loop stopped while lanes are still working: the operator

@@ -1344,3 +1344,102 @@ func TestAnInterruptedCombinedGateIsNotAFailure(t *testing.T) {
 		t.Fatalf("the fleet branch must be left in place: %v", err)
 	}
 }
+
+// The poll sleep watches the context. A sweep with an 8s poll and a large
+// accept timeout must stop the moment it is interrupted, not sleep the rest of
+// the interval out.
+func TestAnInterruptDuringThePollSleepExitsAtOnce(t *testing.T) {
+	bin := buildDungeon(t)
+	fleetRootWith(t, map[string]string{"%ACCEPT%": "true"}, "one")
+	// A status word dungeon does not know: the lane is held until a report
+	// lands, so the sweep stays in the loop with the unit still working.
+	t.Setenv("FAKE_STATUS", "busy")
+	t.Setenv("FAKE_REPORT", "0")
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+
+	cmd := exec.Command(bin, "next", "--all", "--poll", "8s", "--timeout", "60s", "--accept-timeout", "30m")
+	cmd.Dir = mustGetwd(t)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The brief has been pasted, so the pass is over and the sweep is sleeping.
+	waitForFileContains(t, os.Getenv("FAKE_LOG"), "agent prompt")
+	time.Sleep(100 * time.Millisecond)
+
+	start := time.Now()
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal the sweep: %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- cmd.Wait() }()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the sweep did not stop after SIGTERM:\n%s", out.String())
+	}
+	elapsed := time.Since(start)
+	if !strings.Contains(out.String(), "interrupted: lanes still working, run dungeon next --all again") {
+		t.Fatalf("the sweep must say it was interrupted:\n%s", out.String())
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("the sweep took %v to exit an 8s poll: an interrupt must not wait out the sleep\n%s",
+			elapsed, out.String())
+	}
+}
+
+// mustGetwd is the current directory, which a test has already moved into the
+// fixture root.
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// up --all leaves a settled encounter alone: its units are all done or
+// canceled, so it spawns no lane, writes no state and says so on one line. A
+// settled target is not a failure of the sweep.
+func TestUpAllLeavesASettledEncounterAlone(t *testing.T) {
+	root, _ := fleetRoot(t, "finished", "live")
+	if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, "finished")); code != 0 {
+		t.Fatalf("set finished/A done: %s", stderr)
+	}
+	settledPath := fleetStatePath(root, "finished")
+	before, err := os.ReadFile(settledPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("up", "--all", "--no-dispatch")
+	if code != 0 {
+		t.Fatalf("a settled encounter must not fail the sweep: exit %d: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "finished: settled, no lanes spawned\n") {
+		t.Fatalf("the sweep must name the settled encounter:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "live: 1 spawned") {
+		t.Fatalf("the live encounter is still spawned:\n%s", stdout)
+	}
+	after, err := os.ReadFile(settledPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("a settled encounter must not have its state written:\nbefore %s\nafter %s", before, after)
+	}
+	calls, err := os.ReadFile(os.Getenv("FAKE_LOG"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(calls), "agent start"); n != 1 {
+		t.Fatalf("one lane was spawned, want 1 agent start:\n%s", calls)
+	}
+}
