@@ -1551,3 +1551,147 @@ func TestOnlyMatchesThePlanEncounterNotItsDirectory(t *testing.T) {
 		t.Fatalf("the directory is not the name: exit %d: %s", code, stderr)
 	}
 }
+
+// N4: land --all --only a,b lands only a and b, runs only their gates, and puts
+// both on the combined branch. Encounter c is neither landed nor gated. Only the
+// binary can see this: the router parses --only and then hands the same argv to
+// the sweep, which must know the flag too.
+func TestLandAllOnlyLandsTheNamedEncounters(t *testing.T) {
+	root, repo := fleetRoot(t, "a", "b", "c")
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	// All three finish, so only --only can keep c out of the sweep.
+	for _, name := range []string{"a", "b", "c"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	code, stdout, stderr := runCLI("land", "--all", "--only", "a,b")
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	for _, want := range []string{
+		"a: merged 1 units on a/integration",
+		"b: merged 1 units on b/integration",
+		"merged: a/A b/A",
+		"ok   a/A: test -f a.txt",
+		"ok   b/A: test -f b.txt",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("output missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "c: merged") || strings.Contains(stdout, "c/A") {
+		t.Fatalf("c is out of scope and must be neither landed nor gated:\n%s", stdout)
+	}
+	fleet := branchWorktreePath(repo, "fleet/integration")
+	for _, f := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Stat(filepath.Join(fleet, f)); err != nil {
+			t.Fatalf("%s should be on the combined branch: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fleet, "c.txt")); err == nil {
+		t.Fatalf("c.txt must not be on the combined branch")
+	}
+	if !landedOn(t, fleetStatePath(root, "a"), "a/integration") {
+		t.Fatalf("a/A must be recorded as landed")
+	}
+	if stateHasLanded(t, fleetStatePath(root, "c")) {
+		t.Fatalf("c must not be landed")
+	}
+}
+
+// landedOn reports whether state.json records any unit landed on ref.
+func landedOn(t *testing.T, path, ref string) bool {
+	t.Helper()
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	for _, u := range st.Units {
+		if u.Landed != nil && u.Landed.Ref == ref {
+			return true
+		}
+	}
+	return false
+}
+
+func stateHasLanded(t *testing.T, path string) bool {
+	t.Helper()
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	for _, u := range st.Units {
+		if u.Landed != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// --only must reach the sweep through the binary on every command, not just the
+// two that never re-parse the argv. up spawns only the named encounter's lanes.
+func TestUpAllOnlySpawnsTheNamedEncounters(t *testing.T) {
+	root, repo := fleetRoot(t, "a", "b", "c")
+
+	code, stdout, stderr := runCLI("up", "--all", "--no-dispatch", "--only", "a")
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "a: ") {
+		t.Fatalf("--only a must spawn a:\n%s", stdout)
+	}
+	for _, name := range []string{"b", "c"} {
+		if strings.Contains(stdout, name+": ") {
+			t.Fatalf("--only a must not spawn %s:\n%s", name, stdout)
+		}
+		if _, err := os.Stat(worktreePath(repo, name, "w1")); err == nil {
+			t.Fatalf("--only a must not cut %s's worktree", name)
+		}
+	}
+	if !stateExists(t, fleetStatePath(root, "a")) {
+		t.Fatalf("a's state is written at spawn")
+	}
+	for _, name := range []string{"b", "c"} {
+		if stateExists(t, fleetStatePath(root, name)) {
+			t.Fatalf("--only a must not write %s's state", name)
+		}
+	}
+}
+
+// next digests only the named encounter, and the digest is the single-plan one.
+func TestNextAllOnlyDigestsTheNamedEncounters(t *testing.T) {
+	root, repo := fleetRoot(t, "a", "b", "c")
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	code, stdout, stderr := runCLI("next", "--all", "--only", "a,b", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	for _, name := range []string{"a", "b"} {
+		if !strings.Contains(stdout, name+"\n  nothing to do\n") {
+			t.Fatalf("--only a,b must digest %s:\n%s", name, stdout)
+		}
+	}
+	if strings.Contains(stdout, "c\n") {
+		t.Fatalf("--only a,b must not digest c:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "encounters skipped") {
+		t.Fatalf("a plan out of scope must not count as skipped:\n%s", stdout)
+	}
+	if !stateExists(t, fleetStatePath(root, "c")) {
+		t.Fatalf("c keeps the state it had; --only must not clear it")
+	}
+}
