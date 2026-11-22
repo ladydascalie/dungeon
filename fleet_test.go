@@ -345,3 +345,79 @@ func TestFleetUnitTouchReadsTheStateThenTheReport(t *testing.T) {
 		t.Fatalf("a unit the state never saw has no touch, got %v", got)
 	}
 }
+
+const fleetLoopPlan = `encounter: looped
+repo: /repo/looped
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+  - {id: r1, role: reviewer, of: w1}
+loops:
+  - id: pass
+    reviewer: r1
+    fixer: w1
+    rounds: 2
+    focus: the buffer pass
+    pass: "Verdict: PASS"
+    paths: [fleet.go]
+units:
+  - id: seed
+    minion: w1
+    paths: [fleet.go]
+    goal: Seed the work.
+`
+
+// A loop is one unit list everywhere. The fleet must read the expanded plan,
+// not the declaration: an unexpanded read hides every review and fix unit, so a
+// loop mid-review renders as settled with nothing live.
+func TestFleetModelReadsTheExpandedLoopUnits(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	dir := filepath.Join(root, ".dungeon", "looped")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(dir, "plan.yaml")
+	if err := os.WriteFile(planPath, []byte(fleetLoopPlan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := State{
+		Encounter: "looped",
+		Units: map[string]UnitState{
+			"seed":          {Status: "done", At: "2026-01-01T10:00:00Z"},
+			"pass-review-1": {Status: "failed", At: "2026-01-01T11:00:00Z"},
+		},
+		Minions: map[string]MinionState{
+			"w1": {Status: "spawned", At: "2026-01-01T10:00:00Z"},
+			"r1": {Status: "spawned", At: "2026-01-01T10:00:00Z"},
+		},
+	}
+	if err := SaveState(filepath.Join(dir, "state.json"), state); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return nil, exec.ErrNotFound
+	}
+	model := BuildFleetModel(context.Background(), FleetOptions{
+		Run: runner,
+		Now: func() time.Time { return time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC) },
+	})
+
+	got := map[string]string{}
+	for _, row := range model.Rows {
+		got[row.ID] = row.Status
+	}
+	want := []string{"pass-review-1", "pass-fix-1", "pass-review-2", "pass-fix-2", "pass-review-3"}
+	for _, id := range want {
+		if _, ok := got[id]; !ok {
+			t.Fatalf("loop unit %q is missing from the fleet rows: %v", id, got)
+		}
+	}
+	if got["pass-review-1"] != "failed" {
+		t.Fatalf("a failed review must keep its status, got %q", got["pass-review-1"])
+	}
+	if !fleetEncounterLive(model, "looped") {
+		t.Fatal("a loop with unjudged rounds is live, not settled")
+	}
+}

@@ -183,7 +183,7 @@ func BuildFleetModel(ctx context.Context, opts FleetOptions) FleetModel {
 			model.Encounters = append(model.Encounters, row)
 			continue
 		}
-		plan, findings, err := DecodeFile(e.Path)
+		plan, findings, err := loadPlan(e.Path)
 		if err != nil {
 			row.Err = err.Error()
 			model.Encounters = append(model.Encounters, row)
