@@ -58,6 +58,10 @@ dungeon next --timeout 10m
 dungeon land                       # merge done units, re-run their accepts
 dungeon down                       # close the lanes, keep the run
 
+dungeon up --all                   # spawn every encounter, then one next --all round
+dungeon next --all                 # sweep every encounter in one pass
+dungeon land --all                 # land every encounter on one combined branch
+
 dungeon clear                      # delete the finished plans, keep the runs
 dungeon clear --remove             # delete the state, the briefs and the reports too
 dungeon clear --remove-worktrees   # delete the lane worktrees and their branches
@@ -454,8 +458,60 @@ separate. `dungeon init --encounter auth --plan .dungeon/auth/plan.yaml` writes 
 
 With more than one under `.dungeon`, `dungeon view` opens a picker: `j`/`k`
 move, `enter` opens, `q` quits. Every other command refuses to guess, prints the
-list and requires `--plan`. With exactly one encounter no flag is needed.
-`--once` and piped output refuse too, because a frame cannot answer a prompt.
+list and requires `--plan`, or `--all` on `up`, `next` and `land` to sweep every
+encounter. With exactly one encounter no flag is needed. `--once` and piped
+output refuse too, because a frame cannot answer a prompt.
+
+## The fleet sweep
+
+A fleet of encounters is one sweep, not N blocking calls. `--all` on `up`,
+`next` and `land` means every encounter under `.dungeon`, instead of one plan.
+
+```sh
+dungeon up --all                   # spawn every encounter, then one next --all round
+dungeon up --all --no-dispatch     # spawn only
+dungeon up --all --split down      # override the plan's split direction
+dungeon next --all                 # settle and dispatch every encounter
+dungeon next --all --dry-run       # print the digest, dispatch nothing
+dungeon next --all --timeout 10m   # one deadline for the whole sweep
+dungeon next --all --poll 5s --accept-timeout 20m
+dungeon land --all                 # land every encounter, combine them on one branch
+dungeon land --all --no-gate       # merge only, run no accept
+dungeon land --all --branch fleet/run-1
+```
+
+`--all` with `--plan` or `--state` is exit 2: a sweep keeps one state per
+encounter.
+A plan edited after dispatch is refused unless `--force`.
+
+`next --all` opens one mux for the whole sweep, not one per plan, and prints one
+block per plan. The block names the encounter and carries the same dispatched,
+done, failed and unproven lines `next` prints. Each plan keeps its own
+concurrency. Each changed state is saved as its plan's pass ends, so a crash
+loses nothing.
+
+A plan that does not parse or does not validate is printed as
+`skipped <path>: <first finding>` and left out of the sweep. The sweep runs over
+the rest. No target after filtering is exit 2.
+
+`--timeout` covers the whole sweep, not each plan. An expiry prints
+`timeout: lanes still working, run dungeon next --all again`.
+
+`up --all` loads the targets once, spawns every plan's minions, one workspace
+per encounter as `up` does today, then runs one `next --all` round unless
+`--no-dispatch` is passed or a spawn failed.
+
+`land --all` lands each plan exactly as `land` does. It refuses with exit 2 when
+the targets do not share one repo root and one base, because land merges
+branches in one checkout. It refuses with exit 2 when `--branch` is a plan's own
+`<encounter>/integration`, so an encounter named `fleet` needs an explicit
+`--branch`.
+
+When two or more plans merged something, `land --all` cuts `--branch` (default
+`fleet/integration`) from the base, merges each plan's integration branch in
+sorted plan-path order, then re-runs every merged unit's accept against the
+combined tree. A conflict names the plan and stops, and the fleet branch is
+never reported as good.
 
 ## The fleet view
 
