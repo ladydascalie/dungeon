@@ -23,6 +23,9 @@ type landResult struct {
 	Gate     []gateResult
 	Conflict string
 	Reason   string
+	// Held is set when a gate was cut short by an interrupt rather than failing
+	// on its own. Nothing is claimed about that unit, so no gate is recorded.
+	Held bool
 }
 
 type gateResult struct {
@@ -159,7 +162,17 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 		}
 		cmdCtx, cancel := acceptContext(ctx, o)
 		out, err := acceptCommand(cmdCtx, res.Worktree, u.Accept)
+		// The cause must be read before cancel, or every failed gate would look
+		// like an interrupted one.
+		held := err != nil && acceptCutShort(cmdCtx, o)
 		cancel()
+		if held {
+			// The operator interrupted the sweep and the gate was killed with
+			// it. That is not a failed gate: nothing is judged and the sweep
+			// stops where it is.
+			res.Held = true
+			break
+		}
 		res.Gate = append(res.Gate, gateResult{
 			Unit: u.ID, Command: u.Accept, OK: err == nil, Receipt: lastLine(string(out)),
 		})

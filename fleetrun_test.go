@@ -1188,3 +1188,74 @@ units:
 		t.Fatalf("the sweep should say it was interrupted:\n%s", out.String())
 	}
 }
+
+// F19: an interrupted land --all must not fabricate gate failures. A gate
+// killed by the interrupt is not a FAIL gate: the sweep stops, says it was
+// interrupted, withholds the fleet branch, could not run and leaves the state
+// alone.
+func TestAnInterruptedLandDoesNotFabricateGateFailures(t *testing.T) {
+	bin := buildDungeon(t)
+	gateDir := t.TempDir()
+	gate := filepath.Join(gateDir, "gate.sh")
+	pidFile := filepath.Join(gateDir, "gate.pid")
+	script := "#!/bin/sh\necho $$ > '" + pidFile + "'\nsleep 8\ntrue\n"
+	if err := os.WriteFile(gate, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, repo := fleetRootWith(t, map[string]string{"%ACCEPT%": gate}, "one", "two")
+
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	for _, name := range []string{"one", "two"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	cmd := exec.Command(bin, "land", "--all", "--accept-timeout", "60s")
+	cmd.Dir = root
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForPid(t, pidFile) // a plan's gate is running
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal the land: %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- cmd.Wait() }()
+	select {
+	case err := <-stopped:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+			t.Fatalf("land exit %v, want 2:\n%s", err, out.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the land did not stop after SIGTERM:\n%s", out.String())
+	}
+
+	text := out.String()
+	if strings.Contains(text, "FAIL") {
+		t.Fatalf("a gate cut by the interrupt is not a failed gate:\n%s", text)
+	}
+	if !strings.Contains(text, "interrupted: lanes still working, run dungeon land --all again") {
+		t.Fatalf("the land must say it was interrupted:\n%s", text)
+	}
+	if strings.Contains(text, "fleet branch") {
+		t.Fatalf("the fleet branch must be withheld:\n%s", text)
+	}
+	for _, name := range []string{"one", "two"} {
+		st, err := LoadState(fleetStatePath(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u := st.Units["A"]; u.Landed != nil {
+			t.Fatalf("%s/A recorded a landing for a gate that was never judged: %+v", name, u.Landed)
+		}
+	}
+}

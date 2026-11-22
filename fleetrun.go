@@ -375,6 +375,9 @@ type fleetLand struct {
 	Gate      []gateResult
 	Conflict  string
 	Reason    string
+	// Held is set when an interrupt cut a gate short. The sweep stopped there,
+	// so nothing is a finding and the fleet branch is withheld.
+	Held bool
 }
 
 type fleetLandPlan struct {
@@ -475,6 +478,12 @@ func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch
 			return res, err
 		}
 		res.Plans = append(res.Plans, fleetLandPlan{Encounter: t.encounter(), Result: r})
+		if r.Held {
+			// The operator stopped the sweep mid-gate. Nothing after this point
+			// was judged or landed, so the sweep stops and claims nothing.
+			res.Held = true
+			return res, nil
+		}
 		switch {
 		case r.Conflict != "" || !gatesPassed(r):
 			withheld = true
@@ -666,6 +675,12 @@ func landAllCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	fmt.Fprint(stdout, res)
 	skippedSummary(stdout, load)
+	if res.Held {
+		// An interrupted land could not run. It is not a finding: no gate was
+		// judged, and the fleet branch is withheld.
+		fmt.Fprintln(stdout, stopLine(ctx, "dungeon land --all"))
+		return 2
+	}
 	if res.good() {
 		abs, _ := filepath.Abs(res.Worktree)
 		fmt.Fprintf(stdout, "\nthe branch is local. nothing was pushed. inspect it at %s\n", abs)
