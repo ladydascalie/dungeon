@@ -232,6 +232,18 @@ func landFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *landFlags) {
 	return fs, lf
 }
 
+// branchSet reports whether --branch was passed. The flag set is shared with
+// land --all, so the single-plan path must ask rather than compare a default.
+func branchSet(fs *flag.FlagSet) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "branch" {
+			set = true
+		}
+	})
+	return set
+}
+
 func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs, lf := landFlagSet("land", stderr)
 	rest, err := parseMixed(fs, args)
@@ -246,6 +258,14 @@ func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		// something routed wrong: hand it back rather than ignore the flag and
 		// land one plan as if that was what was asked.
 		return landAllCmd(ctx, args, stdout, stderr)
+	}
+	if branchSet(fs) {
+		// The flag set is shared with land --all, so this path parses --branch
+		// whether or not it can use it. Say so instead of dropping it: an
+		// operator who named a branch must not believe it was honoured.
+		fmt.Fprintf(stderr, "dungeon: --branch %s belongs to land --all\n", *lf.branch)
+		fmt.Fprintln(stderr, "dungeon: one land merges onto <encounter>/integration; pass --all to name the combined branch")
+		return 2
 	}
 	p, code := loadPlanFor(fs, lf.planPath, stderr)
 	if code != 0 {
@@ -278,6 +298,12 @@ func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	fmt.Fprint(stdout, res)
+	if res.Held {
+		// The operator interrupted a gate. Nothing was judged, so this is not a
+		// pass and not a failure: say it was interrupted and claim no landing.
+		fmt.Fprintln(stdout, stopLine(ctx, "dungeon land"))
+		return 2
+	}
 	if res.Conflict != "" {
 		return 1
 	}
