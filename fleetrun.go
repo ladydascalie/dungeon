@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -526,9 +525,7 @@ func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch
 					continue
 				}
 				cmdCtx, cancel := acceptContext(ctx, o)
-				cmd := exec.CommandContext(cmdCtx, "sh", "-c", u.Accept)
-				cmd.Dir = res.Worktree
-				out, err := cmd.CombinedOutput()
+				out, err := acceptCommand(cmdCtx, res.Worktree, u.Accept)
 				cancel()
 				res.Gate = append(res.Gate, gateResult{
 					Unit: src.Encounter + "/" + id, Command: u.Accept, OK: err == nil, Receipt: lastLine(string(out)),
@@ -580,6 +577,10 @@ func fleetLandGuard(targets []*fleetTarget, branch string, stderr io.Writer) int
 	}
 	for _, t := range targets {
 		switch {
+		case branch == t.Plan.Base:
+			fmt.Fprintf(stderr, "dungeon: --branch %s is %s's base branch\n", branch, t.encounter())
+			fmt.Fprintln(stderr, "dungeon: land never moves a base branch; pass --branch <name> to name the combined branch something else")
+			return 2
 		case branch == t.encounter()+"/integration":
 			fmt.Fprintf(stderr, "dungeon: --branch %s is %s's own integration branch\n", branch, t.encounter())
 			fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name the combined branch something else")
@@ -595,16 +596,32 @@ func fleetLandGuard(targets []*fleetTarget, branch string, stderr io.Writer) int
 	}
 	// The combined worktree must be empty or already on this branch. Merging
 	// into a lane's worktree would put another plan's work on a live branch.
-	path := branchWorktreePath(first.Plan.Repo, branch)
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
-		head, err := gitRun(path, "rev-parse", "--abbrev-ref", "HEAD")
-		if err != nil || head != branch {
-			fmt.Fprintf(stderr, "dungeon: %s is a worktree of branch %s, so %s cannot go there\n", path, head, branch)
-			fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name the combined branch something else")
-			return 2
-		}
+	repo := first.Plan.Repo
+	path := branchWorktreePath(repo, branch)
+	if info, err := os.Stat(path); err == nil && info.IsDir() && !worktreeOnBranch(path, branch) {
+		head, _ := gitRun(path, "rev-parse", "--abbrev-ref", "HEAD")
+		fmt.Fprintf(stderr, "dungeon: %s is a worktree of branch %s, so %s cannot go there\n", path, head, branch)
+		fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name the combined branch something else")
+		return 2
+	}
+	// A branch that already exists somewhere else is someone's work. Merging the
+	// fleet onto it would move it. The only existing branch a land may use is one
+	// it cut itself, which the fleet worktree is checked out on.
+	if branchExists(repo, branch) && !worktreeOnBranch(path, branch) {
+		fmt.Fprintf(stderr, "dungeon: branch %s already exists, so a land --all would move it\n", branch)
+		fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name a new combined branch, or delete that branch first")
+		return 2
 	}
 	return 0
+}
+
+// worktreeOnBranch reports whether path is a worktree sitting on branch.
+func worktreeOnBranch(path, branch string) bool {
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		return false
+	}
+	head, err := gitRun(path, "rev-parse", "--abbrev-ref", "HEAD")
+	return err == nil && head == branch
 }
 
 // landAllCmd lands every encounter and, when two or more merged something,

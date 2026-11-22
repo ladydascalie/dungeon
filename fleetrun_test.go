@@ -380,10 +380,11 @@ func TestNextAllTimeoutCoversTheWholeSweep(t *testing.T) {
 	}
 }
 
-// F3: --timeout bounds the accept commands too, not only the sleep between
-// passes. Two 3-second accepts under a 1-second sweep must not run for 6s.
+// F3, and F11 for the forking case: --timeout bounds the accept commands too,
+// not only the sleep between passes. `sh` forks for this gate, so killing only
+// sh would leave `sleep` holding the output pipe.
 func TestNextAllTimeoutBoundsAnAccept(t *testing.T) {
-	root, _ := fleetRootWith(t, map[string]string{"%ACCEPT%": "sleep 3"}, "one", "two")
+	root, _ := fleetRootWith(t, map[string]string{"%ACCEPT%": "sleep 3; true"}, "one", "two")
 	t.Setenv("FAKE_REPORT", "1")
 	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
 		t.Fatalf("up --all: %s", stderr)
@@ -818,5 +819,227 @@ func TestTheBoxKeyCarriesTheEncounter(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "--key lane/w1 ") {
 		t.Fatalf("the bare lane/w1 key collides across a fleet:\n%s", raw)
+	}
+}
+
+// F10: a branch that already exists is someone's work. A sweep must not adopt it
+// and move it, so the guard refuses before anything is merged.
+func TestLandAllRefusesAPreExistingBranch(t *testing.T) {
+	root, repo := fleetRoot(t, "one", "two")
+	if _, err := gitRun(repo, "branch", "staging", "main"); err != nil {
+		t.Fatal(err)
+	}
+	tip, err := gitRun(repo, "rev-parse", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("land", "--all", "--branch", "staging")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stderr, "branch staging already exists") || !strings.Contains(stderr, "pass --branch") {
+		t.Fatalf("stderr must name the branch and the way out:\n%s", stderr)
+	}
+	after, err := gitRun(repo, "rev-parse", "staging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != tip {
+		t.Fatalf("staging moved from %s to %s", tip, after)
+	}
+	_ = root
+}
+
+// F10: --branch must never be a plan's base. Land does not touch the base branch.
+func TestLandAllRefusesTheBaseBranch(t *testing.T) {
+	fleetRoot(t, "one", "two")
+	repo, err := gitRepoAt(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tip, err := gitRun(repo, "rev-parse", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("land", "--all", "--branch", "main")
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stderr, "base branch") || !strings.Contains(stderr, "never moves a base branch") {
+		t.Fatalf("stderr must say the base branch is out of bounds:\n%s", stderr)
+	}
+	after, err := gitRun(repo, "rev-parse", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != tip {
+		t.Fatalf("main moved from %s to %s", tip, after)
+	}
+}
+
+// gitRepoAt reads the repo a fleet fixture points at.
+func gitRepoAt(t *testing.T) (string, error) {
+	t.Helper()
+	plan, findings, err := loadPlan(fleetPlanPath(mustWd(t), "one"))
+	if err != nil {
+		return "", err
+	}
+	if len(findings) > 0 {
+		t.Fatalf("plan findings: %v", findings)
+	}
+	return plan.Repo, nil
+}
+
+func mustWd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
+}
+
+// F10: the branch a previous land cut is the one exception. Landing again must
+// still work, or a fleet could never be re-landed.
+func TestLandAllReLandsOnItsOwnFleetBranch(t *testing.T) {
+	root, repo := fleetRoot(t, "one", "two")
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	for _, name := range []string{"one", "two"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	if code, stdout, stderr := runCLI("land", "--all"); code != 0 {
+		t.Fatalf("first land exit %d: %s\n%s", code, stderr, stdout)
+	}
+	code, stdout, stderr := runCLI("land", "--all")
+	if code != 0 {
+		t.Fatalf("second land exit %d: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "fleet branch fleet/integration") {
+		t.Fatalf("the second land must reuse the branch it cut:\n%s", stdout)
+	}
+}
+
+// F12: a dry run settles nothing. It does not run the accept, write the state or
+// mark the unit; it says what it would settle.
+func TestNextAllDryRunSettlesNothing(t *testing.T) {
+	repo := gitRepo(t)
+	root := t.TempDir()
+	fakeHerdr(t, "")
+	plan := `encounter: one
+repo: ` + repo + `
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+units:
+  - id: A
+    minion: w1
+    paths: [one.txt, settled.txt]
+    goal: Touch one.txt.
+    accept: touch settled.txt
+`
+	planPath := filepath.Join(root, ".dungeon", "one", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	t.Setenv("FAKE_STATUS", "busy") // unknown: held until a report lands
+	t.Setenv("FAKE_REPORT", "0")
+
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	if code, _, stderr := runCLI("next", "--all", "--poll", "10ms", "--timeout", "80ms"); code != 0 {
+		t.Fatalf("first next --all: %s", stderr)
+	}
+	// The lane writes the report a real lane would write.
+	report := reportPath(planPath, "A")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("did the thing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	statePath := StatePath(planPath)
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := runCLI("next", "--all", "--dry-run")
+	if code != 0 {
+		t.Fatalf("dry run exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "would settle: A") {
+		t.Fatalf("the preview must say what it would settle:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "rejected:") || strings.Contains(stdout, "done:") {
+		t.Fatalf("a preview must not settle:\n%s", stdout)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("a dry run wrote the state:\n%s", after)
+	}
+	if _, err := os.Stat(filepath.Join(worktreePath(repo, "one", "w1"), "settled.txt")); err == nil {
+		t.Fatal("a dry run ran the accept command")
+	}
+}
+
+// F13: a dry run predicts one pass, so it takes the same slots a real pass would.
+func TestNextAllDryRunPredictsOnePass(t *testing.T) {
+	repo := gitRepo(t)
+	root := t.TempDir()
+	fakeHerdr(t, "")
+	plan := `encounter: one
+repo: ` + repo + `
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+units:
+  - id: U1
+    minion: w1
+    paths: [one.txt]
+    goal: One.
+    accept: test -f one.txt
+  - id: U2
+    minion: w1
+    paths: [two.txt]
+    goal: Two.
+    accept: test -f two.txt
+`
+	planPath := filepath.Join(root, ".dungeon", "one", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--all", "--dry-run")
+	if code != 0 {
+		t.Fatalf("dry run exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "would dispatch: U1 to w1") {
+		t.Fatalf("the first ready unit is what one pass dispatches:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "U2 to w1") {
+		t.Fatalf("one minion takes one unit per pass:\n%s", stdout)
 	}
 }
