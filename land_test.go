@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -405,5 +408,100 @@ func TestLandGateIsBoundedAndKillsItsChildren(t *testing.T) {
 	}
 	if elapsed >= 2500*time.Millisecond {
 		t.Fatalf("the gate ran for %v under a 1s --accept-timeout: its children must die with it", elapsed)
+	}
+}
+
+// A land cut short by an interrupt is neither a pass nor a failure. The gate
+// was never judged, so land says it was interrupted, exits 2, withholds the
+// success line and records no landing.
+func TestAnInterruptedLandSaysSoAndExitsNotZero(t *testing.T) {
+	bin := buildDungeon(t)
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+
+	gateDir := t.TempDir()
+	gate := filepath.Join(gateDir, "gate.sh")
+	pidFile := filepath.Join(gateDir, "gate.pid")
+	script := "#!/bin/sh\necho $$ > '" + pidFile + "'\nsleep 8\ntrue\n"
+	if err := os.WriteFile(gate, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := "encounter: enc\nrepo: " + repo + "\nbase: main\nminions:\n  - {id: w1, role: worker, worktree: w1}\nunits:\n" +
+		"  - id: A\n    minion: w1\n    paths: [a.txt]\n    goal: First change.\n    accept: " + gate + "\n"
+	planPath, statePath, root := encounter(t, repo, plan)
+	t.Chdir(root)
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	commitIn(t, worktreePath(repo, "enc", "w1"), "a.txt", "one\n", "A")
+	if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", planPath); code != 0 {
+		t.Fatalf("set: %s", stderr)
+	}
+
+	cmd := exec.Command(bin, "land", "--plan", planPath)
+	cmd.Dir = root
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForPid(t, pidFile) // the gate is running now
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal the land: %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- cmd.Wait() }()
+	select {
+	case err := <-stopped:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+			t.Fatalf("land exit %v, want 2:\n%s", err, out.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the land did not stop after SIGTERM:\n%s", out.String())
+	}
+
+	text := out.String()
+	if !strings.Contains(text, "interrupted: lanes still working, run dungeon land again") {
+		t.Fatalf("the land must say it was interrupted:\n%s", text)
+	}
+	if strings.Contains(text, "FAIL") {
+		t.Fatalf("a gate cut by the interrupt is not a failed gate:\n%s", text)
+	}
+	if strings.Contains(text, "nothing was pushed") {
+		t.Fatalf("an interrupted land must not report the branch as ready:\n%s", text)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u := st.Units["A"]; u.Landed != nil {
+		t.Fatalf("A recorded a landing for a gate that was never judged: %+v", u.Landed)
+	}
+}
+
+// --branch belongs to land --all. Passing it to one land must be refused, not
+// silently ignored, so nobody believes it renamed anything.
+func TestLandRefusesBranchWithoutAll(t *testing.T) {
+	planPath, _, repo := landSetup(t)
+	commitIn(t, worktreePath(repo, "enc", "w1"), "a.txt", "one\n", "A")
+	if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", planPath); code != 0 {
+		t.Fatalf("set: %s", stderr)
+	}
+
+	code, stdout, stderr := runCLI("land", "--branch", "enc/renamed", "--plan", planPath)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stderr, "land --all") {
+		t.Fatalf("the refusal must say where --branch belongs:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "merged") {
+		t.Fatalf("a refused land must merge nothing:\n%s", stdout)
+	}
+	if _, err := gitRun(repo, "rev-parse", "--verify", "refs/heads/enc/renamed"); err == nil {
+		t.Fatalf("the refused branch must not exist")
 	}
 }
