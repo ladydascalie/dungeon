@@ -33,6 +33,21 @@ type fleetTarget struct {
 
 func (t *fleetTarget) encounter() string { return t.Plan.Encounter }
 
+// settled reports whether the encounter has nothing left to do: every unit is
+// done or canceled, so none is ready, working or blocked. A settled target
+// spawns no lanes and has no state to save, so up --all leaves it alone instead
+// of waking a fleet of idle agents and rewriting its plan hash.
+func (t *fleetTarget) settled() bool {
+	for _, u := range t.Plan.Units {
+		switch t.State.UnitStatus(u.ID) {
+		case "done", "canceled":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // fleetOpts is what a sweep refuses: --plan names one encounter, --state names
 // one state file, and a sweep is every encounter with its own state.
 type fleetOpts struct {
@@ -229,7 +244,12 @@ func nextAll(ctx context.Context, h mux, o dispatchOpts, targets []*fleetTarget)
 			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next --all"))
 			break
 		}
-		time.Sleep(o.poll)
+		// The wait watches the context as well as the clock, so an interrupt
+		// stops the sweep instead of sleeping out the rest of the interval.
+		if !waitPoll(ctx, o.poll) {
+			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next --all"))
+			break
+		}
 	}
 
 	for i, t := range targets {
@@ -333,6 +353,10 @@ func upAllCmd(ctx context.Context, in upAllInput) int {
 	}
 	failed := false
 	for _, t := range load.targets {
+		if t.settled() {
+			fmt.Fprintf(in.opts.out, "%s: settled, no lanes spawned\n", t.encounter())
+			continue
+		}
 		res, err := spawnMinions(ctx, h, spawnInput{
 			planPath: t.PlanPath, plan: t.Plan, state: &t.State, split: in.split, out: in.opts.out,
 		})

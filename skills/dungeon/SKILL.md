@@ -364,9 +364,17 @@ good.
 `up --all` spawns every plan's minions, one workspace per encounter, then runs
 one `next --all` round unless `--no-dispatch` is passed or a spawn failed.
 
+A settled encounter, whose units are all `done` or `canceled`, is left alone:
+`up --all` spawns no lane for it, writes no state and prints `<encounter>:
+settled, no lanes spawned`. That is not a failure. Run it over a repo with
+finished plans and nothing wakes.
+
 An interrupted sweep prints `interrupted: lanes still working, run dungeon next
 --all again` and exits 2. Nothing is claimed: the unit stays `working`, because
 a gate cut short was never judged. Run the sweep again.
+
+The stop is prompt. An interrupt during a `--poll` wait returns at once instead
+of waiting the interval out, so a long poll never delays your stop.
 
 ## Supervise at short intervals
 
