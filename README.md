@@ -459,9 +459,8 @@ list and requires `--plan`. With exactly one encounter no flag is needed.
 
 ## The fleet view
 
-`dungeon fleet` shows every encounter under `.dungeon` in one window, newest
-touch first. It takes no plan and needs no argument, because it discovers the
-encounters itself.
+`dungeon fleet` shows every encounter under `.dungeon` in one window. It takes
+no plan and needs no argument, because it discovers the encounters itself.
 
 ```sh
 dungeon fleet                 # live view, refreshes every 2s
@@ -470,13 +469,23 @@ dungeon fleet --once          # print one frame and exit
 dungeon fleet --json          # print the fleet model
 ```
 
-Rows sit under BLOCKED, WORKING, READY and SETTLED. A plan that will not read is
-named under BLOCKED with its error instead of disappearing. Settled rows fold to
-one summary row per encounter. `j`/`k` move, `g`/`G` jump to the ends, `enter`
-or `d` opens the detail, and `space` opens the actions: jump to the lane, open
-its hunk session, copy the pane id, expand or fold settled units. `q` quits.
-`esc` only closes an overlay and never quits, so a detached fleet is never lost
-to one keystroke.
+Rows sit under WORKING, BLOCKED, READY, FAILED and SETTLED, in that order. Work
+in progress leads, because that is what the window is for. BLOCKED holds the
+units waiting on you. A plan that will not read is named there with its error
+instead of disappearing.
+
+FAILED sits below READY on purpose. A failed round keeps its verdict in the
+state forever: the fix that answers it is a later unit, so listing every
+failure would show work that nobody still owes. FAILED and SETTLED each fold to
+one summary row per encounter, and their counts are units, not lines. Inside a
+section the unit that moved last leads, ordered by the unit's own state
+timestamp or its report, not by the encounter's touch, so two encounters running
+at once interleave by activity.
+
+`j`/`k` move, `g`/`G` jump to the ends, `enter` or `d` opens the detail, and
+`space` opens the actions: jump to the lane, open its hunk session, copy the
+pane id, expand or fold failed and settled units. `q` quits. `esc` only closes
+an overlay and never quits, so a detached fleet is never lost to one keystroke.
 
 The preview under the list reads the selected lane's pane once per refresh tick.
 When the pane is gone or unreadable it shows the lane's report instead, from

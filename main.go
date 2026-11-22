@@ -149,9 +149,11 @@ func usage(w io.Writer) {
       encounter under .dungeon and no --plan, view opens a picker.
 
   dungeon fleet  [--once] [--json] [--interval 2s] [--mux backend]
-      Every encounter in one pane, newest first, with the selected lane's live
-      output. j/k move, enter detail, space actions, q quits, esc backs out.
-      Piped output and --once print one frame instead.
+      Every encounter in one pane, with the selected lane's live output. Work
+      in progress leads, then BLOCKED, READY, and the folded FAILED and
+      SETTLED runs. Inside a section the unit that moved last leads. j/k move,
+      enter detail, space actions, q quits, esc backs out. Piped output and
+      --once print one frame instead.
 
   dungeon rail   [--once] [--json] [--backstop 10s] [--mux backend]
   dungeon rail toggle [--width 32]

@@ -21,14 +21,29 @@ import (
 // of its own: every fact on screen is in the model, and the only live read is
 // the selected lane's preview on the refresh tick.
 
+const (
+	fleetSectionWorking = iota
+	fleetSectionBlocked
+	fleetSectionReady
+	fleetSectionFailed
+	fleetSectionSettled
+)
+
+// Sections in screen order. WORKING leads because the live lane is what an
+// operator is watching, and a failed verdict is history: the fix that answered
+// it never rewrites the failed unit, so failures would otherwise own the screen.
+// FAILED and SETTLED fold to one row per encounter.
 var fleetSectionDefs = []struct {
-	label string
-	style string
+	label    string
+	style    string
+	folded   bool
+	foldStat string // the status a folded summary carries, empty when it never folds
 }{
-	{"BLOCKED", "blocked"},
-	{"WORKING", "working"},
-	{"READY", "ready"},
-	{"SETTLED", "done"},
+	{"WORKING", "working", false, ""},
+	{"BLOCKED", "blocked", false, ""},
+	{"READY", "ready", false, ""},
+	{"FAILED", "failed", true, "failed"},
+	{"SETTLED", "done", true, "done"},
 }
 
 type fleetItem struct {
@@ -37,6 +52,7 @@ type fleetItem struct {
 	label     string
 	status    string
 	summary   bool
+	fold      string // the fold key a summary toggles, empty on a unit row
 	broken    bool
 	live      bool
 	count     int
@@ -48,13 +64,9 @@ func fleetRowKey(row FleetRow) string {
 	return "row\x00" + row.Encounter + "\x00" + row.ID
 }
 
-func fleetSummaryKey(encounter string) string {
-	return "summary\x00" + encounter
-}
-
 func fleetItemKey(it fleetItem) string {
 	if it.summary {
-		return fleetSummaryKey(it.encounter)
+		return "summary\x00" + it.fold
 	}
 	if it.broken {
 		return "broken\x00" + it.encounter
@@ -233,7 +245,7 @@ var fleetActions = []fleetAction{
 	{"j", "jump to the lane"},
 	{"h", "open the hunk session"},
 	{"c", "copy the pane id"},
-	{"e", "expand or fold settled units"},
+	{"e", "expand or fold failed and settled units"},
 }
 
 func (m *fleetViewModel) actionKey(key string) tea.Cmd {
@@ -267,8 +279,14 @@ func (m *fleetViewModel) actionKey(key string) tea.Cmd {
 		case "c":
 			return m.copyPaneCmd(it)
 		case "e":
-			m.expanded[it.encounter] = !m.expanded[it.encounter]
-			m.rebuildOrder("")
+			if it.fold == "" {
+				m.notice = "not a folded row: failed and settled units fold"
+				return nil
+			}
+			m.expanded[it.fold] = !m.expanded[it.fold]
+			// The summary becomes its units, or the reverse. Follow the encounter
+			// in the same section, so a fold never throws the cursor to the top.
+			m.rebuildOrder(fleetFoldCursorKey(m.items(), it))
 		}
 	}
 	m.notice = "no action on " + key
@@ -425,77 +443,184 @@ func fleetGroups(model FleetModel) []fleetGroup {
 	return out
 }
 
+// fleetSectionCounts totals the units behind each section. A folded row stands
+// for every unit it hides, so the count is the work, not the line count.
+func fleetSectionCounts(items []fleetItem) map[int]int {
+	counts := map[int]int{}
+	for _, it := range items {
+		n := 1
+		if it.summary {
+			n = it.count
+		}
+		counts[fleetSectionOf(it.status)] += n
+	}
+	return counts
+}
+
 func fleetSectionOf(status string) int {
 	switch status {
-	case "blocked", "failed", "unreadable":
-		return 0
 	case "working":
-		return 1
+		return fleetSectionWorking
+	case "blocked", "unreadable":
+		return fleetSectionBlocked
+	case "failed":
+		return fleetSectionFailed
 	case "done", "canceled":
-		return 3
+		return fleetSectionSettled
 	default:
-		return 2
+		return fleetSectionReady
 	}
 }
 
+// fleetItems orders the screen: sections top to bottom, and inside a section the
+// freshest unit first, so the newest work of every encounter leads together.
 func fleetItems(model FleetModel, expanded map[string]bool) []fleetItem {
-	groups := fleetGroups(model)
-	rowsByEncounter := map[string][]FleetRow{}
-	for _, row := range model.Rows {
-		rowsByEncounter[row.Encounter] = append(rowsByEncounter[row.Encounter], row)
-	}
-
 	var items []fleetItem
-	for section := range fleetSectionDefs {
-		for _, g := range groups {
-			rows := rowsByEncounter[g.name]
-			if section == 3 {
-				var settled []FleetRow
-				for _, row := range rows {
-					if fleetSectionOf(row.Status) == 3 {
-						settled = append(settled, row)
-					}
+	for section, def := range fleetSectionDefs {
+		var in []fleetItem
+		if def.folded {
+			in = fleetFoldedItems(model, section, expanded)
+		} else {
+			for _, row := range model.Rows {
+				if fleetSectionOf(row.Status) == section {
+					in = append(in, fleetRowItem(row))
 				}
-				if len(settled) == 0 {
-					continue
-				}
-				live := len(settled) < len(rows)
-				if expanded[g.name] {
-					for _, row := range settled {
-						items = append(items, fleetItem{row: row, encounter: g.name, label: row.ID, status: row.Status, lastTouch: row.LastTouch})
-					}
-					continue
-				}
-				items = append(items, fleetItem{
-					encounter: g.name,
-					label:     g.name,
-					status:    "done",
-					summary:   true,
-					live:      live,
-					count:     len(settled),
-					lastTouch: g.touch,
-				})
-				continue
 			}
-			for _, row := range rows {
-				if fleetSectionOf(row.Status) != section {
-					continue
-				}
-				items = append(items, fleetItem{row: row, encounter: g.name, label: row.ID, status: row.Status, lastTouch: row.LastTouch})
-			}
-			if section == 0 && g.err != "" {
-				items = append(items, fleetItem{
-					encounter: g.name,
-					label:     g.name,
-					status:    "unreadable",
-					broken:    true,
-					err:       g.err,
-					lastTouch: g.touch,
-				})
+			if section == fleetSectionBlocked {
+				in = append(in, fleetBrokenItems(model)...)
 			}
 		}
+		sort.SliceStable(in, func(i, j int) bool {
+			if in[i].lastTouch.Equal(in[j].lastTouch) {
+				return in[i].encounter < in[j].encounter
+			}
+			return in[i].lastTouch.After(in[j].lastTouch)
+		})
+		items = append(items, in...)
 	}
 	return items
+}
+
+func fleetRowItem(row FleetRow) fleetItem {
+	return fleetItem{
+		row:       row,
+		encounter: row.Encounter,
+		label:     row.ID,
+		status:    row.Status,
+		lastTouch: fleetRowTouch(row),
+	}
+}
+
+// fleetRowTouch is when the unit itself moved. A state that recorded no
+// timestamp falls back to the encounter's touch, which is the newest it can know.
+func fleetRowTouch(row FleetRow) time.Time {
+	if row.UnitTouch.IsZero() {
+		return row.LastTouch
+	}
+	return row.UnitTouch
+}
+
+// fleetFoldKey names one encounter's fold in one section, so FAILED and SETTLED
+// open and close independently.
+func fleetFoldKey(encounter string, section int) string {
+	return fmt.Sprintf("%s\x00%d", encounter, section)
+}
+
+// fleetFoldCursorKey names the row the cursor lands on after a fold toggle: the
+// first item of the same encounter in the same section, which is the summary
+// that replaced the units or the first unit it revealed.
+func fleetFoldCursorKey(items []fleetItem, it fleetItem) string {
+	section := fleetSectionOf(it.status)
+	for _, other := range items {
+		if other.encounter == it.encounter && fleetSectionOf(other.status) == section {
+			return fleetItemKey(other)
+		}
+	}
+	return ""
+}
+
+// fleetFoldedItems folds one encounter's units of a section into one row. A
+// failed round keeps its verdict in the state forever: the fix that answers it
+// is a later unit, so a listed failure would read as work still outstanding.
+func fleetFoldedItems(model FleetModel, section int, expanded map[string]bool) []fleetItem {
+	byEncounter := map[string][]FleetRow{}
+	var order []string
+	for _, row := range model.Rows {
+		if fleetSectionOf(row.Status) != section {
+			continue
+		}
+		if _, ok := byEncounter[row.Encounter]; !ok {
+			order = append(order, row.Encounter)
+		}
+		byEncounter[row.Encounter] = append(byEncounter[row.Encounter], row)
+	}
+	var items []fleetItem
+	for _, name := range order {
+		rows := byEncounter[name]
+		if expanded[fleetFoldKey(name, section)] {
+			for _, row := range rows {
+				items = append(items, fleetRowItem(row))
+			}
+			continue
+		}
+		items = append(items, fleetItem{
+			encounter: name,
+			label:     name,
+			status:    fleetSectionDefs[section].foldStat,
+			summary:   true,
+			fold:      fleetFoldKey(name, section),
+			live:      fleetEncounterLive(model, name),
+			count:     len(rows),
+			lastTouch: fleetNewestTouch(rows),
+		})
+	}
+	return items
+}
+
+// fleetBrokenItems names every encounter the fleet could not read. There is no
+// unit to hang the error on, so the row carries the encounter's name.
+func fleetBrokenItems(model FleetModel) []fleetItem {
+	var items []fleetItem
+	for _, g := range fleetGroups(model) {
+		if g.err == "" {
+			continue
+		}
+		items = append(items, fleetItem{
+			encounter: g.name,
+			label:     g.name,
+			status:    "unreadable",
+			broken:    true,
+			err:       g.err,
+			lastTouch: g.touch,
+		})
+	}
+	return items
+}
+
+// fleetEncounterLive reports whether the encounter still has a unit in play: a
+// lane running, a blocked unit, or a unit ready to start. Settled and failed
+// units are neither, so a fold over them can say nothing is live.
+func fleetEncounterLive(model FleetModel, encounter string) bool {
+	for _, row := range model.Rows {
+		if row.Encounter != encounter {
+			continue
+		}
+		switch fleetSectionOf(row.Status) {
+		case fleetSectionWorking, fleetSectionBlocked, fleetSectionReady:
+			return true
+		}
+	}
+	return false
+}
+
+func fleetNewestTouch(rows []FleetRow) time.Time {
+	var newest time.Time
+	for _, row := range rows {
+		if at := fleetRowTouch(row); at.After(newest) {
+			newest = at
+		}
+	}
+	return newest
 }
 
 func (m fleetViewModel) items() []fleetItem {
@@ -779,11 +904,20 @@ func fleetItemDid(it fleetItem) string {
 	}
 	if it.summary {
 		if it.live {
-			return fmt.Sprintf("%d settled", it.count)
+			return fmt.Sprintf("%d %s", it.count, fleetFoldedNoun(it))
 		}
-		return fmt.Sprintf("%d settled, nothing live", it.count)
+		return fmt.Sprintf("%d %s, nothing live", it.count, fleetFoldedNoun(it))
 	}
 	return fleetDid(it.row)
+}
+
+// fleetFoldedNoun names what a folded row counts. A failure is a recorded
+// verdict, not a queue: the units it folded have already had their say.
+func fleetFoldedNoun(it fleetItem) string {
+	if fleetSectionOf(it.status) == fleetSectionFailed {
+		return "failed"
+	}
+	return "settled"
 }
 
 type fleetMetrics struct {
@@ -846,10 +980,7 @@ func (m fleetViewModel) listLines(width int) ([]string, int) {
 	cursorLine := 0
 	selected := m.selectedKey()
 	section := -1
-	sectionCount := map[int]int{}
-	for _, it := range items {
-		sectionCount[fleetSectionOf(it.status)]++
-	}
+	sectionCount := fleetSectionCounts(items)
 	for _, it := range items {
 		sec := fleetSectionOf(it.status)
 		if sec != section {
@@ -895,10 +1026,7 @@ func (m fleetViewModel) View() string {
 
 func (m fleetViewModel) headerView() string {
 	left := titleStyle.Render("dungeon fleet")
-	counts := map[int]int{}
-	for _, it := range m.items() {
-		counts[fleetSectionOf(it.status)]++
-	}
+	counts := fleetSectionCounts(m.items())
 	right := dimStyle.Render(fmt.Sprintf("%d encounters · %d units", len(m.model.Encounters), len(m.model.Rows)))
 	chips := ""
 	for i, sec := range fleetSectionDefs {
@@ -977,9 +1105,12 @@ func (m fleetViewModel) detailOverlay() string {
 		b.WriteString(titleStyle.Render(it.label) + "  " + statusStyles["blocked"].Render("unreadable") + "\n\n")
 		b.WriteString(wrap(it.err, inner) + "\n")
 	} else if it.summary {
-		b.WriteString(titleStyle.Render(it.label) + "  " + statusStyles["done"].Render("settled") + "\n\n")
-		b.WriteString(fmt.Sprintf("%d settled units · last touch %s\n", it.count, fleetAge(it.lastTouch)))
-		if !it.live {
+		noun := fleetFoldedNoun(it)
+		b.WriteString(titleStyle.Render(it.label) + "  " + statusStyles[it.status].Render(noun) + "\n\n")
+		b.WriteString(fmt.Sprintf("%d %s units · newest %s\n", it.count, noun, fleetAge(it.lastTouch)))
+		if it.live {
+			b.WriteString(dimStyle.Render("the encounter still has units outside this fold") + "\n")
+		} else {
 			b.WriteString(dimStyle.Render("nothing live in this encounter") + "\n")
 		}
 	} else {
@@ -995,7 +1126,7 @@ func (m fleetViewModel) detailOverlay() string {
 			{"ahead / dirty", fleetAheadDirty(row)},
 			{"accept", orDash(row.Accept)},
 			{"last report", "-"},
-			{"last touch", fleetAge(row.LastTouch)},
+			{"last touch", fleetAge(fleetRowTouch(row))},
 		}
 		if row.LastReport != nil {
 			fields[7][1] = fleetAge(*row.LastReport)

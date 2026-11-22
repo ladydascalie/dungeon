@@ -206,8 +206,11 @@ func ownedBy(patterns []string, file string) bool {
 // changedFiles lists what git sees as changed in dir. It reads porcelain with
 // -z and parses the NUL entries itself: a leading space is the index status of
 // a modified file, so trimming the output loses a byte and corrupts the path.
+// -uall lists an untracked tree file by file. Without it git reports one
+// "dir/" entry, which no per-file path pattern can match, so a lane that
+// created a directory was blocked for writing inside its own paths.
 func changedFiles(dir string) ([]string, error) {
-	cmd := exec.Command("git", "-C", dir, "status", "--porcelain", "-z")
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain", "-z", "-uall")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git status --porcelain -z in %s: %w", dir, err)

@@ -217,3 +217,38 @@ func TestChangedFilesRenameTakesDestination(t *testing.T) {
 		t.Fatalf("changedFiles = %q, want [new name.go]", got)
 	}
 }
+
+// A lane that creates a new directory leaves it untracked, and git collapses an
+// untracked tree to one "dir/" entry unless it is asked for every file. That
+// collapsed name matches no per-file path pattern, so a unit that wrote only
+// inside its own paths was blocked with "outside your paths: dir/".
+func TestUntrackedDirectoryIsMatchedFileByFile(t *testing.T) {
+	repo := gitRepo(t)
+	enc := t.TempDir()
+	planPath := filepath.Join(enc, ".dungeon", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte("encounter: enc\nminions: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Plan{Encounter: "enc", Repo: repo}
+	wt := worktreePath(repo, p.Encounter, "w1")
+	if err := ensureIntegrationWorktree(repo, "main", wt, "enc/w1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(wt, "cmd", "tool"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "cmd", "tool", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _ := LoadState(filepath.Join(enc, ".dungeon", "state.json"))
+	u := Unit{ID: "A", Paths: []string{"cmd/**"}}
+	o := dispatchOpts{planPath: planPath}
+	if blockedByWorktree(o, p, &st, u, Minion{ID: "w1", Role: RoleWorker}) {
+		t.Fatalf("work inside cmd/** blocked: %q", st.Units["A"].Note)
+	}
+}

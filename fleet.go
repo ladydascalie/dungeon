@@ -32,7 +32,8 @@ type FleetEncounter struct {
 
 // FleetRow is one unit. Status, pane, worktree, branch, ahead and dirty come
 // from the state file alone. WT adds facts worktrunk can prove, and Review says
-// whether a hunk session is open on this worktree.
+// whether a hunk session is open on this worktree. UnitTouch is when this unit
+// itself last moved, which orders two units inside one plan.
 type FleetRow struct {
 	Encounter  string       `json:"encounter"`
 	ID         string       `json:"id"`
@@ -46,6 +47,7 @@ type FleetRow struct {
 	Dirty      int          `json:"dirty"`
 	Accept     string       `json:"accept,omitempty"`
 	LastReport *time.Time   `json:"last_report,omitempty"`
+	UnitTouch  time.Time    `json:"unit_touch"`
 	LastTouch  time.Time    `json:"last_touch"`
 	WT         *FleetWT     `json:"wt,omitempty"`
 	Review     *FleetReview `json:"review,omitempty"`
@@ -258,10 +260,27 @@ func BuildFleetModel(ctx context.Context, opts FleetOptions) FleetModel {
 				at := info.ModTime()
 				row.LastReport = &at
 			}
+			row.UnitTouch = fleetUnitTouch(enc.state, u.ID, row.LastReport)
 			model.Rows = append(model.Rows, row)
 		}
 	}
 	return model
+}
+
+// fleetUnitTouch is when this unit itself last moved: the timestamp its state
+// entry recorded, or its report when that is newer. The encounter's touch is
+// shared by every unit in the plan, so it cannot order two of them.
+func fleetUnitTouch(st State, id string, report *time.Time) time.Time {
+	var newest time.Time
+	if us, ok := st.Units[id]; ok {
+		if at, err := time.Parse(time.RFC3339, us.At); err == nil {
+			newest = at
+		}
+	}
+	if report != nil && report.After(newest) {
+		newest = *report
+	}
+	return newest
 }
 
 func fleetPath(path string) string {

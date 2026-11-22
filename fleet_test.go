@@ -164,6 +164,9 @@ func TestFleetModelBuildsRowsFromFixtures(t *testing.T) {
 	if !r.LastTouch.Equal(base.Add(time.Hour)) {
 		t.Fatalf("row last touch %v", r.LastTouch)
 	}
+	if !r.UnitTouch.Equal(base.Add(3 * time.Hour)) {
+		t.Fatalf("unit touch %v, want the newer report time", r.UnitTouch)
+	}
 	if r.WT == nil || r.WT.Added == nil || *r.WT.Added != 7 || r.WT.Deleted == nil || *r.WT.Deleted != 3 {
 		t.Fatalf("worktrunk changed lines: %+v", r.WT)
 	}
@@ -317,5 +320,28 @@ func TestFleetModelWithoutEncountersDoesNotShellOut(t *testing.T) {
 	}
 	if model.Sources.Worktrunk.Available || model.Sources.Hunk.Available {
 		t.Fatalf("sources without an encounter are not available: %+v", model.Sources)
+	}
+}
+
+// The encounter's touch is one clock for the whole plan. A unit's own timestamp
+// is what orders it against its siblings, and a report proves the lane moved
+// later than the state recorded.
+func TestFleetUnitTouchReadsTheStateThenTheReport(t *testing.T) {
+	at := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	st := State{Units: map[string]UnitState{"A": {At: at.Format(time.RFC3339)}}}
+
+	if got := fleetUnitTouch(st, "A", nil); !got.Equal(at) {
+		t.Fatalf("unit touch %v, want the state timestamp", got)
+	}
+	older := at.Add(-time.Hour)
+	if got := fleetUnitTouch(st, "A", &older); !got.Equal(at) {
+		t.Fatalf("unit touch %v, want the state timestamp when the report is older", got)
+	}
+	newer := at.Add(time.Hour)
+	if got := fleetUnitTouch(st, "A", &newer); !got.Equal(newer) {
+		t.Fatalf("unit touch %v, want the newer report", got)
+	}
+	if got := fleetUnitTouch(st, "missing", nil); !got.IsZero() {
+		t.Fatalf("a unit the state never saw has no touch, got %v", got)
 	}
 }

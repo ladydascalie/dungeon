@@ -81,7 +81,7 @@ func TestFleetViewRendersSectionsRowsAndPreview(t *testing.T) {
 		}
 	}
 
-	order := []string{"BLOCKED", "WORKING", "READY", "SETTLED"}
+	order := []string{"WORKING", "BLOCKED", "READY", "SETTLED"}
 	last := -1
 	for _, label := range order {
 		i := strings.Index(out, label)
@@ -384,5 +384,119 @@ func TestFleetViewNamesABrokenPlanUnderBlocked(t *testing.T) {
 	}
 	if strings.Contains(out, "READY 1") {
 		t.Fatalf("a broken plan is blocked, not ready:\n%s", out)
+	}
+}
+
+// A failed unit is a recorded verdict, not outstanding work. It must not lead
+// the screen, and it must fold: the fix that answers a failed review is a later
+// unit, so a listed failure reads as work nobody did.
+func TestFleetViewLeadsWithWorkingAndFoldsFailures(t *testing.T) {
+	now := time.Now()
+	model := FleetModel{
+		Encounters: []FleetEncounter{{
+			Name:      "alpha",
+			Path:      filepath.Join(t.TempDir(), ".dungeon", "alpha", "plan.yaml"),
+			LastTouch: now,
+		}},
+		Rows: []FleetRow{
+			{Encounter: "alpha", ID: "review-1", Status: "failed", UnitTouch: now, LastTouch: now},
+			{Encounter: "alpha", ID: "review-2", Status: "failed", UnitTouch: now.Add(-time.Hour), LastTouch: now},
+			{Encounter: "alpha", ID: "fix-1", Status: "working", Pane: "%1", UnitTouch: now.Add(-10 * time.Minute), LastTouch: now},
+			{Encounter: "alpha", ID: "plan-1", Status: "planned", UnitTouch: now.Add(-2 * time.Hour), LastTouch: now},
+		},
+		Sources: FleetSources{Worktrunk: FleetSource{Available: true}, Hunk: FleetSource{Available: true}},
+	}
+	m := newFleetViewModel(time.Second, "")
+	m.width, m.height = 140, 40
+	m.model = model
+	m.rebuildOrder(fleetFirstKey(model, m.expanded))
+
+	it, ok := m.selectedItem()
+	if !ok || it.label != "fix-1" {
+		t.Fatalf("the cursor must start on the live lane, got %+v", it)
+	}
+
+	out := m.View()
+	working, ready, failed := strings.Index(out, "WORKING"), strings.Index(out, "READY"), strings.Index(out, "FAILED")
+	if working < 0 || ready < 0 || failed < 0 || !(working < ready && ready < failed) {
+		t.Fatalf("sections must read WORKING, READY, FAILED:\n%s", out)
+	}
+	if !strings.Contains(out, "FAILED 2") {
+		t.Fatalf("the failed section must count the units, not the folded rows:\n%s", out)
+	}
+	summary := ""
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "alpha") && strings.Contains(line, "2 failed") {
+			summary = line
+		}
+	}
+	if summary == "" {
+		t.Fatalf("a folded failure row must name its encounter and its count:\n%s", out)
+	}
+	if strings.Contains(summary, "nothing live") {
+		t.Fatalf("an encounter with live units must not read as dead: %q", summary)
+	}
+	for _, hidden := range []string{"review-1", "review-2"} {
+		if strings.Contains(out, hidden) {
+			t.Fatalf("a folded failure must not list %s:\n%s", hidden, out)
+		}
+	}
+
+	m.expanded[fleetFoldKey("alpha", fleetSectionFailed)] = true
+	m.rebuildOrder("")
+	out = m.View()
+	if !strings.Contains(out, "review-1") || !strings.Contains(out, "review-2") {
+		t.Fatalf("an expanded failure fold must name its units:\n%s", out)
+	}
+	if strings.Contains(out, "2 failed,") {
+		t.Fatalf("an expanded fold must not keep its summary row:\n%s", out)
+	}
+}
+
+// The encounter's touch is shared by every unit it holds, so it cannot order
+// two lanes. The unit that moved last leads, whatever encounter it is in.
+func TestFleetSectionLeadsWithTheUnitThatMovedLast(t *testing.T) {
+	now := time.Now()
+	model := FleetModel{
+		Encounters: []FleetEncounter{
+			{Name: "alpha", Path: filepath.Join(t.TempDir(), ".dungeon", "alpha", "plan.yaml"), LastTouch: now},
+			{Name: "beta", Path: filepath.Join(t.TempDir(), ".dungeon", "beta", "plan.yaml"), LastTouch: now.Add(-3 * time.Hour)},
+		},
+		Rows: []FleetRow{
+			{Encounter: "alpha", ID: "older-unit", Status: "working", UnitTouch: now.Add(-2 * time.Hour), LastTouch: now},
+			{Encounter: "beta", ID: "newer-unit", Status: "working", UnitTouch: now.Add(-5 * time.Minute), LastTouch: now.Add(-3 * time.Hour)},
+		},
+		Sources: FleetSources{Worktrunk: FleetSource{Available: true}, Hunk: FleetSource{Available: true}},
+	}
+	m := newFleetViewModel(time.Second, "")
+	m.width, m.height = 140, 40
+	m.model = model
+	out := m.View()
+	if a, b := strings.Index(out, "newer-unit"), strings.Index(out, "older-unit"); a < 0 || b < 0 || a > b {
+		t.Fatalf("the unit that moved last must lead the section:\n%s", out)
+	}
+}
+
+// FAILED and SETTLED fold separately: opening one must not reveal the other.
+func TestFleetFoldsFailedAndSettledIndependently(t *testing.T) {
+	now := time.Now()
+	model := FleetModel{
+		Encounters: []FleetEncounter{{Name: "alpha", Path: "/tmp/alpha/plan.yaml", LastTouch: now}},
+		Rows: []FleetRow{
+			{Encounter: "alpha", ID: "review-1", Status: "failed", UnitTouch: now},
+			{Encounter: "alpha", ID: "build-1", Status: "done", UnitTouch: now},
+		},
+	}
+	items := fleetItems(model, map[string]bool{})
+	if len(items) != 2 || !items[0].summary || !items[1].summary {
+		t.Fatalf("both sections must fold to one row: %+v", items)
+	}
+	if items[0].fold == items[1].fold {
+		t.Fatalf("two folds of one encounter must not share a key: %q", items[0].fold)
+	}
+
+	items = fleetItems(model, map[string]bool{fleetFoldKey("alpha", fleetSectionFailed): true})
+	if len(items) != 2 || items[0].label != "review-1" || !items[1].summary {
+		t.Fatalf("opening FAILED must leave SETTLED folded: %+v", items)
 	}
 }
