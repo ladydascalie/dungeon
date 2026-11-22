@@ -143,6 +143,13 @@ func reportPath(planPath, unit string) string {
 	return filepath.Join(encounterDir(planPath), "reports", unit+".md")
 }
 
+// laneBoxKey is the session box key for one lane. It carries the encounter, so
+// two encounters that both declare w1 post to two places and one parent
+// watching the lane/ prefix sees both.
+func laneBoxKey(encounter, minion string) string {
+	return "lane/" + encounter + "/" + minion
+}
+
 // minionDir is where a minion reads and runs its accept command. A writer
 // works in its own worktree. A staff minion paired with a writer reads the
 // writer's worktree, so a reviewer sees the branch it reviews. Staff with no
@@ -334,9 +341,7 @@ func writeBrief(h mux, in briefInput) (string, error) {
 		if boxer, ok := h.(interface {
 			BoxPing(key, message string) string
 		}); ok {
-			// The key carries the encounter: two encounters in one fleet both
-			// declare w1, and one bare lane/w1 would put both in one box slot.
-			ping = boxer.BoxPing("lane/"+p.Encounter+"/"+m.ID, msg)
+			ping = boxer.BoxPing(laneBoxKey(p.Encounter, m.ID), msg)
 			pingNote = "The parent reads the session box. Do not wait for a reply."
 		} else {
 			ping = h.PingCommand(o.parentPane, msg)
@@ -421,9 +426,10 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 	out, err := acceptCommand(cmdCtx, minionDir(p, m), u.Accept)
 	receipt := lastLine(string(out))
 	if err != nil {
-		if acceptTimedOut(cmdCtx, o) {
-			// The sweep ran out of time, not the accept command. The unit stays
-			// working and the next sweep settles it.
+		if acceptCutShort(cmdCtx, o) {
+			// The sweep was interrupted or ran out of time, not the gate. The
+			// unit was not judged, so it stays working and the next sweep
+			// settles it.
 			return "held"
 		}
 		st.SetUnit(u.ID, "rejected", fmt.Sprintf("accept failed: %s (%s)", u.Accept, receipt))
@@ -465,17 +471,27 @@ func acceptCommand(cmdCtx context.Context, dir, command string) ([]byte, error) 
 	// A backstop for anything that left the group: waiting on its pipes must not
 	// outlive the deadline by more than this.
 	cmd.WaitDelay = 2 * time.Second
-	return cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		// The gate passed and left a child holding its output. The exit status
+		// is the proof; a process it started is not the gate's verdict.
+		err = nil
+	}
+	return out, err
 }
 
-// acceptTimedOut reports whether an accept command was cut short by the sweep's
-// deadline. An accept that ran into its own limit is a rejection, not an
-// unfinished sweep.
-func acceptTimedOut(cmdCtx context.Context, o dispatchOpts) bool {
-	if o.deadline.IsZero() || !errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
-		return false
+// acceptCutShort reports whether an accept command was stopped by the caller
+// rather than by failing on its own. An interrupted sweep cancels the context,
+// and a sweep deadline expires it; an accept that runs into its own
+// --accept-timeout is a rejection, not an unfinished sweep.
+func acceptCutShort(cmdCtx context.Context, o dispatchOpts) bool {
+	switch {
+	case errors.Is(cmdCtx.Err(), context.Canceled):
+		return true
+	case errors.Is(cmdCtx.Err(), context.DeadlineExceeded):
+		return !o.deadline.IsZero() && !time.Now().Before(o.deadline)
 	}
-	return !time.Now().Before(o.deadline)
+	return false
 }
 
 // settleVerdict proves a reviewer unit by its report, not by a shell command.
@@ -605,10 +621,11 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			PromoteLoopFix(p, st, u.ID)
 			d.Done = append(d.Done, u.ID)
 			if reaper, ok := h.(interface {
-				MarkReadyToReap(ctx context.Context, name string) error
+				MarkReadyToReap(ctx context.Context, key string) error
 			}); ok {
-				if err := reaper.MarkReadyToReap(ctx, st.AgentName(m.ID)); err != nil {
-					fmt.Fprintf(o.out, "could not mark lane %s ready to be reaped: %v\n", st.AgentName(m.ID), err)
+				key := laneBoxKey(p.Encounter, m.ID)
+				if err := reaper.MarkReadyToReap(ctx, key); err != nil {
+					fmt.Fprintf(o.out, "could not mark %s ready to be reaped: %v\n", key, err)
 				}
 			}
 		case "failed":
@@ -805,6 +822,10 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 
 	for {
 		if _, err := step(ctx, h, o, p, st, &d); err != nil {
+			if ctx.Err() != nil {
+				fmt.Fprintln(o.out, stopLine(ctx, "dungeon next"))
+				break
+			}
 			return d, err
 		}
 		if o.dryRun {
@@ -813,13 +834,22 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 		if workingCount(p, st) == 0 {
 			break
 		}
-		if time.Now().After(deadline) {
-			fmt.Fprintln(o.out, "timeout: lanes still working, run dungeon next again")
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next"))
 			break
 		}
 		time.Sleep(o.poll)
 	}
 	return d, nil
+}
+
+// stopLine says why a loop stopped while lanes are still working: the operator
+// interrupted it, or the sweep ran out of time.
+func stopLine(ctx context.Context, again string) string {
+	if ctx.Err() != nil {
+		return "interrupted: lanes still working, run " + again + " again"
+	}
+	return "timeout: lanes still working, run " + again + " again"
 }
 
 func contains(list []string, s string) bool {

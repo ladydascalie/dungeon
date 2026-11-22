@@ -204,14 +204,18 @@ func nextAll(ctx context.Context, h mux, o dispatchOpts, targets []*fleetTarget)
 	digests := make([]digest, len(targets))
 
 	for {
-		// The budget is read before every plan, so no plan starts work the
-		// sweep cannot finish.
+		// The budget and the signal are read before every plan, so no plan
+		// starts work the sweep cannot finish.
 		outOfTime := !o.dryRun && time.Now().After(o.deadline)
+		interrupted := ctx.Err() != nil
 		working := 0
 		for i, t := range targets {
-			if !outOfTime {
+			if !outOfTime && !interrupted {
 				if err := passTarget(ctx, h, o, t, &digests[i]); err != nil {
-					return fd, err
+					if ctx.Err() == nil {
+						return fd, err
+					}
+					interrupted = true
 				}
 			}
 			if workingCount(t.Plan, &t.State) > 0 {
@@ -221,8 +225,8 @@ func nextAll(ctx context.Context, h mux, o dispatchOpts, targets []*fleetTarget)
 		if o.dryRun || working == 0 {
 			break
 		}
-		if outOfTime || time.Now().After(o.deadline) {
-			fmt.Fprintln(o.out, "timeout: lanes still working, run dungeon next --all again")
+		if interrupted || outOfTime || time.Now().After(o.deadline) {
+			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next --all"))
 			break
 		}
 		time.Sleep(o.poll)
@@ -627,22 +631,17 @@ func worktreeOnBranch(path, branch string) bool {
 // landAllCmd lands every encounter and, when two or more merged something,
 // combines them on one branch.
 func landAllCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	fs := newFlagSet("land", stderr)
-	var statePath string
-	o, planPath := dispatchFlags(fs, &statePath)
-	noGate := fs.Bool("no-gate", false, "merge only, do not run the acceptance commands")
-	force := fs.Bool("force", false, "accept a plan edited after dispatch")
-	fs.Bool("all", false, "land every encounter")
-	branch := fs.String("branch", defaultFleetBranch, "the branch that combines the plans")
+	fs, lf := landFlagSet("land", stderr)
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
 	}
 	if len(rest) > 0 {
-		*planPath = rest[0]
+		*lf.planPath = rest[0]
 	}
-	o.skipGate, o.force, o.out = *noGate, *force, stdout
-	flags := fleetOpts{planPath: *planPath, statePath: statePath, stderr: stderr}
+	o := *lf.opts
+	o.skipGate, o.force, o.out = *lf.noGate, *lf.force, stdout
+	flags := fleetOpts{planPath: *lf.planPath, statePath: lf.statePath, stderr: stderr}
 	if msg := flags.refusal(); msg != "" {
 		fmt.Fprintf(stderr, "dungeon: %s\n", msg)
 		return 2
@@ -657,10 +656,10 @@ func landAllCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 			return 2
 		}
 	}
-	if code := fleetLandGuard(load.targets, *branch, stderr); code != 0 {
+	if code := fleetLandGuard(load.targets, *lf.branch, stderr); code != 0 {
 		return code
 	}
-	res, err := landAll(ctx, *o, load.targets, *branch)
+	res, err := landAll(ctx, o, load.targets, *lf.branch)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
@@ -692,41 +691,21 @@ func landAllCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 // to the fleet engine, and a bare land over many encounters names --all before
 // land.go refuses without knowing about it.
 func landOrFleet(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	// The parse decides only which path to take. Anything it cannot read is
-	// land.go's to report, so land.go keeps the real flags and their errors.
-	fs := newFlagSet("land", io.Discard)
-	planPath, _ := planFlags(fs)
-	fs.Bool("no-gate", false, "")
-	fs.Bool("force", false, "")
-	all := fs.Bool("all", false, "")
-	fs.String("branch", "", "")
+	// The router parses with the same flag set the commands use, so a flag it
+	// does not route on cannot make it miss --all.
+	fs, lf := landFlagSet("land", io.Discard)
 	rest, err := parseMixed(fs, args)
 	if err != nil {
+		// Let landCmd report the flag error the operator actually made.
 		return landCmd(ctx, args, stdout, stderr)
 	}
-	if *all {
+	if *lf.all {
 		return landAllCmd(ctx, args, stdout, stderr)
 	}
-	if !planFlagSet(fs) && *planPath == "" && len(rest) == 0 {
+	if !planFlagSet(fs) && *lf.planPath == "" && len(rest) == 0 {
 		if found := discoverPlans(); len(found) > 1 {
 			return refuseAmbiguous(found, stderr)
 		}
 	}
-	// --all=false sent the command here, so land.go must not be asked to parse a
-	// flag it does not have.
-	return landCmd(ctx, withoutAll(args), stdout, stderr)
-}
-
-// withoutAll drops the --all spellings from args. A positional that happens to
-// spell "all" is a plan path and is kept.
-func withoutAll(args []string) []string {
-	out := make([]string, 0, len(args))
-	for _, a := range args {
-		name := strings.TrimLeft(a, "-")
-		if strings.HasPrefix(a, "-") && (name == "all" || strings.HasPrefix(name, "all=")) {
-			continue
-		}
-		out = append(out, a)
-	}
-	return out
+	return landCmd(ctx, args, stdout, stderr)
 }

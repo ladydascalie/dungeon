@@ -2,9 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1041,5 +1045,146 @@ units:
 	}
 	if strings.Contains(stdout, "U2 to w1") {
 		t.Fatalf("one minion takes one unit per pass:\n%s", stdout)
+	}
+}
+
+// F17: land --all keeps --all when a dispatch-level flag is present. The router
+// takes its flags from the same set the command does, so it cannot drop the
+// sweep on a flag it does not know.
+func TestLandAllKeepsAllWithADispatchFlag(t *testing.T) {
+	fleetRoot(t, "one")
+	for _, args := range [][]string{
+		{"land", "--all"},
+		{"land", "--all", "--accept-timeout", "1s"},
+		{"land", "--all", "--mux", "herdr"},
+		{"land", "--all", "--poll", "1s"},
+		{"land", "--all", "--timeout", "5m"},
+		{"land", "--all", "--no-gate"},
+		{"land", "--all=true", "--accept-timeout", "2s"},
+	} {
+		code, stdout, stderr := runCLI(args...)
+		if code != 0 {
+			t.Fatalf("%v exit %d: %s", args, code, stderr)
+		}
+		if !strings.Contains(stdout, "one: nothing to land") {
+			t.Fatalf("%v did not take the sweep path:\n%s", args, stdout)
+		}
+	}
+}
+
+// buildDungeon builds the binary a signal test needs: the in-process run()
+// cannot be signalled, and the finding is about what a real process does.
+func buildDungeon(t *testing.T) string {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("the go tool is needed to build a binary a test can signal")
+	}
+	bin := filepath.Join(t.TempDir(), "dungeon")
+	cmd := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// waitForPid waits for a file a gate writes when it starts.
+func waitForPid(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the gate never started: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// F15: an interrupt must reach the gate. The gate runs in its own process group,
+// so a signal that killed dungeon outright would leave that group alive, writing
+// into the worktree after the sweep is gone.
+func TestAnInterruptStopsTheGateWithTheSweep(t *testing.T) {
+	bin := buildDungeon(t)
+	repo := gitRepo(t)
+	root := t.TempDir()
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+
+	gateDir := t.TempDir()
+	gate := filepath.Join(gateDir, "gate.sh")
+	pidFile := filepath.Join(gateDir, "gate.pid")
+	script := "#!/bin/sh\necho $$ > '" + pidFile + "'\nsleep 1\ntouch a.txt\n"
+	if err := os.WriteFile(gate, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := `encounter: one
+repo: ` + repo + `
+base: main
+minions:
+  - {id: w1, role: worker, worktree: w1}
+units:
+  - id: A
+    minion: w1
+    paths: [a.txt]
+    goal: Touch a.txt.
+    accept: ` + gate + "\n"
+	planPath := filepath.Join(root, ".dungeon", "one", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+
+	cmd := exec.Command(bin, "next", "--all", "--poll", "20ms", "--timeout", "60s")
+	cmd.Dir = root
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	pid := waitForPid(t, pidFile) // the gate is running now
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal the sweep: %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- cmd.Wait() }()
+	select {
+	case <-stopped:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the sweep did not stop after SIGTERM:\n%s", out.String())
+	}
+
+	// The gate must be gone, not merely re-parented.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gate %d survived the interrupt (kill: %v):\n%s", pid, err, out.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	// And it must not write into the worktree after the sweep is dead.
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(worktreePath(repo, "one", "w1"), "a.txt")); err == nil {
+		t.Fatalf("the gate wrote into the worktree after the sweep died:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "interrupted") {
+		t.Fatalf("the sweep should say it was interrupted:\n%s", out.String())
 	}
 }

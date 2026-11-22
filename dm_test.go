@@ -385,3 +385,19 @@ func TestUpTagsTheEncounterWorkspace(t *testing.T) {
 		t.Fatalf("the encounter workspace was not tagged:\n%s", calls)
 	}
 }
+
+// F14: the reap notice goes under the lane's box key, which is the prefix a
+// parent watches, not under the agent name.
+func TestDMMarkReadyToReapPostsUnderTheLaneKey(t *testing.T) {
+	_, log := fakeDM(t)
+	if err := newDM().MarkReadyToReap(t.Context(), laneBoxKey("enc", "w1")); err != nil {
+		t.Fatal(err)
+	}
+	line := callLog(t, log)
+	if !strings.Contains(line, `"action":"msg-post"`) {
+		t.Fatalf("call %q is not a msg-post", line)
+	}
+	if !strings.Contains(line, `"key":"lane/enc/w1"`) {
+		t.Fatalf("msg-post must carry the lane key: %q", line)
+	}
+}

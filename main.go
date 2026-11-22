@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -24,7 +26,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
-	ctx := context.Background()
+	ctx, stopCtx := sweepContext(args[0])
+	defer stopCtx()
+
 	switch args[0] {
 	case "check":
 		return check(args[1:], stdout, stderr)
@@ -66,6 +70,27 @@ func run(args []string, stdout, stderr io.Writer) int {
 		usage(stderr)
 		return 2
 	}
+}
+
+// sweepContext carries the signals an operator sends to stop a sweep, for the
+// commands that run gates. A gate runs in its own process group, so a signal
+// that killed dungeon outright would leave that group alive, writing into the
+// worktree after the sweep is gone. Cancelling the context sends the stop on to
+// the group. Every other command keeps the plain context it always had.
+func sweepContext(name string) (context.Context, context.CancelFunc) {
+	switch name {
+	case "up", "next", "land":
+	default:
+		return context.Background(), func() {}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		// Hand a second signal back to the default handler, so a command that
+		// will not stop can still be killed.
+		stop()
+	}()
+	return ctx, stop
 }
 
 func usage(w io.Writer) {
@@ -129,7 +154,7 @@ func usage(w io.Writer) {
       A plan edited after dispatch is refused unless --force.
 
   dungeon land   [--all [--branch name]] [--no-gate] [--plan path]
-                 [--state path] [--force]
+                 [--state path] [--force] [--accept-timeout 10m]
       Merge the done units into <encounter>/integration in declaration order,
       then run each unit's accept command against the merged result. It never
       touches the base branch and never pushes.
