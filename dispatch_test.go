@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1068,5 +1069,71 @@ func TestAGateThatExitsZeroIsProvenEvenIfItLeavesAChild(t *testing.T) {
 	}
 	if got := st.UnitStatus("A"); got != "done" {
 		t.Fatalf("unit %q, want done: %s", got, st.Units["A"].Note)
+	}
+}
+
+// waitGone blocks until pid is no longer a live process.
+func waitGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for running(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d survived the gate kill", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// An interrupted accept must reach the gate's group and nothing else. The gate
+// is a shell that forks, so the kill has to take the fork with it, and it must
+// not reach a sibling in this test's own group: that is what a wrong pgid, a
+// kill(0) or a kill of the gate's own pid followed by its parent would do. All
+// three leave the caller with no output and a non-zero exit.
+func TestAnInterruptedAcceptKillsOnlyTheGateGroup(t *testing.T) {
+	sibling := exec.Command("sleep", "60")
+	if err := sibling.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sibling.Process.Kill()
+		_, _ = sibling.Process.Wait()
+	})
+
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "gate.pid")
+	childFile := filepath.Join(dir, "child.pid")
+	script := "echo $$ > '" + pidFile + "'\nsleep 60 &\necho $! > '" + childFile + "'\nwait"
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		_, err := acceptCommand(ctx, dir, script)
+		done <- err
+	}()
+
+	gate := waitForPid(t, pidFile)
+	forked := waitForPid(t, childFile)
+	group, err := syscall.Getpgid(gate)
+	if err != nil {
+		t.Fatalf("pgid of the gate %d: %v", gate, err)
+	}
+	if group == syscall.Getpgrp() {
+		t.Fatalf("the gate runs in this test's group %d: a group kill would take the harness", group)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("an interrupted accept reported success")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the accept did not stop after cancel")
+	}
+
+	waitGone(t, gate)
+	waitGone(t, forked)
+	if err := syscall.Kill(sibling.Process.Pid, 0); err != nil {
+		t.Fatalf("the accept killed a process outside the gate's group: %v", err)
 	}
 }

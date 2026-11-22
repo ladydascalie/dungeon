@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1105,6 +1106,58 @@ func waitForPid(t *testing.T, path string) int {
 	}
 }
 
+// ownGroup reports the group whose id is pid, and refuses anything that is not a
+// process alone in a new group. A signal addressed to -pid reaches the group
+// whose id is pid. If the child had not become its own group leader, that id is
+// some other group, and under `go test` it is the test binary's: the SIGTERM
+// below would then kill the harness, the go tool and the gate that ran it, with
+// no output from any of them. That is the shape of the recorded flake.
+func ownGroup(pid int) (int, error) {
+	group, err := syscall.Getpgid(pid)
+	if err != nil {
+		return 0, fmt.Errorf("pgid of %d: %w", pid, err)
+	}
+	if group != pid {
+		return 0, fmt.Errorf("process %d is in group %d, not a group of its own", pid, group)
+	}
+	if mine := syscall.Getpgrp(); group == mine {
+		return 0, fmt.Errorf("process %d is in this test's group %d", pid, mine)
+	}
+	return group, nil
+}
+
+// startOwnGroup starts cmd in a group of its own, proves the group is the
+// child's alone, and returns it. A caller signals -group, never a group it has
+// not checked. Call it once Dir and the output writers are set: it starts the
+// process.
+func startOwnGroup(t *testing.T, cmd *exec.Cmd) int {
+	t.Helper()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	group, err := ownGroup(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("refusing to signal the group: %v", err)
+	}
+	return group
+}
+
+// TestOwnGroupRefusesAChildInTheTestsGroup proves the guard above fails on the
+// bug it exists for. A child started without Setpgid stays in this test's group;
+// signalling -pid would then reach the test binary itself.
+func TestOwnGroupRefusesAChildInTheTestsGroup(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _, _ = cmd.Process.Wait() })
+	if group, err := ownGroup(cmd.Process.Pid); err == nil {
+		t.Fatalf("a child in this test's group %d was accepted as signallable", group)
+	}
+}
+
 // F15: an interrupt must reach the gate. The gate runs in its own process group,
 // so a signal that killed dungeon outright would leave that group alive, writing
 // into the worktree after the sweep is gone.
@@ -1148,15 +1201,12 @@ units:
 
 	cmd := exec.Command(bin, "next", "--all", "--poll", "20ms", "--timeout", "60s")
 	cmd.Dir = root
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	group := startOwnGroup(t, cmd)
 
 	pid := waitForPid(t, pidFile) // the gate is running now
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(-group, syscall.SIGTERM); err != nil {
 		t.Fatalf("signal the sweep: %v", err)
 	}
 	stopped := make(chan error, 1)
@@ -1216,15 +1266,12 @@ func TestAnInterruptedLandDoesNotFabricateGateFailures(t *testing.T) {
 
 	cmd := exec.Command(bin, "land", "--all", "--accept-timeout", "60s")
 	cmd.Dir = root
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	group := startOwnGroup(t, cmd)
 
 	waitForPid(t, pidFile) // a plan's gate is running
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(-group, syscall.SIGTERM); err != nil {
 		t.Fatalf("signal the land: %v", err)
 	}
 	stopped := make(chan error, 1)
@@ -1303,16 +1350,13 @@ func TestAnInterruptedCombinedGateIsNotAFailure(t *testing.T) {
 
 	cmd := exec.Command(bin, "land", "--all", "--accept-timeout", "60s")
 	cmd.Dir = root
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	group := startOwnGroup(t, cmd)
 
 	// Wait until the combined worktree's gate is the one running.
 	waitForFileContains(t, ran, "fleet-integration")
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+	if err := syscall.Kill(-group, syscall.SIGTERM); err != nil {
 		t.Fatalf("signal the land: %v", err)
 	}
 	stopped := make(chan error, 1)

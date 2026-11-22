@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fakeDM installs a dm script on PATH that logs every call and answers the
@@ -247,21 +248,7 @@ func TestDMBackendAgainstRealDM(t *testing.T) {
 		t.Fatalf("dm new: %v\n%s", err, out)
 	}
 	t.Cleanup(func() {
-		filepath.Walk(state, func(p string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() || !strings.HasSuffix(p, ".pid") {
-				return nil
-			}
-			b, err := os.ReadFile(p)
-			if err != nil {
-				return nil
-			}
-			var pid int
-			fmt.Sscanf(string(b), "%d", &pid)
-			if pid > 0 {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-			}
-			return nil
-		})
+		killRecordedDM(state)
 		os.RemoveAll(state)
 	})
 
@@ -332,6 +319,97 @@ func TestDMBackendAgainstRealDM(t *testing.T) {
 		if w.ID == ws {
 			t.Fatalf("workspace %s still listed", ws)
 		}
+	}
+}
+
+// killRecordedDM kills the dm processes a private state directory recorded, and
+// nothing else. A pid file outlives its process: the pid is then free for
+// reuse, and a SIGKILL sent to it kills whatever holds it now. Under load that
+// is another test's process, the go tool, or the shell that ran the gate: a
+// signal nothing can catch, that prints nothing, and that exits non-zero. Read
+// the process before you kill it.
+func killRecordedDM(state string) {
+	filepath.Walk(state, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || !strings.HasSuffix(p, ".pid") {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil
+		}
+		var pid int
+		if _, err := fmt.Sscanf(string(b), "%d", &pid); err != nil || pid <= 0 {
+			return nil
+		}
+		if !isDMProcess(pid) {
+			return nil
+		}
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		return nil
+	})
+}
+
+// running reports whether pid is a live process, not a zombie. A child this
+// process killed stays in the table until it is waited for, so a kill(pid, 0)
+// that succeeds is not proof of life.
+func running(pid int) bool {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	text := string(raw)
+	// The state is the field after the parenthesised command name.
+	end := strings.LastIndex(text, ")")
+	return end >= 0 && end+2 < len(text) && text[end+2] != 'Z'
+}
+
+// isDMProcess reports whether pid is a live dm that leads its own process group.
+// dm starts its server and every pane as a group leader, so a pid reused by
+// anything else fails this, and the cleanup leaves it alone.
+func isDMProcess(pid int) bool {
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil || strings.TrimSpace(string(comm)) != "dm" {
+		return false
+	}
+	group, err := syscall.Getpgid(pid)
+	return err == nil && group == pid
+}
+
+// TestTheDMTestCleanupLeavesAReusedPidAlone proves the guard: a pid file names a
+// process that is not dm, exactly the shape of a reused pid, and the cleanup
+// must not kill it. Without the guard this kills the sibling outright.
+func TestTheDMTestCleanupLeavesAReusedPidAlone(t *testing.T) {
+	sibling := exec.Command("sleep", "60")
+	if err := sibling.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sibling.Process.Kill()
+		_, _ = sibling.Process.Wait()
+	})
+
+	state := t.TempDir()
+	panes := filepath.Join(state, "sessions", "it", "panes")
+	if err := os.MkdirAll(panes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(panes, "w1p1.sock.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", sibling.Process.Pid)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	killRecordedDM(state)
+	// A kill is not visible the instant it is sent. Poll a short window for the
+	// sibling to die, then decide.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for running(sibling.Process.Pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !running(sibling.Process.Pid) {
+		t.Fatalf("the cleanup killed process %d, which it had not checked", sibling.Process.Pid)
 	}
 }
 
