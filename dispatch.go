@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +29,10 @@ type dispatchOpts struct {
 	out           io.Writer
 	parentPane    string
 	backend       string
+	// deadline bounds a whole fleet sweep. An accept command takes what is left
+	// of it rather than its own --accept-timeout, so one slow gate cannot run
+	// the sweep past the timeout it was given.
+	deadline time.Time
 }
 
 // guardPlan refuses a plan edited after dispatch. The hash records what the
@@ -65,14 +71,17 @@ func shortHash(h string) string {
 }
 
 type digest struct {
-	Dispatched []string
-	Done       []string
-	Failed     []string
-	Rejected   []string
-	Unproven   []string
-	Blocked    []string
-	NoLane     []string
-	PlanFix    []string
+	Dispatched  []string
+	Would       []string // a dry run: what a real pass would have dispatched
+	WouldSettle []string // a dry run: what a real pass would have settled
+	WouldBlock  []string // a dry run: what a real pass would have blocked
+	Done        []string
+	Failed      []string
+	Rejected    []string
+	Unproven    []string
+	Blocked     []string
+	NoLane      []string
+	PlanFix     []string
 }
 
 // planFixes names the plan edit a blocked or unproven unit is waiting on, so
@@ -99,7 +108,7 @@ func planFixes(p Plan, st *State, d digest) []string {
 }
 
 func (d digest) empty() bool {
-	return len(d.Dispatched)+len(d.Done)+len(d.Failed)+len(d.Rejected)+len(d.Unproven)+len(d.Blocked)+len(d.NoLane) == 0
+	return len(d.Dispatched)+len(d.Would)+len(d.WouldSettle)+len(d.WouldBlock)+len(d.Done)+len(d.Failed)+len(d.Rejected)+len(d.Unproven)+len(d.Blocked)+len(d.NoLane) == 0
 }
 
 func (d digest) String() string {
@@ -110,6 +119,9 @@ func (d digest) String() string {
 		}
 	}
 	line("dispatched", d.Dispatched)
+	line("would dispatch", d.Would)
+	line("would settle", d.WouldSettle)
+	line("would block", d.WouldBlock)
 	line("done", d.Done)
 	line("failed", d.Failed)
 	line("rejected", d.Rejected)
@@ -129,6 +141,13 @@ func briefPath(planPath, unit string) string {
 
 func reportPath(planPath, unit string) string {
 	return filepath.Join(encounterDir(planPath), "reports", unit+".md")
+}
+
+// laneBoxKey is the session box key for one lane. It carries the encounter, so
+// two encounters that both declare w1 post to two places and one parent
+// watching the lane/ prefix sees both.
+func laneBoxKey(encounter, minion string) string {
+	return "lane/" + encounter + "/" + minion
 }
 
 // minionDir is where a minion reads and runs its accept command. A writer
@@ -322,7 +341,7 @@ func writeBrief(h mux, in briefInput) (string, error) {
 		if boxer, ok := h.(interface {
 			BoxPing(key, message string) string
 		}); ok {
-			ping = boxer.BoxPing("lane/"+m.ID, msg)
+			ping = boxer.BoxPing(laneBoxKey(p.Encounter, m.ID), msg)
 			pingNote = "The parent reads the session box. Do not wait for a reply."
 		} else {
 			ping = h.PingCommand(o.parentPane, msg)
@@ -358,7 +377,8 @@ func dispatchUnit(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State,
 	}
 	text := fmt.Sprintf("Read %s and do it. Write your report to %s.", absBrief, absReport)
 	if o.dryRun {
-		fmt.Fprintf(o.out, "would dispatch %s to %s\n", u.ID, m.ID)
+		// The caller records it in the digest: a line printed here would sit
+		// outside the plan's block, naming no encounter.
 		return nil
 	}
 	// The unit is marked working with its prompt unconfirmed before the prompt
@@ -401,18 +421,77 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 		st.SetUnit(u.ID, "unproven", "no accept command, so nothing can prove it")
 		return "unproven"
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, o.acceptTimeout)
+	cmdCtx, cancel := acceptContext(ctx, o)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", u.Accept)
-	cmd.Dir = minionDir(p, m)
-	out, err := cmd.CombinedOutput()
+	out, err := acceptCommand(cmdCtx, minionDir(p, m), u.Accept)
 	receipt := lastLine(string(out))
 	if err != nil {
+		if acceptCutShort(cmdCtx, o) {
+			// The sweep was interrupted or ran out of time, not the gate. The
+			// unit was not judged, so it stays working and the next sweep
+			// settles it.
+			return "held"
+		}
 		st.SetUnit(u.ID, "rejected", fmt.Sprintf("accept failed: %s (%s)", u.Accept, receipt))
 		return "rejected"
 	}
 	st.SetUnit(u.ID, "done", fmt.Sprintf("accept: %s ok (%s)", u.Accept, receipt))
 	return "done"
+}
+
+// acceptContext bounds one accept command by its own limit and by the sweep's
+// deadline, whichever comes first, so --timeout covers an accept and not just
+// the sleep between passes.
+func acceptContext(ctx context.Context, o dispatchOpts) (context.Context, context.CancelFunc) {
+	limit := time.Now().Add(o.acceptTimeout)
+	if !o.deadline.IsZero() && o.deadline.Before(limit) {
+		limit = o.deadline
+	}
+	return context.WithDeadline(ctx, limit)
+}
+
+// acceptCommand runs one accept command, bounded by cmdCtx. The command gets its
+// own process group, so a gate that forks (go test, make, npm test) is killed
+// with everything it started. Killing only sh leaves a grandchild holding the
+// output pipe, and the caller then waits for that grandchild instead of for the
+// deadline.
+func acceptCommand(cmdCtx context.Context, dir, command string) ([]byte, error) {
+	cmd := exec.CommandContext(cmdCtx, "sh", "-c", command)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		return nil
+	}
+	// A backstop for anything that left the group: waiting on its pipes must not
+	// outlive the deadline by more than this.
+	cmd.WaitDelay = 2 * time.Second
+	out, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 0 {
+		// The gate passed and left a child holding its output. The exit status
+		// is the proof; a process it started is not the gate's verdict.
+		err = nil
+	}
+	return out, err
+}
+
+// acceptCutShort reports whether an accept command was stopped by the caller
+// rather than by failing on its own. An interrupted sweep cancels the context,
+// and a sweep deadline expires it; an accept that runs into its own
+// --accept-timeout is a rejection, not an unfinished sweep.
+func acceptCutShort(cmdCtx context.Context, o dispatchOpts) bool {
+	switch {
+	case errors.Is(cmdCtx.Err(), context.Canceled):
+		return true
+	case errors.Is(cmdCtx.Err(), context.DeadlineExceeded):
+		return !o.deadline.IsZero() && !time.Now().Before(o.deadline)
+	}
+	return false
 }
 
 // settleVerdict proves a reviewer unit by its report, not by a shell command.
@@ -480,6 +559,10 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 		}
 		a, live := agents[st.AgentName(m.ID)]
 		if !live {
+			if o.dryRun {
+				d.WouldBlock = append(d.WouldBlock, u.ID)
+				continue
+			}
 			st.SetUnit(u.ID, "blocked", "minion "+m.ID+" has no live agent")
 			d.Blocked = append(d.Blocked, u.ID)
 			progressed = true
@@ -491,18 +574,26 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 					// The state still says unconfirmed, so the next pass tries
 					// again. Reporting it keeps the failure visible.
 					fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
+				} else if o.dryRun {
+					d.Would = append(d.Would, u.ID+" to "+m.ID)
 				} else {
 					d.Dispatched = append(d.Dispatched, u.ID)
 				}
-				progressed = true
+				progressed = !o.dryRun
 				continue
 			}
 			// A report proves the lane was told its brief, whatever the marker
 			// says, so the unit settles below rather than prompt a second time.
-			st.SetPromptPending(u.ID, false)
+			if !o.dryRun {
+				st.SetPromptPending(u.ID, false)
+			}
 		}
 		switch a.Status {
 		case AgentBlocked:
+			if o.dryRun {
+				d.WouldBlock = append(d.WouldBlock, u.ID)
+				continue
+			}
 			st.SetUnit(u.ID, "blocked", "lane is waiting on you in "+a.Pane)
 			d.Blocked = append(d.Blocked, u.ID)
 			progressed = true
@@ -518,16 +609,23 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 		default:
 			continue
 		}
+		if o.dryRun {
+			// Settling runs the accept command, commits the lane and writes the
+			// unit. A preview says what it would settle and stops there.
+			d.WouldSettle = append(d.WouldSettle, u.ID)
+			continue
+		}
 		switch settle(ctx, o, p, st, u, m) {
 		case "done":
 			StopLoopAfter(p, st, u.ID)
 			PromoteLoopFix(p, st, u.ID)
 			d.Done = append(d.Done, u.ID)
 			if reaper, ok := h.(interface {
-				MarkReadyToReap(ctx context.Context, name string) error
+				MarkReadyToReap(ctx context.Context, key string) error
 			}); ok {
-				if err := reaper.MarkReadyToReap(ctx, st.AgentName(m.ID)); err != nil {
-					fmt.Fprintf(o.out, "could not mark lane %s ready to be reaped: %v\n", st.AgentName(m.ID), err)
+				key := laneBoxKey(p.Encounter, m.ID)
+				if err := reaper.MarkReadyToReap(ctx, key); err != nil {
+					fmt.Fprintf(o.out, "could not mark %s ready to be reaped: %v\n", key, err)
 				}
 			}
 		case "failed":
@@ -536,16 +634,19 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			d.Rejected = append(d.Rejected, u.ID)
 		case "unproven":
 			d.Unproven = append(d.Unproven, u.ID)
+		case "held":
+			// The sweep ran out of time inside the accept command. Nothing is
+			// claimed about the unit: it stays working.
 		default:
 			d.Blocked = append(d.Blocked, u.ID)
 		}
 		progressed = true
 	}
-	if progressed {
+	if progressed && !o.dryRun {
 		SaveState(o.statePath, *st)
 	}
 	d.PlanFix = planFixes(p, st, *d)
-	return progressed
+	return progressed && !o.dryRun
 }
 
 // readyUnits returns the planned units whose deps have all landed. A failed
@@ -648,6 +749,68 @@ func workingCount(p Plan, st *State) int {
 	return n
 }
 
+// step is one pass over one encounter: settle the lanes that stopped, then
+// dispatch every ready unit into the slots the plan has left. It is the whole
+// of one next round, and next and next --all both loop over it, so the dispatch
+// rules have exactly one home.
+//
+// It reports whether the pass changed something. An unreadable fleet is an
+// error: a caller must not guess which lanes are alive.
+func step(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d *digest) (bool, error) {
+	progressed := reconcile(ctx, h, o, p, st, d)
+
+	// Every plan keeps its own cap: a fleet has no shared slot pool.
+	slots := len(p.Minions)
+	if p.Concurrency > 0 {
+		slots = p.Concurrency - workingCount(p, st)
+	}
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return progressed, fmt.Errorf("could not read the fleet: %w", err)
+	}
+	busy := map[string]bool{}
+	for _, u := range p.Units {
+		if st.UnitStatus(u.ID) == "working" {
+			busy[u.Minion] = true
+		}
+	}
+
+	for _, u := range readyUnits(o.planPath, p, st) {
+		if slots <= 0 {
+			break
+		}
+		m, ok := findMinion(p, u.Minion)
+		if !ok || busy[m.ID] {
+			continue
+		}
+		if _, live := agents[st.AgentName(m.ID)]; !live {
+			if !contains(d.NoLane, u.ID) {
+				d.NoLane = append(d.NoLane, u.ID)
+			}
+			continue
+		}
+		if err := dispatchUnit(ctx, h, o, p, st, u, m); err != nil {
+			d.Blocked = append(d.Blocked, u.ID)
+			fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
+			continue
+		}
+		if o.dryRun {
+			// One pass dispatches one unit per minion and stops at the cap, so
+			// the preview takes the same slots a real pass would.
+			d.Would = append(d.Would, u.ID+" to "+m.ID)
+			busy[m.ID] = true
+			slots--
+			continue
+		}
+		busy[m.ID] = true
+		slots--
+		d.Dispatched = append(d.Dispatched, u.ID)
+		progressed = true
+	}
+	d.PlanFix = planFixes(p, st, *d)
+	return progressed, nil
+}
+
 // next drives the encounter until nothing can move: settle what landed,
 // dispatch what is ready, wait, repeat.
 func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest, error) {
@@ -658,62 +821,35 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 	deadline := time.Now().Add(o.timeout)
 
 	for {
-		reconcile(ctx, h, o, p, st, &d)
-
-		slots := len(p.Minions)
-		if p.Concurrency > 0 {
-			slots = p.Concurrency - workingCount(p, st)
-		}
-		agents, err := h.Agents(ctx)
-		if err != nil {
-			return d, fmt.Errorf("could not read the fleet: %w", err)
-		}
-		busy := map[string]bool{}
-		for _, u := range p.Units {
-			if st.UnitStatus(u.ID) == "working" {
-				busy[u.Minion] = true
-			}
-		}
-
-		for _, u := range readyUnits(o.planPath, p, st) {
-			if slots <= 0 {
+		if _, err := step(ctx, h, o, p, st, &d); err != nil {
+			if ctx.Err() != nil {
+				fmt.Fprintln(o.out, stopLine(ctx, "dungeon next"))
 				break
 			}
-			m, ok := findMinion(p, u.Minion)
-			if !ok || busy[m.ID] {
-				continue
-			}
-			if _, live := agents[st.AgentName(m.ID)]; !live {
-				if !contains(d.NoLane, u.ID) {
-					d.NoLane = append(d.NoLane, u.ID)
-				}
-				continue
-			}
-			if err := dispatchUnit(ctx, h, o, p, st, u, m); err != nil {
-				d.Blocked = append(d.Blocked, u.ID)
-				fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
-				continue
-			}
-			if !o.dryRun {
-				busy[m.ID] = true
-				slots--
-				d.Dispatched = append(d.Dispatched, u.ID)
-			}
+			return d, err
 		}
-
 		if o.dryRun {
 			return d, nil
 		}
 		if workingCount(p, st) == 0 {
 			break
 		}
-		if time.Now().After(deadline) {
-			fmt.Fprintln(o.out, "timeout: lanes still working, run dungeon next again")
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			fmt.Fprintln(o.out, stopLine(ctx, "dungeon next"))
 			break
 		}
 		time.Sleep(o.poll)
 	}
 	return d, nil
+}
+
+// stopLine says why a loop stopped while lanes are still working: the operator
+// interrupted it, or the sweep ran out of time.
+func stopLine(ctx context.Context, again string) string {
+	if ctx.Err() != nil {
+		return "interrupted: lanes still working, run " + again + " again"
+	}
+	return "timeout: lanes still working, run " + again + " again"
 }
 
 func contains(list []string, s string) bool {

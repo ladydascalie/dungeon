@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // commitIn writes a file in a worktree and commits it, the way a lane would.
@@ -376,5 +377,33 @@ func TestPassingReviewPromotesItsFixForLand(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// F18: a plan's own gate is bounded by --accept-timeout, and a gate that forks
+// dies with its children instead of holding the land open past the limit.
+func TestLandGateIsBoundedAndKillsItsChildren(t *testing.T) {
+	planPath, _, repo := landSetup(t)
+	commitIn(t, worktreePath(repo, "enc", "w1"), "a.txt", "one\n", "A")
+	plan := strings.Replace(twoWorkerPlan, "accept: test -f a.txt", "accept: sleep 4; true", 1)
+	plan = strings.Replace(plan, "%REPO%", repo, 1)
+	if err := os.WriteFile(planPath, []byte(plan), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", planPath); code != 0 {
+		t.Fatalf("set: %s", stderr)
+	}
+
+	start := time.Now()
+	code, stdout, stderr := runCLI("land", "--force", "--plan", planPath, "--accept-timeout", "1s")
+	elapsed := time.Since(start)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "FAIL A: sleep 4; true") {
+		t.Fatalf("the gate must fail the unit:\n%s", stdout)
+	}
+	if elapsed >= 2500*time.Millisecond {
+		t.Fatalf("the gate ran for %v under a 1s --accept-timeout: its children must die with it", elapsed)
 	}
 }

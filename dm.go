@@ -324,14 +324,14 @@ func (d dm) CloseWorkspace(ctx context.Context, ws string) error {
 	return ignoreGone(d.call(ctx, map[string]any{"action": "close-workspace", "target": ws}, nil), "no workspace")
 }
 
-// MarkReadyToReap posts a done message to the lane's key, so the multiplexer
-// can actively find and reap the pane once the lane is no longer useful.
-func (d dm) MarkReadyToReap(ctx context.Context, name string) error {
+// MarkReadyToReap posts a done message under the lane's box key, so a parent
+// watching the lane/ prefix sees a lane it no longer needs, and the
+// multiplexer can reap the pane.
+func (d dm) MarkReadyToReap(ctx context.Context, key string) error {
 	return d.call(ctx, map[string]any{
 		"action": "msg-post",
-		"target": name,
 		"res": map[string]any{
-			"key":   name,
+			"key":   key,
 			"state": "done",
 			"msg":   "lane done, ready to be reaped",
 		},

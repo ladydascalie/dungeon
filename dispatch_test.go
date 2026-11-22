@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -58,8 +59,13 @@ case "$1 $2" in
     echo '{"result":{"type":"ok"}}' ;;
   "agent prompt")
     if [ "$FAKE_REPORT" = "1" ]; then
-      mkdir -p "$FAKE_ENCOUNTER/reports"
-      echo "did the thing" > "$FAKE_ENCOUNTER/reports/$FAKE_UNIT.md"
+      # The prompt names the brief, so any encounter's lane can answer: the
+      # report sits in the encounter directory, one level above briefs/.
+      brief=$(printf '%s' "$4" | sed -n 's/^Read \(.*\) and do it\..*$/\1/p')
+      unit=$(basename "$brief" .md)
+      enc=$(dirname "$(dirname "$brief")")
+      mkdir -p "$enc/reports"
+      echo "did the thing" > "$enc/reports/$unit.md"
     fi
     echo '{"result":{"type":"ok"}}' ;;
 esac
@@ -998,5 +1004,69 @@ func TestPlanFixesNameThePlanEdit(t *testing.T) {
 	}
 	if !strings.Contains(fixes[1], "A2: widen the unit's paths") {
 		t.Fatalf("blocked hint %q", fixes[1])
+	}
+}
+
+// reapSpy wraps a mux and records the key the reap notice was posted under.
+type reapSpy struct {
+	mux
+	key string
+}
+
+func (r *reapSpy) MarkReadyToReap(ctx context.Context, key string) error {
+	r.key = key
+	return nil
+}
+
+// F14: a settled lane tells the multiplexer it can be reaped under the lane's
+// box key, so a parent watching the lane/ prefix sees it.
+func TestReconcileMarksTheLaneReadyToReapUnderItsKey(t *testing.T) {
+	p, o, st, _ := reconcileFixture(t, "w1:idle\n")
+	if err := os.MkdirAll(lanePath(p, "w1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	report := reportPath(o.planPath, "A")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("did it\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spy := &reapSpy{mux: newHerdr()}
+	reconcile(t.Context(), spy, o, p, st, &digest{})
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done: %s", got, st.Units["A"].Note)
+	}
+	if want := laneBoxKey(p.Encounter, "w1"); spy.key != want {
+		t.Fatalf("reap notice key %q, want %q", spy.key, want)
+	}
+}
+
+// F16: a gate is proven by its exit status. One that exits 0 and leaves a child
+// holding its output still passed, even though the wait is bounded.
+func TestAGateThatExitsZeroIsProvenEvenIfItLeavesAChild(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	plan := strings.Replace(planFor(repo), "accept: true", "accept: (sleep 3; touch leak.txt) & true", 1)
+	planPath, statePath, _ := encounter(t, repo, plan)
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "30s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "done: A") {
+		t.Fatalf("a gate that exited 0 must be proven:\n%s", stdout)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done: %s", got, st.Units["A"].Note)
 	}
 }

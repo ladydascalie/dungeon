@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,9 @@ type landResult struct {
 	Gate     []gateResult
 	Conflict string
 	Reason   string
+	// Held is set when a gate was cut short by an interrupt rather than failing
+	// on its own. Nothing is claimed about that unit, so no gate is recorded.
+	Held bool
 }
 
 type gateResult struct {
@@ -156,11 +160,19 @@ func land(ctx context.Context, o dispatchOpts, p Plan, st *State) (landResult, e
 		if o.skipGate || u.Accept == "" {
 			continue
 		}
-		cmdCtx, cancel := context.WithTimeout(ctx, o.acceptTimeout)
-		cmd := exec.CommandContext(cmdCtx, "sh", "-c", u.Accept)
-		cmd.Dir = res.Worktree
-		out, err := cmd.CombinedOutput()
+		cmdCtx, cancel := acceptContext(ctx, o)
+		out, err := acceptCommand(cmdCtx, res.Worktree, u.Accept)
+		// The cause must be read before cancel, or every failed gate would look
+		// like an interrupted one.
+		held := err != nil && acceptCutShort(cmdCtx, o)
 		cancel()
+		if held {
+			// The operator interrupted the sweep and the gate was killed with
+			// it. That is not a failed gate: nothing is judged and the sweep
+			// stops where it is.
+			res.Held = true
+			break
+		}
 		res.Gate = append(res.Gate, gateResult{
 			Unit: u.ID, Command: u.Accept, OK: err == nil, Receipt: lastLine(string(out)),
 		})
@@ -195,37 +207,66 @@ func firstLine(s string) string {
 	return truncate(strings.TrimSpace(s), 80)
 }
 
+// landFlags is every flag land takes. One builder feeds the router, landCmd and
+// landAllCmd: a router that keeps its own, narrower copy silently drops --all
+// as soon as any flag it does not know is present, which is the drift this
+// builder exists to remove.
+type landFlags struct {
+	opts      *dispatchOpts
+	planPath  *string
+	statePath string
+	noGate    *bool
+	force     *bool
+	all       *bool
+	branch    *string
+}
+
+func landFlagSet(name string, stderr io.Writer) (*flag.FlagSet, *landFlags) {
+	fs := newFlagSet(name, stderr)
+	lf := &landFlags{}
+	lf.opts, lf.planPath = dispatchFlags(fs, &lf.statePath)
+	lf.noGate = fs.Bool("no-gate", false, "merge only, do not run the acceptance commands")
+	lf.force = fs.Bool("force", false, "accept a plan edited after dispatch")
+	lf.all = fs.Bool("all", false, "land every encounter")
+	lf.branch = fs.String("branch", defaultFleetBranch, "the branch that combines the plans, with --all")
+	return fs, lf
+}
+
 func landCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	fs := newFlagSet("land", stderr)
-	var statePath string
-	o, planPath := dispatchFlags(fs, &statePath)
-	noGate := fs.Bool("no-gate", false, "merge only, do not run the acceptance commands")
-	force := fs.Bool("force", false, "accept a plan edited after dispatch")
+	fs, lf := landFlagSet("land", stderr)
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
 	}
 	if len(rest) > 0 {
-		*planPath = rest[0]
+		*lf.planPath = rest[0]
 	}
-	p, code := loadPlanFor(fs, planPath, stderr)
+	if *lf.all {
+		// The router sends a sweep to landAllCmd. Reaching here with --all means
+		// something routed wrong: hand it back rather than ignore the flag and
+		// land one plan as if that was what was asked.
+		return landAllCmd(ctx, args, stdout, stderr)
+	}
+	p, code := loadPlanFor(fs, lf.planPath, stderr)
 	if code != 0 {
 		return code
 	}
+	statePath := lf.statePath
 	if statePath == "" {
-		statePath = StatePath(*planPath)
+		statePath = StatePath(*lf.planPath)
 	}
 	st, err := LoadState(statePath)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
 	}
-	o.planPath, o.statePath, o.out, o.skipGate, o.force = *planPath, statePath, stdout, *noGate, *force
+	o := *lf.opts
+	o.planPath, o.statePath, o.out, o.skipGate, o.force = *lf.planPath, statePath, stdout, *lf.noGate, *lf.force
 	if code := o.guardPlan(&st, stderr); code != 0 {
 		return code
 	}
 
-	res, err := land(ctx, *o, p, &st)
+	res, err := land(ctx, o, p, &st)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
