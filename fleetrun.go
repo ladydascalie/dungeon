@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -21,13 +22,14 @@ import (
 // defaultFleetBranch is the branch land --all combines the plans on.
 const defaultFleetBranch = "fleet/integration"
 
-// fleetTarget is one encounter in a sweep: its plan, its state, and where both
-// live. A sweep is a list of targets, never a merged plan.
+// fleetTarget is one encounter in a sweep: its plan, its state, where both live,
+// and the hash of the plan as it is now.
 type fleetTarget struct {
 	PlanPath  string
 	StatePath string
 	Plan      Plan
 	State     State
+	PlanHash  string
 }
 
 func (t *fleetTarget) encounter() string { return t.Plan.Encounter }
@@ -51,22 +53,45 @@ func (f fleetOpts) refusal() string {
 	return ""
 }
 
-// fleetTargets loads every encounter and applies the same guards the
-// single-plan path applies: the plan must parse and validate, the state must
-// hold this encounter, and the plan must not have changed since dispatch unless
-// force accepts the edit. A plan that fails a guard is printed as skipped and
-// left out, because a fleet is never dispatched from a half-loaded state.
-func fleetTargets(force bool, out io.Writer) []*fleetTarget {
-	var targets []*fleetTarget
+// fleetLoad is what loading a fleet found. duplicate stops the whole sweep,
+// because two plan files that claim one encounter name would share one worktree,
+// one branch and one box key.
+type fleetLoad struct {
+	targets   []*fleetTarget
+	total     int
+	skipped   int
+	duplicate string
+}
+
+// loadFleet loads every encounter and applies the same guards the single-plan
+// path applies: the plan must parse and validate, the state must hold this
+// encounter, and the plan must not have changed since dispatch unless force
+// accepts the edit. A plan that fails a guard is printed as skipped and left
+// out, because a fleet is never dispatched from a half-loaded state.
+//
+// Loading writes nothing. Looking at a fleet must not arm the edit guard, create
+// a state file or reorder discovery.
+func loadFleet(force bool, out io.Writer) fleetLoad {
+	var load fleetLoad
+	seen := map[string]string{}
 	for _, e := range discoverPlans() {
+		load.total++
 		t, reason := loadFleetTarget(e.Path, force)
 		if reason != "" {
 			fmt.Fprintf(out, "skipped %s: %s\n", shortPath(e.Path), reason)
+			load.skipped++
 			continue
 		}
-		targets = append(targets, t)
+		if first, ok := seen[t.encounter()]; ok {
+			load.duplicate = fmt.Sprintf(
+				"two plan files declare encounter %q: %s and %s; an encounter is one worktree, one branch and one box key, so rename one",
+				t.encounter(), shortPath(first), shortPath(e.Path))
+			return load
+		}
+		seen[t.encounter()] = e.Path
+		load.targets = append(load.targets, t)
 	}
-	return targets
+	return load
 }
 
 // loadFleetTarget loads one encounter. It returns the reason it was left out
@@ -95,22 +120,48 @@ func loadFleetTarget(planPath string, force bool) (*fleetTarget, string) {
 		return nil, err.Error()
 	}
 	if st.PlanHash != "" && st.PlanHash != h && !force {
-		return nil, fmt.Sprintf("plan changed since dispatch (%s, dispatched %s); re-run dungeon up --all, or pass --force",
+		return nil, fmt.Sprintf("plan changed since dispatch (%s, dispatched %s); re-run dungeon up, or pass --force",
 			shortHash(h), shortHash(st.PlanHash))
 	}
-	if st.PlanHash != h {
-		st.PlanHash = h
-		if err := SaveState(statePath, st); err != nil {
-			return nil, err.Error()
+	return &fleetTarget{PlanPath: planPath, StatePath: statePath, Plan: p, State: st, PlanHash: h}, ""
+}
+
+// recordPlanHash writes the hash a --force accepted. Only the commands that
+// dispatch, or that are told to force, call it: arming the edit guard is a
+// decision, not a side effect of describing the fleet.
+func recordPlanHash(targets []*fleetTarget) error {
+	for _, t := range targets {
+		if t.State.PlanHash == t.PlanHash {
+			continue
+		}
+		t.State.PlanHash = t.PlanHash
+		if err := SaveState(t.StatePath, t.State); err != nil {
+			return err
 		}
 	}
-	return &fleetTarget{PlanPath: planPath, StatePath: statePath, Plan: p, State: st}, ""
+	return nil
 }
 
 // noTargets refuses an empty sweep: a sweep of nothing could not run.
 func noTargets(stderr io.Writer) int {
 	fmt.Fprintln(stderr, "dungeon: no encounter to sweep: nothing under .dungeon parses and validates")
 	return 2
+}
+
+// skippedSummary says how much of the fleet the sweep left out, so a scripted
+// fleet dispatch does not silently lose an encounter.
+func skippedSummary(out io.Writer, load fleetLoad) {
+	if load.skipped > 0 {
+		fmt.Fprintf(out, "%d of %d encounters skipped\n", load.skipped, load.total)
+	}
+}
+
+// skippedCode is 1 when plans were left out of a sweep that otherwise ran.
+func skippedCode(skipped int) int {
+	if skipped > 0 {
+		return 1
+	}
+	return 0
 }
 
 // fleetDigest is one block per plan, in discovery order. Each block carries the
@@ -143,35 +194,24 @@ func resultLines(s string) []string {
 
 // nextAll drives every target until no target has a working unit. One mux, one
 // deadline and one poll cover the whole sweep: a fleet does not get one timeout
-// per plan.
+// per plan, and the deadline bounds the accept commands too, not just the sleep
+// between passes.
 func nextAll(ctx context.Context, h mux, o dispatchOpts, targets []*fleetTarget) (fleetDigest, error) {
 	var fd fleetDigest
 	if o.parentPane == "" {
 		o.parentPane = h.SelfPane(ctx)
 	}
-	deadline := time.Now().Add(o.timeout)
+	o.deadline = time.Now().Add(o.timeout)
 	digests := make([]digest, len(targets))
 
 	for {
+		// The budget is read before every plan, so no plan starts work the
+		// sweep cannot finish.
+		outOfTime := !o.dryRun && time.Now().After(o.deadline)
 		working := 0
 		for i, t := range targets {
-			to := o
-			to.planPath, to.statePath = t.PlanPath, t.StatePath
-			before, err := json.Marshal(t.State)
-			if err != nil {
-				return fd, err
-			}
-			if _, err := step(ctx, h, to, t.Plan, &t.State, &digests[i]); err != nil {
-				return fd, err
-			}
-			// A state that moved is written as soon as its plan's pass ends, so
-			// a crash mid-sweep loses nothing.
-			after, err := json.Marshal(t.State)
-			if err != nil {
-				return fd, err
-			}
-			if !bytes.Equal(before, after) {
-				if err := SaveState(t.StatePath, t.State); err != nil {
+			if !outOfTime {
+				if err := passTarget(ctx, h, o, t, &digests[i]); err != nil {
 					return fd, err
 				}
 			}
@@ -182,7 +222,7 @@ func nextAll(ctx context.Context, h mux, o dispatchOpts, targets []*fleetTarget)
 		if o.dryRun || working == 0 {
 			break
 		}
-		if time.Now().After(deadline) {
+		if outOfTime || time.Now().After(o.deadline) {
 			fmt.Fprintln(o.out, "timeout: lanes still working, run dungeon next --all again")
 			break
 		}
@@ -195,6 +235,28 @@ func nextAll(ctx context.Context, h mux, o dispatchOpts, targets []*fleetTarget)
 	return fd, nil
 }
 
+// passTarget runs one sweep pass over one plan and writes its state the moment
+// it changed, so a crash mid-sweep loses nothing.
+func passTarget(ctx context.Context, h mux, o dispatchOpts, t *fleetTarget, d *digest) error {
+	to := o
+	to.planPath, to.statePath = t.PlanPath, t.StatePath
+	before, err := json.Marshal(t.State)
+	if err != nil {
+		return err
+	}
+	if _, err := step(ctx, h, to, t.Plan, &t.State, d); err != nil {
+		return err
+	}
+	after, err := json.Marshal(t.State)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(before, after) {
+		return nil
+	}
+	return SaveState(t.StatePath, t.State)
+}
+
 // nextAllCmd sweeps every encounter. The mux is opened once for the whole
 // sweep, not once per plan.
 func nextAllCmd(ctx context.Context, o dispatchOpts, flags fleetOpts) int {
@@ -202,22 +264,43 @@ func nextAllCmd(ctx context.Context, o dispatchOpts, flags fleetOpts) int {
 		fmt.Fprintf(flags.stderr, "dungeon: %s\n", msg)
 		return 2
 	}
-	targets := fleetTargets(o.force, o.out)
-	if len(targets) == 0 {
-		return noTargets(flags.stderr)
+	load, code := sweepTargets(o.force, o.out, flags.stderr)
+	if code != 0 {
+		return code
+	}
+	if o.force {
+		if err := recordPlanHash(load.targets); err != nil {
+			fmt.Fprintf(flags.stderr, "dungeon: %v\n", err)
+			return 2
+		}
 	}
 	h, err := openMux(ctx, o.backend)
 	if err != nil {
 		fmt.Fprintf(flags.stderr, "dungeon: %v\n", err)
 		return 2
 	}
-	d, err := nextAll(ctx, h, o, targets)
+	d, err := nextAll(ctx, h, o, load.targets)
 	if err != nil {
 		fmt.Fprintf(flags.stderr, "dungeon: %v\n", err)
 		return 2
 	}
 	fmt.Fprint(o.out, d)
-	return 0
+	skippedSummary(o.out, load)
+	return skippedCode(load.skipped)
+}
+
+// sweepTargets loads the fleet and turns a refusal into the exit code the
+// operator gets. Every fleet command starts here.
+func sweepTargets(force bool, out, stderr io.Writer) (fleetLoad, int) {
+	load := loadFleet(force, out)
+	if load.duplicate != "" {
+		fmt.Fprintf(stderr, "dungeon: %s\n", load.duplicate)
+		return load, 2
+	}
+	if len(load.targets) == 0 {
+		return load, noTargets(stderr)
+	}
+	return load, 0
 }
 
 // upAllInput is one up --all: the dispatch options, the flags it refuses, and
@@ -236,9 +319,9 @@ func upAllCmd(ctx context.Context, in upAllInput) int {
 		fmt.Fprintf(in.flags.stderr, "dungeon: %s\n", msg)
 		return 2
 	}
-	targets := fleetTargets(in.opts.force, in.opts.out)
-	if len(targets) == 0 {
-		return noTargets(in.flags.stderr)
+	load, code := sweepTargets(in.opts.force, in.opts.out, in.flags.stderr)
+	if code != 0 {
+		return code
 	}
 	h, err := openMux(ctx, in.opts.backend)
 	if err != nil {
@@ -246,7 +329,7 @@ func upAllCmd(ctx context.Context, in upAllInput) int {
 		return 2
 	}
 	failed := false
-	for _, t := range targets {
+	for _, t := range load.targets {
 		res, err := spawnMinions(ctx, h, spawnInput{
 			planPath: t.PlanPath, plan: t.Plan, state: &t.State, split: in.split, out: in.opts.out,
 		})
@@ -254,6 +337,9 @@ func upAllCmd(ctx context.Context, in upAllInput) int {
 			fmt.Fprintf(in.flags.stderr, "dungeon: %s: %v\n", t.encounter(), err)
 			return 2
 		}
+		// The hash is recorded at spawn, as up does: the lanes were told this
+		// plan, so this is what an edit after dispatch is measured against.
+		t.State.PlanHash = t.PlanHash
 		if err := SaveState(t.StatePath, t.State); err != nil {
 			fmt.Fprintf(in.flags.stderr, "dungeon: %v\n", err)
 			return 2
@@ -263,33 +349,59 @@ func upAllCmd(ctx context.Context, in upAllInput) int {
 			failed = true
 		}
 	}
-	if in.noDispatch || failed {
-		return 0
+	if !in.noDispatch && !failed {
+		d, err := nextAll(ctx, h, in.opts, load.targets)
+		if err != nil {
+			fmt.Fprintf(in.flags.stderr, "dungeon: %v\n", err)
+			return 2
+		}
+		fmt.Fprint(in.opts.out, d)
 	}
-	d, err := nextAll(ctx, h, in.opts, targets)
-	if err != nil {
-		fmt.Fprintf(in.flags.stderr, "dungeon: %v\n", err)
-		return 2
-	}
-	fmt.Fprint(in.opts.out, d)
-	return 0
+	skippedSummary(in.opts.out, load)
+	return skippedCode(load.skipped)
 }
 
 // fleetLand is what one land --all did: one result per plan, and the combined
 // branch when two or more plans put work on it.
 type fleetLand struct {
-	Plans    []fleetLandPlan
-	Branch   string
-	Worktree string
-	Merged   []string
-	Gate     []gateResult
-	Conflict string
-	Reason   string
+	Plans     []fleetLandPlan
+	NotLanded []string
+	Branch    string
+	Worktree  string
+	Merged    []string
+	Gate      []gateResult
+	Conflict  string
+	Reason    string
 }
 
 type fleetLandPlan struct {
 	Encounter string
 	Result    landResult
+}
+
+// good reports whether the combined branch may be called proven: it exists, no
+// conflict stopped it, and every gate passed on it.
+func (r fleetLand) good() bool {
+	if r.Branch == "" || r.Conflict != "" || len(r.NotLanded) > 0 {
+		return false
+	}
+	for _, g := range r.Gate {
+		if !g.OK {
+			return false
+		}
+	}
+	return true
+}
+
+// failedGates names the units whose accept failed on the combined tree.
+func (r fleetLand) failedGates() []string {
+	var out []string
+	for _, g := range r.Gate {
+		if !g.OK {
+			out = append(out, g.Unit)
+		}
+	}
+	return out
 }
 
 func (r fleetLand) String() string {
@@ -298,6 +410,9 @@ func (r fleetLand) String() string {
 		for _, line := range resultLines(p.Result.String()) {
 			fmt.Fprintf(&b, "%s: %s\n", p.Encounter, line)
 		}
+	}
+	if len(r.NotLanded) > 0 {
+		fmt.Fprintf(&b, "did not land: %s\n", strings.Join(r.NotLanded, " "))
 	}
 	if r.Conflict != "" {
 		fmt.Fprintf(&b, "conflict landing %s on %s: %s\n", r.Conflict, r.Branch, r.Reason)
@@ -316,6 +431,11 @@ func (r fleetLand) String() string {
 		}
 		fmt.Fprintf(&b, "  %s %s: %s (%s)\n", mark, g.Unit, g.Command, g.Receipt)
 	}
+	// A branch whose gate failed is on disk and holds the failing unit. It is
+	// never reported the way a proven one is.
+	if failed := r.failedGates(); len(failed) > 0 {
+		fmt.Fprintf(&b, "%s is not good: %s failed on the combined tree\n", r.Branch, strings.Join(failed, " "))
+	}
 	return b.String()
 }
 
@@ -333,12 +453,14 @@ type fleetSource struct {
 // merged something on one branch, in sorted plan-path order so the combined
 // branch is reproducible, and runs every merged unit's accept against it.
 //
-// A plan that conflicted or whose gate failed stops the sweep before the
-// combined branch: half a plan on the fleet branch would be a lie about what
-// the fleet proved.
+// Every plan is landed even when an earlier one fails: each plan's land stands
+// on its own. The combined branch is withheld when any plan conflicted or failed
+// its own gate, because half a fleet on one branch would be a lie about what the
+// fleet proved.
 func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch string) (fleetLand, error) {
 	var res fleetLand
 	var sources []fleetSource
+	withheld := false
 	for _, t := range targets {
 		to := o
 		to.planPath, to.statePath = t.PlanPath, t.StatePath
@@ -350,10 +472,13 @@ func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch
 			return res, err
 		}
 		res.Plans = append(res.Plans, fleetLandPlan{Encounter: t.encounter(), Result: r})
-		if r.Conflict != "" || !gatesPassed(r) {
-			return res, nil
-		}
-		if len(r.Merged) > 0 {
+		switch {
+		case r.Conflict != "" || !gatesPassed(r):
+			withheld = true
+			if len(r.Merged) > 0 || r.Conflict != "" {
+				res.NotLanded = append(res.NotLanded, t.encounter())
+			}
+		case len(r.Merged) > 0:
 			sources = append(sources, fleetSource{
 				Encounter: t.encounter(),
 				PlanPath:  t.PlanPath,
@@ -363,7 +488,7 @@ func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch
 			})
 		}
 	}
-	if len(sources) < 2 {
+	if withheld || len(sources) < 2 {
 		// One plan's integration branch is the whole result, so there is
 		// nothing to combine and nothing new to prove.
 		return res, nil
@@ -400,7 +525,7 @@ func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch
 				if !ok || u.Accept == "" {
 					continue
 				}
-				cmdCtx, cancel := context.WithTimeout(ctx, o.acceptTimeout)
+				cmdCtx, cancel := acceptContext(ctx, o)
 				cmd := exec.CommandContext(cmdCtx, "sh", "-c", u.Accept)
 				cmd.Dir = res.Worktree
 				out, err := cmd.CombinedOutput()
@@ -435,7 +560,8 @@ func branchWorktreePath(repo, branch string) string {
 
 // fleetLandGuard refuses a sweep land cannot honour: land merges branches in one
 // checkout, so every plan must share one repo root and one base, and the
-// combined branch must not be a plan's own integration branch.
+// combined branch must not be a branch a plan already owns, nor land on a
+// worktree that holds another branch.
 func fleetLandGuard(targets []*fleetTarget, branch string, stderr io.Writer) int {
 	first := targets[0]
 	for _, t := range targets[1:] {
@@ -453,8 +579,27 @@ func fleetLandGuard(targets []*fleetTarget, branch string, stderr io.Writer) int
 		}
 	}
 	for _, t := range targets {
-		if branch == t.Plan.Encounter+"/integration" {
+		switch {
+		case branch == t.encounter()+"/integration":
 			fmt.Fprintf(stderr, "dungeon: --branch %s is %s's own integration branch\n", branch, t.encounter())
+			fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name the combined branch something else")
+			return 2
+		}
+		for _, m := range t.Plan.Minions {
+			if branch == t.encounter()+"/"+m.ID {
+				fmt.Fprintf(stderr, "dungeon: --branch %s is %s's lane branch\n", branch, m.ID)
+				fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name the combined branch something else")
+				return 2
+			}
+		}
+	}
+	// The combined worktree must be empty or already on this branch. Merging
+	// into a lane's worktree would put another plan's work on a live branch.
+	path := branchWorktreePath(first.Plan.Repo, branch)
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		head, err := gitRun(path, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil || head != branch {
+			fmt.Fprintf(stderr, "dungeon: %s is a worktree of branch %s, so %s cannot go there\n", path, head, branch)
 			fmt.Fprintln(stderr, "dungeon: pass --branch <name> to name the combined branch something else")
 			return 2
 		}
@@ -485,71 +630,86 @@ func landAllCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintf(stderr, "dungeon: %s\n", msg)
 		return 2
 	}
-	targets := fleetTargets(o.force, stdout)
-	if len(targets) == 0 {
-		return noTargets(stderr)
-	}
-	if code := fleetLandGuard(targets, *branch, stderr); code != 0 {
+	load, code := sweepTargets(o.force, stdout, stderr)
+	if code != 0 {
 		return code
 	}
-	res, err := landAll(ctx, *o, targets, *branch)
+	if o.force {
+		if err := recordPlanHash(load.targets); err != nil {
+			fmt.Fprintf(stderr, "dungeon: %v\n", err)
+			return 2
+		}
+	}
+	if code := fleetLandGuard(load.targets, *branch, stderr); code != 0 {
+		return code
+	}
+	res, err := landAll(ctx, *o, load.targets, *branch)
 	if err != nil {
 		fmt.Fprintf(stderr, "dungeon: %v\n", err)
 		return 2
 	}
 	fmt.Fprint(stdout, res)
-	if res.Branch != "" && res.Conflict == "" {
+	skippedSummary(stdout, load)
+	if res.good() {
 		abs, _ := filepath.Abs(res.Worktree)
 		fmt.Fprintf(stdout, "\nthe branch is local. nothing was pushed. inspect it at %s\n", abs)
 	}
-	if res.Conflict != "" {
+	if !res.good() && (res.Conflict != "" || len(res.NotLanded) > 0 || len(res.failedGates()) > 0) {
 		return 1
 	}
-	for _, p := range res.Plans {
-		if p.Result.Conflict != "" || !gatesPassed(p.Result) {
-			return 1
+	if !res.good() {
+		// Nothing combined: the plan gates before it decide.
+		for _, p := range res.Plans {
+			if p.Result.Conflict != "" {
+				return 1
+			}
+			if !gatesPassed(p.Result) {
+				return 1
+			}
 		}
 	}
-	for _, g := range res.Gate {
-		if !g.OK {
-			return 1
-		}
-	}
-	return 0
+	return skippedCode(load.skipped)
 }
 
 // landOrFleet keeps land.go in charge of the single-plan path: land --all goes
 // to the fleet engine, and a bare land over many encounters names --all before
 // land.go refuses without knowing about it.
 func landOrFleet(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	// The parse here only decides which path to take. Anything it cannot read
-	// is left to land.go, which owns the real flags and their errors.
+	// The parse decides only which path to take. Anything it cannot read is
+	// land.go's to report, so land.go keeps the real flags and their errors.
 	fs := newFlagSet("land", io.Discard)
 	planPath, _ := planFlags(fs)
 	fs.Bool("no-gate", false, "")
 	fs.Bool("force", false, "")
-	fs.Bool("all", false, "")
+	all := fs.Bool("all", false, "")
 	fs.String("branch", "", "")
 	rest, err := parseMixed(fs, args)
-	if err == nil && hasFlag(args, "all") {
+	if err != nil {
+		return landCmd(ctx, args, stdout, stderr)
+	}
+	if *all {
 		return landAllCmd(ctx, args, stdout, stderr)
 	}
-	if err == nil && !planFlagSet(fs) && *planPath == "" && len(rest) == 0 {
+	if !planFlagSet(fs) && *planPath == "" && len(rest) == 0 {
 		if found := discoverPlans(); len(found) > 1 {
 			return refuseAmbiguous(found, stderr)
 		}
 	}
-	return landCmd(ctx, args, stdout, stderr)
+	// --all=false sent the command here, so land.go must not be asked to parse a
+	// flag it does not have.
+	return landCmd(ctx, withoutAll(args), stdout, stderr)
 }
 
-// hasFlag reports whether the exact token --name is among args. A flag that
-// carries a value is never mistaken for one that does not.
-func hasFlag(args []string, name string) bool {
-	want := "--" + name
+// withoutAll drops the --all spellings from args. A positional that happens to
+// spell "all" is a plan path and is kept.
+func withoutAll(args []string) []string {
+	out := make([]string, 0, len(args))
 	for _, a := range args {
-		if a == want {
-			return true
+		name := strings.TrimLeft(a, "-")
+		if strings.HasPrefix(a, "-") && (name == "all" || strings.HasPrefix(name, "all=")) {
+			continue
 		}
+		out = append(out, a)
 	}
-	return false
+	return out
 }

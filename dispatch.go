@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +28,10 @@ type dispatchOpts struct {
 	out           io.Writer
 	parentPane    string
 	backend       string
+	// deadline bounds a whole fleet sweep. An accept command takes what is left
+	// of it rather than its own --accept-timeout, so one slow gate cannot run
+	// the sweep past the timeout it was given.
+	deadline time.Time
 }
 
 // guardPlan refuses a plan edited after dispatch. The hash records what the
@@ -66,6 +71,7 @@ func shortHash(h string) string {
 
 type digest struct {
 	Dispatched []string
+	Would      []string // a dry run: what a real pass would have dispatched
 	Done       []string
 	Failed     []string
 	Rejected   []string
@@ -99,7 +105,7 @@ func planFixes(p Plan, st *State, d digest) []string {
 }
 
 func (d digest) empty() bool {
-	return len(d.Dispatched)+len(d.Done)+len(d.Failed)+len(d.Rejected)+len(d.Unproven)+len(d.Blocked)+len(d.NoLane) == 0
+	return len(d.Dispatched)+len(d.Would)+len(d.Done)+len(d.Failed)+len(d.Rejected)+len(d.Unproven)+len(d.Blocked)+len(d.NoLane) == 0
 }
 
 func (d digest) String() string {
@@ -110,6 +116,7 @@ func (d digest) String() string {
 		}
 	}
 	line("dispatched", d.Dispatched)
+	line("would dispatch", d.Would)
 	line("done", d.Done)
 	line("failed", d.Failed)
 	line("rejected", d.Rejected)
@@ -360,7 +367,8 @@ func dispatchUnit(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State,
 	}
 	text := fmt.Sprintf("Read %s and do it. Write your report to %s.", absBrief, absReport)
 	if o.dryRun {
-		fmt.Fprintf(o.out, "would dispatch %s to %s\n", u.ID, m.ID)
+		// The caller records it in the digest: a line printed here would sit
+		// outside the plan's block, naming no encounter.
 		return nil
 	}
 	// The unit is marked working with its prompt unconfirmed before the prompt
@@ -403,18 +411,44 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 		st.SetUnit(u.ID, "unproven", "no accept command, so nothing can prove it")
 		return "unproven"
 	}
-	cmdCtx, cancel := context.WithTimeout(ctx, o.acceptTimeout)
+	cmdCtx, cancel := acceptContext(ctx, o)
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, "sh", "-c", u.Accept)
 	cmd.Dir = minionDir(p, m)
 	out, err := cmd.CombinedOutput()
 	receipt := lastLine(string(out))
 	if err != nil {
+		if acceptTimedOut(cmdCtx, o) {
+			// The sweep ran out of time, not the accept command. The unit stays
+			// working and the next sweep settles it.
+			return "held"
+		}
 		st.SetUnit(u.ID, "rejected", fmt.Sprintf("accept failed: %s (%s)", u.Accept, receipt))
 		return "rejected"
 	}
 	st.SetUnit(u.ID, "done", fmt.Sprintf("accept: %s ok (%s)", u.Accept, receipt))
 	return "done"
+}
+
+// acceptContext bounds one accept command by its own limit and by the sweep's
+// deadline, whichever comes first, so --timeout covers an accept and not just
+// the sleep between passes.
+func acceptContext(ctx context.Context, o dispatchOpts) (context.Context, context.CancelFunc) {
+	limit := time.Now().Add(o.acceptTimeout)
+	if !o.deadline.IsZero() && o.deadline.Before(limit) {
+		limit = o.deadline
+	}
+	return context.WithDeadline(ctx, limit)
+}
+
+// acceptTimedOut reports whether an accept command was cut short by the sweep's
+// deadline. An accept that ran into its own limit is a rejection, not an
+// unfinished sweep.
+func acceptTimedOut(cmdCtx context.Context, o dispatchOpts) bool {
+	if o.deadline.IsZero() || !errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	return !time.Now().Before(o.deadline)
 }
 
 // settleVerdict proves a reviewer unit by its report, not by a shell command.
@@ -538,6 +572,9 @@ func reconcile(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d 
 			d.Rejected = append(d.Rejected, u.ID)
 		case "unproven":
 			d.Unproven = append(d.Unproven, u.ID)
+		case "held":
+			// The sweep ran out of time inside the accept command. Nothing is
+			// claimed about the unit: it stays working.
 		default:
 			d.Blocked = append(d.Blocked, u.ID)
 		}
@@ -695,12 +732,14 @@ func step(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d *dige
 			fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
 			continue
 		}
-		if !o.dryRun {
-			busy[m.ID] = true
-			slots--
-			d.Dispatched = append(d.Dispatched, u.ID)
-			progressed = true
+		if o.dryRun {
+			d.Would = append(d.Would, u.ID+" to "+m.ID)
+			continue
 		}
+		busy[m.ID] = true
+		slots--
+		d.Dispatched = append(d.Dispatched, u.ID)
+		progressed = true
 	}
 	d.PlanFix = planFixes(p, st, *d)
 	return progressed, nil
