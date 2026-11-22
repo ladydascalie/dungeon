@@ -492,20 +492,25 @@ loses nothing.
 
 A plan that does not parse or does not validate is printed as
 `skipped <path>: <first finding>` and left out of the sweep. The sweep runs over
-the rest. No target after filtering is exit 2.
+the rest. No target after filtering is exit 2. A sweep that left a plan out
+exits 1 and says `N of M encounters skipped`.
 
 `--timeout` covers the whole sweep, not each plan. An expiry prints
-`timeout: lanes still working, run dungeon next --all again`.
+`timeout: lanes still working, run dungeon next --all again`. An interrupt prints
+`interrupted: lanes still working, run dungeon next --all again` and exits 2.
+The unit it cut short stays `working`, because a gate cut short was never judged.
 
 `up --all` loads the targets once, spawns every plan's minions, one workspace
 per encounter as `up` does today, then runs one `next --all` round unless
 `--no-dispatch` is passed or a spawn failed.
 
-`land --all` lands each plan exactly as `land` does. It refuses with exit 2 when
-the targets do not share one repo root and one base, because land merges
-branches in one checkout. It refuses with exit 2 when `--branch` is a plan's own
-`<encounter>/integration`, so an encounter named `fleet` needs an explicit
-`--branch`.
+`land --all` lands each plan exactly as `land` does, and `--accept-timeout`
+bounds every gate it runs, the per-plan one and the combined one. It refuses
+with exit 2 when the targets do not share one repo root and one base, because
+land merges branches in one checkout. It also refuses `--branch` when it is a
+base branch, a plan's own `<encounter>/integration`, a lane branch, a branch
+that already exists, or a worktree that holds another branch, so an encounter
+named `fleet` needs an explicit `--branch`.
 
 When two or more plans merged something, `land --all` cuts `--branch` (default
 `fleet/integration`) from the base, merges each plan's integration branch in

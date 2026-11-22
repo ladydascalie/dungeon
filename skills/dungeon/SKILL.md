@@ -334,6 +334,14 @@ A plan that does not validate is skipped and named as
 `skipped <path>: <first finding>`. The sweep runs over the rest. No target left
 after filtering is exit 2.
 
+A sweep that left a plan out exits 1 and says `N of M encounters skipped`, so a
+scripted dispatch cannot lose an encounter in silence.
+
+`--dry-run` predicts one pass per plan: `would dispatch`, `would settle` and
+`would block` sit inside each plan's block. It settles no lane, runs no accept
+and writes no state. The brief is the one file it still writes, as `next`
+always has. Single-plan `next --dry-run` behaves the same way.
+
 Each plan keeps its own concurrency and its own state. A state that moved is
 saved as its plan's pass ends, so a crash loses nothing.
 
@@ -342,15 +350,23 @@ encounter. With one encounter no flag is needed.
 
 `land --all` merges the fleet's integration branches under one gate. It lands
 each plan as `land` does, then cuts `--branch` (default `fleet/integration`) and
-re-runs every merged unit's accept against the combined tree. It refuses with
-exit 2 when the plans do not share one repo root and one base, because land
-merges in one checkout. It refuses with exit 2 when `--branch` is a plan's own
-`<encounter>/integration`, so an encounter named `fleet` needs `--branch`. A
+re-runs every merged unit's accept against the combined tree. `--accept-timeout`
+bounds every gate it runs, the per-plan one and the combined one.
+
+It refuses with exit 2 when the plans do not share one repo root and one base,
+because land merges in one checkout. It also refuses `--branch` when it is a
+base branch, a plan's own `<encounter>/integration`, a lane branch, a branch
+that already exists, or a worktree holding another branch: each of those would
+move someone's work. An encounter named `fleet` therefore needs `--branch`. A
 conflict names the plan and stops, and the fleet branch is never reported as
 good.
 
 `up --all` spawns every plan's minions, one workspace per encounter, then runs
 one `next --all` round unless `--no-dispatch` is passed or a spawn failed.
+
+An interrupted sweep prints `interrupted: lanes still working, run dungeon next
+--all again` and exits 2. Nothing is claimed: the unit stays `working`, because
+a gate cut short was never judged. Run the sweep again.
 
 ## Supervise at short intervals
 
@@ -514,6 +530,13 @@ The lane owns the fix. Your moves, in order:
   fix the plan with the operator watching.
 - Merge by hand. `dungeon land` merges in declaration order and re-runs every
   accept against the merged result.
+- Merge a fleet by hand either. `dungeon land --all` lands every encounter and
+  merges their integration branches under one combined gate. Two `git merge`
+  calls in a parent are a fleet land that nothing re-proved.
+- Fan one blocking `up` or `next` out per encounter from a parent's tool layer.
+  That is the workaround `up --all` and `next --all` replace: the parent goes
+  blind for the whole sweep and cannot answer a blocked lane until the last
+  call returns.
 - Push. `land` leaves a local branch and says so. The operator decides what
   reaches the default branch.
 - Claim a unit passed. Quote the accept command and its exit code.
