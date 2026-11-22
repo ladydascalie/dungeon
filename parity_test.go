@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,12 +45,19 @@ var parityLegs = []parityLeg{
 	},
 }
 
+// paritySocket names this process's parity server. A fixed name was shared by
+// every suite on the machine: one run's kill-server tore down another run's
+// server mid-test, and a socket file a dead server left behind made the next
+// start report "no server running". Both are silent in anything but the tmux
+// error, and both were reproduced by running TestParity twice in a row.
+var paritySocket = fmt.Sprintf("dungeon-parity-%d-%08x", os.Getpid(), rand.Uint32())
+
 // parityTmux starts the private tmux server this leg owns. The keepalive
 // session makes start-server persist, and carries no agent option, so the fleet
 // is still empty. The server never sees the operator's config or socket.
 func parityTmux(t *testing.T) mux {
 	t.Helper()
-	const socket = "dungeon-parity"
+	socket := paritySocket
 	raw := func(args ...string) {
 		t.Helper()
 		full := append([]string{"-L", socket, "-f", "/dev/null"}, args...)
@@ -57,11 +66,28 @@ func parityTmux(t *testing.T) mux {
 		}
 	}
 	_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+	// tmux leaves the socket file behind after kill-server, and a start that
+	// finds it can lose the race and never bind. The name is ours alone, so
+	// remove it before binding.
+	_ = os.Remove(tmuxSocketPath(socket))
 	raw("new-session", "-d", "-s", "parity-keepalive")
 	t.Cleanup(func() {
 		_ = exec.Command("tmux", "-L", socket, "kill-server").Run()
+		_ = os.Remove(tmuxSocketPath(socket))
 	})
 	return tmux{socket: socket}
+}
+
+// TestTheParityServerIsThisProcesses pins the invariant behind the reproduction:
+// a server name that does not carry this pid is a server some other suite can
+// kill, and a socket file this process did not leave behind can be stale.
+func TestTheParityServerIsThisProcesses(t *testing.T) {
+	if !strings.Contains(paritySocket, strconv.Itoa(os.Getpid())) {
+		t.Fatalf("parity server %q is not scoped to process %d", paritySocket, os.Getpid())
+	}
+	if paritySocket == testSocket {
+		t.Fatalf("parity server %q is the other tests' server: parity's kill-server would break them", paritySocket)
+	}
 }
 
 // parityTmuxReady polls a fresh pane until its foreground command is a shell

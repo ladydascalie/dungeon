@@ -21,12 +21,15 @@ import (
 var testSocket = fmt.Sprintf("dungeon-test-%d-%08x", os.Getpid(), rand.Uint32())
 
 // socketPath is the file tmux binds for testSocket.
-func socketPath() string {
+func socketPath() string { return tmuxSocketPath(testSocket) }
+
+// tmuxSocketPath is the file tmux binds for a server named name.
+func tmuxSocketPath(name string) string {
 	dir := os.Getenv("TMUX_TMPDIR")
 	if dir == "" {
 		dir = "/tmp"
 	}
-	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), testSocket)
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), name)
 }
 
 // tmuxTest gives a test its own tmux server. It never talks to the operator's
