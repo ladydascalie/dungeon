@@ -1259,3 +1259,88 @@ func TestAnInterruptedLandDoesNotFabricateGateFailures(t *testing.T) {
 		}
 	}
 }
+
+// waitForFileContains waits until path holds substr: a gate that logs where it
+// runs tells the test which gate is now running.
+func waitForFileContains(t *testing.T, path, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(raw), substr) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never held %q: %v\n%s", path, substr, err, raw)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// F20: an interrupt during the combined gate must not fabricate a failure. That
+// gate was not judged, the fleet branch is left where it is, and the land says
+// it was interrupted instead of calling the branch not good.
+func TestAnInterruptedCombinedGateIsNotAFailure(t *testing.T) {
+	bin := buildDungeon(t)
+	gateDir := t.TempDir()
+	gate := filepath.Join(gateDir, "gate.sh")
+	ran := filepath.Join(gateDir, "ran.log")
+	script := "#!/bin/sh\necho \"$PWD\" >> '" + ran + "'\nsleep 2\ntrue\n"
+	if err := os.WriteFile(gate, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root, repo := fleetRootWith(t, map[string]string{"%ACCEPT%": gate}, "one", "two")
+
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	for _, name := range []string{"one", "two"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	cmd := exec.Command(bin, "land", "--all", "--accept-timeout", "60s")
+	cmd.Dir = root
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait until the combined worktree's gate is the one running.
+	waitForFileContains(t, ran, "fleet-integration")
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal the land: %v", err)
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- cmd.Wait() }()
+	select {
+	case err := <-stopped:
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+			t.Fatalf("land exit %v, want 2:\n%s", err, out.String())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the land did not stop after SIGTERM:\n%s", out.String())
+	}
+
+	text := out.String()
+	if strings.Contains(text, "FAIL") {
+		t.Fatalf("a gate cut by the interrupt is not a failed gate:\n%s", text)
+	}
+	if strings.Contains(text, "is not good") {
+		t.Fatalf("an unjudged gate must not condemn the fleet branch:\n%s", text)
+	}
+	if !strings.Contains(text, "interrupted: lanes still working, run dungeon land --all again") {
+		t.Fatalf("the land must say it was interrupted:\n%s", text)
+	}
+	if !strings.Contains(text, "fleet branch fleet/integration") {
+		t.Fatalf("the fleet branch stays where it is:\n%s", text)
+	}
+	if _, err := gitRun(repo, "rev-parse", "--verify", "refs/heads/fleet/integration"); err != nil {
+		t.Fatalf("the fleet branch must be left in place: %v", err)
+	}
+}

@@ -539,7 +539,17 @@ func landAll(ctx context.Context, o dispatchOpts, targets []*fleetTarget, branch
 				}
 				cmdCtx, cancel := acceptContext(ctx, o)
 				out, err := acceptCommand(cmdCtx, res.Worktree, u.Accept)
+				// The cause must be read before cancel, or every failed gate
+				// would look like an interrupted one.
+				held := err != nil && acceptCutShort(cmdCtx, o)
 				cancel()
+				if held {
+					// The operator interrupted the sweep and this gate was killed
+					// with it. It was not judged, so it is not a failed gate, and
+					// no further gate runs under a cancelled context.
+					res.Held = true
+					return res, nil
+				}
 				res.Gate = append(res.Gate, gateResult{
 					Unit: src.Encounter + "/" + id, Command: u.Accept, OK: err == nil, Receipt: lastLine(string(out)),
 				})
