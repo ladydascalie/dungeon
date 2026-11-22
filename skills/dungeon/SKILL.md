@@ -208,9 +208,10 @@ Good units, in the order that matters:
   reading.
 
 More than one encounter under `.dungeon`: `dungeon view` opens a picker, and
-every other command needs `--plan`. Extra encounters live at
-`.dungeon/<name>/plan.yaml` with their own state, briefs and reports. A lane
-passes the full path; there is no picker outside the view.
+every other command needs `--plan`, or `--all` on `up`, `next` and `land` to
+sweep every encounter. Extra encounters live at `.dungeon/<name>/plan.yaml` with
+their own state, briefs and reports. A lane passes the full path; there is no
+picker outside the view.
 
 ## Loops
 
@@ -307,6 +308,50 @@ they are equal shares of the window.
 `dungeon up` is idempotent too. A minion whose agent is live is left alone, so a
 second `up` resumes the fleet instead of doubling it.
 
+## The fleet loop
+
+A fleet of encounters is one sweep, not N blocking calls. Do not run one
+blocking `up` or `next` per encounter.
+
+```bash
+dungeon up --all      # spawn every encounter, then one next --all round
+dungeon next --all    # settle and dispatch every encounter, one mux, one deadline
+dungeon fleet         # watch every encounter in one window
+```
+
+Run `dungeon next --all` until it says nothing to do. Keep `dungeon fleet` open
+and watch the `lane/` prefix at short intervals between rounds.
+
+A parent must not fan blocking `dungeon up` or `dungeon next` calls, one per
+encounter, out of its tool layer. The parent is blind for the whole sweep and
+cannot answer a blocked lane until the last call returns. One `--all` call
+drives every encounter in one loop and its digest names every blocked lane.
+
+One `next --all` call's `--timeout` covers the whole sweep, not each plan. The
+watch discipline still applies between rounds: set it short, then call again.
+
+A plan that does not validate is skipped and named as
+`skipped <path>: <first finding>`. The sweep runs over the rest. No target left
+after filtering is exit 2.
+
+Each plan keeps its own concurrency and its own state. A state that moved is
+saved as its plan's pass ends, so a crash loses nothing.
+
+`--all` with `--plan` or `--state` is exit 2: a sweep keeps one state per
+encounter. With one encounter no flag is needed.
+
+`land --all` merges the fleet's integration branches under one gate. It lands
+each plan as `land` does, then cuts `--branch` (default `fleet/integration`) and
+re-runs every merged unit's accept against the combined tree. It refuses with
+exit 2 when the plans do not share one repo root and one base, because land
+merges in one checkout. It refuses with exit 2 when `--branch` is a plan's own
+`<encounter>/integration`, so an encounter named `fleet` needs `--branch`. A
+conflict names the plan and stops, and the fleet branch is never reported as
+good.
+
+`up --all` spawns every plan's minions, one workspace per encounter, then runs
+one `next --all` round unless `--no-dispatch` is passed or a spawn failed.
+
 ## Supervise at short intervals
 
 A lane in a doomloop burns context and tokens fast. A five minute wait is five
@@ -367,8 +412,11 @@ Two minion ids that collide after truncation fail `dungeon check` with
 Every brief tells the lane to write its report and then post to the session box:
 
 ```sh
-dm msg post --key lane/<minion> --state done --msg "<unit>: <minion> finished. Report: <path>"
+dm msg post --key lane/<encounter>/<minion> --state done --msg "<unit>: <minion> finished. Report: <path>"
 ```
+
+The key carries the encounter, because two encounters in one fleet may both
+declare `w1`. Watch the `lane/` prefix and you see both.
 
 The parent reads the box. It does not type into your pane.
 
