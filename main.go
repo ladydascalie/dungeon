@@ -53,7 +53,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "next":
 		return nextCmd(ctx, args[1:], stdout, stderr)
 	case "land":
-		return landCmd(ctx, args[1:], stdout, stderr)
+		return landOrFleet(ctx, args[1:], stdout, stderr)
 	case "down":
 		return downCmd(ctx, args[1:], stdout, stderr)
 	case "clear":
@@ -109,23 +109,35 @@ func usage(w io.Writer) {
       Keep a file with a unit: a brief, a report, a handoff note. It shows up
       in the detail pane of dungeon view.
 
-  dungeon up     [--no-dispatch] [--split right|down|left|up]
+  dungeon up     [--all] [--no-dispatch] [--split right|down|left|up]
       Spawn a workspace, a tab per role and a pane per minion. Panes grow to the
       right by default, because tall and narrow beats short and wide; the plan's
       split: field or --split changes it. A writer gets its own worktree on
       <encounter>/<minion>. Worktrunk cuts it when wt is installed, plain git
       otherwise. Idempotent: a live minion is left alone.
+      --all spawns every encounter under .dungeon, one workspace each, then runs
+      one next --all round.
       The brief tells each lane to ping the dispatching pane when it stops.
 
-  dungeon next   [--timeout 30m] [--accept-timeout 10m] [--poll 2s] [--dry-run] [--force]
+  dungeon next   [--all] [--timeout 30m] [--accept-timeout 10m] [--poll 2s]
+                 [--dry-run] [--force]
       Settle the lanes that stopped, dispatch the units whose deps landed, and
       wait. The only path to done is the unit's accept command exiting 0.
+      --all sweeps every encounter with one mux, one deadline and one poll, and
+      prints one block per plan. A plan that does not validate is named and
+      skipped, and the rest of the sweep still runs.
       A plan edited after dispatch is refused unless --force.
 
-  dungeon land   [--no-gate] [--plan path] [--state path] [--force]
+  dungeon land   [--all [--branch name]] [--no-gate] [--plan path]
+                 [--state path] [--force]
       Merge the done units into <encounter>/integration in declaration order,
       then run each unit's accept command against the merged result. It never
       touches the base branch and never pushes.
+      --all lands every encounter. When two or more plans merged something it
+      cuts --branch (default fleet/integration) from the base, merges each
+      plan's integration branch in plan-path order, and runs every merged unit's
+      accept against the combined tree. Every plan must share one repo root and
+      one base.
       A plan edited after dispatch is refused unless --force.
 
   dungeon down   [--force] [--plan path] [--state path]
@@ -165,7 +177,8 @@ func usage(w io.Writer) {
 
 The plan defaults to `+defaultPlanPath+`. Extra encounters live at
 .dungeon/<name>/plan.yaml, each with its own state. With more than one,
-view opens a picker and the other commands require --plan.
+view opens a picker and the other commands require --plan, or --all on up, next
+and land to sweep every encounter.
 
 `)
 }
@@ -405,6 +418,12 @@ func planFlagSet(fs *flag.FlagSet) bool {
 // positional wins. With exactly one encounter under .dungeon it uses that one;
 // with none it leaves the default path so the error names it.
 func resolvePlan(fs *flag.FlagSet, planPath *string, stderr io.Writer) int {
+	return resolvePlanIn(fs, planPath, stderr, false)
+}
+
+// resolvePlanIn is resolvePlan for a command that also takes --all: its refusal
+// names the sweep, because sweeping is the other way to answer the question.
+func resolvePlanIn(fs *flag.FlagSet, planPath *string, stderr io.Writer, fleet bool) int {
 	if planFlagSet(fs) || *planPath != "" {
 		return 0
 	}
@@ -417,9 +436,21 @@ func resolvePlan(fs *flag.FlagSet, planPath *string, stderr io.Writer) int {
 		*planPath = found[0].Path
 		return 0
 	}
+	if fleet {
+		return refuseAmbiguous(found, stderr)
+	}
 	fmt.Fprintf(stderr, "dungeon: %d encounters under %s\n", len(found), shortPath(filepath.Dir(found[0].Path)))
 	printEncounters(stderr, found)
 	fmt.Fprintln(stderr, "pass --plan to choose one")
+	return 2
+}
+
+// refuseAmbiguous is the refusal a command with --all prints: the encounters,
+// then both ways out of the choice.
+func refuseAmbiguous(found []Encounter, stderr io.Writer) int {
+	fmt.Fprintf(stderr, "dungeon: %d encounters under %s\n", len(found), shortPath(filepath.Dir(found[0].Path)))
+	printEncounters(stderr, found)
+	fmt.Fprintln(stderr, "pass --plan to choose one, or --all to sweep every encounter")
 	return 2
 }
 
@@ -467,6 +498,7 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	o, planPath := dispatchFlags(fs, &statePath)
 	noDispatch := fs.Bool("no-dispatch", false, "spawn the minions and stop")
 	split := fs.String("split", "", "override the plan's split direction: right, down, left, up")
+	all := fs.Bool("all", false, "spawn every encounter")
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -474,7 +506,19 @@ func upCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(rest) > 0 {
 		*planPath = rest[0]
 	}
-	p, code := loadPlanFor(fs, planPath, stderr)
+	o.out = stdout
+	if *all {
+		return upAllCmd(ctx, upAllInput{
+			opts:       *o,
+			flags:      fleetOpts{planPath: *planPath, statePath: statePath, stderr: stderr},
+			split:      *split,
+			noDispatch: *noDispatch,
+		})
+	}
+	if code := resolvePlanIn(fs, planPath, stderr, true); code != 0 {
+		return code
+	}
+	p, code := loadValidPlan(*planPath, stderr)
 	if code != 0 {
 		return code
 	}
@@ -537,6 +581,7 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	o, planPath := dispatchFlags(fs, &statePath)
 	dryRun := fs.Bool("dry-run", false, "say what would be dispatched")
 	force := fs.Bool("force", false, "accept a plan edited after dispatch")
+	all := fs.Bool("all", false, "sweep every encounter")
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
@@ -544,7 +589,14 @@ func nextCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(rest) > 0 {
 		*planPath = rest[0]
 	}
-	p, code := loadPlanFor(fs, planPath, stderr)
+	o.out, o.dryRun, o.force = stdout, *dryRun, *force
+	if *all {
+		return nextAllCmd(ctx, *o, fleetOpts{planPath: *planPath, statePath: statePath, stderr: stderr})
+	}
+	if code := resolvePlanIn(fs, planPath, stderr, true); code != 0 {
+		return code
+	}
+	p, code := loadValidPlan(*planPath, stderr)
 	if code != 0 {
 		return code
 	}

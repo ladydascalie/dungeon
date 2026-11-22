@@ -58,8 +58,13 @@ case "$1 $2" in
     echo '{"result":{"type":"ok"}}' ;;
   "agent prompt")
     if [ "$FAKE_REPORT" = "1" ]; then
-      mkdir -p "$FAKE_ENCOUNTER/reports"
-      echo "did the thing" > "$FAKE_ENCOUNTER/reports/$FAKE_UNIT.md"
+      # The prompt names the brief, so any encounter's lane can answer: the
+      # report sits in the encounter directory, one level above briefs/.
+      brief=$(printf '%s' "$4" | sed -n 's/^Read \(.*\) and do it\..*$/\1/p')
+      unit=$(basename "$brief" .md)
+      enc=$(dirname "$(dirname "$brief")")
+      mkdir -p "$enc/reports"
+      echo "did the thing" > "$enc/reports/$unit.md"
     fi
     echo '{"result":{"type":"ok"}}' ;;
 esac

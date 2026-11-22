@@ -322,7 +322,9 @@ func writeBrief(h mux, in briefInput) (string, error) {
 		if boxer, ok := h.(interface {
 			BoxPing(key, message string) string
 		}); ok {
-			ping = boxer.BoxPing("lane/"+m.ID, msg)
+			// The key carries the encounter: two encounters in one fleet both
+			// declare w1, and one bare lane/w1 would put both in one box slot.
+			ping = boxer.BoxPing("lane/"+p.Encounter+"/"+m.ID, msg)
 			pingNote = "The parent reads the session box. Do not wait for a reply."
 		} else {
 			ping = h.PingCommand(o.parentPane, msg)
@@ -648,6 +650,62 @@ func workingCount(p Plan, st *State) int {
 	return n
 }
 
+// step is one pass over one encounter: settle the lanes that stopped, then
+// dispatch every ready unit into the slots the plan has left. It is the whole
+// of one next round, and next and next --all both loop over it, so the dispatch
+// rules have exactly one home.
+//
+// It reports whether the pass changed something. An unreadable fleet is an
+// error: a caller must not guess which lanes are alive.
+func step(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State, d *digest) (bool, error) {
+	progressed := reconcile(ctx, h, o, p, st, d)
+
+	// Every plan keeps its own cap: a fleet has no shared slot pool.
+	slots := len(p.Minions)
+	if p.Concurrency > 0 {
+		slots = p.Concurrency - workingCount(p, st)
+	}
+	agents, err := h.Agents(ctx)
+	if err != nil {
+		return progressed, fmt.Errorf("could not read the fleet: %w", err)
+	}
+	busy := map[string]bool{}
+	for _, u := range p.Units {
+		if st.UnitStatus(u.ID) == "working" {
+			busy[u.Minion] = true
+		}
+	}
+
+	for _, u := range readyUnits(o.planPath, p, st) {
+		if slots <= 0 {
+			break
+		}
+		m, ok := findMinion(p, u.Minion)
+		if !ok || busy[m.ID] {
+			continue
+		}
+		if _, live := agents[st.AgentName(m.ID)]; !live {
+			if !contains(d.NoLane, u.ID) {
+				d.NoLane = append(d.NoLane, u.ID)
+			}
+			continue
+		}
+		if err := dispatchUnit(ctx, h, o, p, st, u, m); err != nil {
+			d.Blocked = append(d.Blocked, u.ID)
+			fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
+			continue
+		}
+		if !o.dryRun {
+			busy[m.ID] = true
+			slots--
+			d.Dispatched = append(d.Dispatched, u.ID)
+			progressed = true
+		}
+	}
+	d.PlanFix = planFixes(p, st, *d)
+	return progressed, nil
+}
+
 // next drives the encounter until nothing can move: settle what landed,
 // dispatch what is ready, wait, repeat.
 func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest, error) {
@@ -658,49 +716,9 @@ func next(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State) (digest
 	deadline := time.Now().Add(o.timeout)
 
 	for {
-		reconcile(ctx, h, o, p, st, &d)
-
-		slots := len(p.Minions)
-		if p.Concurrency > 0 {
-			slots = p.Concurrency - workingCount(p, st)
+		if _, err := step(ctx, h, o, p, st, &d); err != nil {
+			return d, err
 		}
-		agents, err := h.Agents(ctx)
-		if err != nil {
-			return d, fmt.Errorf("could not read the fleet: %w", err)
-		}
-		busy := map[string]bool{}
-		for _, u := range p.Units {
-			if st.UnitStatus(u.ID) == "working" {
-				busy[u.Minion] = true
-			}
-		}
-
-		for _, u := range readyUnits(o.planPath, p, st) {
-			if slots <= 0 {
-				break
-			}
-			m, ok := findMinion(p, u.Minion)
-			if !ok || busy[m.ID] {
-				continue
-			}
-			if _, live := agents[st.AgentName(m.ID)]; !live {
-				if !contains(d.NoLane, u.ID) {
-					d.NoLane = append(d.NoLane, u.ID)
-				}
-				continue
-			}
-			if err := dispatchUnit(ctx, h, o, p, st, u, m); err != nil {
-				d.Blocked = append(d.Blocked, u.ID)
-				fmt.Fprintf(o.out, "%s: %v\n", u.ID, err)
-				continue
-			}
-			if !o.dryRun {
-				busy[m.ID] = true
-				slots--
-				d.Dispatched = append(d.Dispatched, u.ID)
-			}
-		}
-
 		if o.dryRun {
 			return d, nil
 		}
