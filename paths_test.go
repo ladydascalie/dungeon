@@ -123,15 +123,18 @@ func TestUnderEncounterAcceptsAnySpelling(t *testing.T) {
 	}
 }
 
-// commitAll stages everything and commits in repo with a fixed identity, so a
-// porcelain test starts from a clean worktree.
+// commitAll stages everything and commits in repo with a fixed identity and a
+// fixed date, so a porcelain test starts from a clean worktree and every commit
+// it makes has its own hash.
 func commitAll(t *testing.T, repo, message string) {
 	t.Helper()
 	for _, args := range [][]string{{"add", "-A"}, {"commit", "-q", "-m", message}} {
 		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
 		cmd.Env = append(os.Environ(),
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+			"GIT_AUTHOR_DATE=2000-01-01T00:00:00 +0000",
+			"GIT_COMMITTER_DATE=2000-01-01T00:00:00 +0000")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
@@ -348,5 +351,78 @@ func TestCommittedThenModifiedFileIsNamedOnce(t *testing.T) {
 	note := st.Units["A"].Note
 	if got := strings.Count(note, "fleet.go"); got != 1 {
 		t.Fatalf("note %q names fleet.go %d times, want once", note, got)
+	}
+}
+
+// A merge commit's difference from its first parent also names every file the
+// other branch changed, which the lane did not write. Only what differs from
+// every parent is the lane's resolution, so a file that arrived untouched is
+// never counted as written.
+func TestMergeWritesOnlyTheResolution(t *testing.T) {
+	repo := gitRepo(t)
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		"GIT_AUTHOR_DATE=2000-01-01T00:00:00 +0000",
+		"GIT_COMMITTER_DATE=2000-01-01T00:00:00 +0000")
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = env
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("a.txt", "base\n")
+	write("b.txt", "base\n")
+	commitAll(t, repo, "files")
+	head, err := gitRun(repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	git("checkout", "-q", "-b", "dep/landed")
+	write("a.txt", "dep\n")
+	write("b.txt", "dep\n")
+	commitAll(t, repo, "dep work")
+	git("checkout", "-q", "main")
+
+	write("a.txt", "lane\n")
+	commitAll(t, repo, "lane work")
+	merge := exec.Command("git", "-C", repo, "merge", "--no-ff", "dep/landed", "-m", "merge dep/landed")
+	merge.Env = env
+	if err := merge.Run(); err == nil {
+		t.Fatal("the fixture needs a conflict on a.txt")
+	}
+	write("a.txt", "resolved\n")
+	commitAll(t, repo, "merge dep/landed")
+
+	written, err := writtenFiles(repo, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	short, err := gitRun(repo, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := written["a.txt"]; got != short {
+		t.Fatalf("a.txt named by %q, want the merge %q: %v", got, short, written)
+	}
+	if _, ok := written["b.txt"]; ok {
+		t.Fatalf("a file that arrived through the merge was counted as written: %v", written)
+	}
+	commits, err := laneCommits(repo, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 2 {
+		t.Fatalf("laneCommits = %v, want the lane's own two commits", commits)
 	}
 }

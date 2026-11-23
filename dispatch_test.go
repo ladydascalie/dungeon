@@ -69,6 +69,11 @@ case "$1 $2" in
       mkdir -p "$enc/reports"
       echo "did the thing" > "$enc/reports/$unit.md"
     fi
+    if [ -n "$FAKE_LANE_SH" ]; then
+      # A lane that does git work of its own: merge a landed branch, fast-forward,
+      # cherry-pick. The script runs where the lane is.
+      ( cd "$FAKE_WT" && sh "$FAKE_LANE_SH" )
+    fi
     if [ -n "$FAKE_COMMITS" ] && [ -f "$FAKE_COMMITS" ]; then
       # One line per unit: unit:path:message. The lane writes the file and
       # commits it, the way a lane that ignores the rule would.
@@ -1420,5 +1425,166 @@ func TestStateWithNoRecordedHeadBehavesAsBefore(t *testing.T) {
 	}
 	if note := st.Units["A"].Note; strings.Contains(note, "lane committed") {
 		t.Fatalf("note %q must read as it did before the guard", note)
+	}
+}
+
+// fakeLaneAction tells the fake herdr to run a shell script in the lane's
+// worktree when the brief arrives, so a lane can merge, fast-forward or
+// cherry-pick the way a real one does before it reports.
+func fakeLaneAction(t *testing.T, lane, script string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "lane.sh")
+	if err := os.WriteFile(path, []byte("set -e\n"+script+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_LANE_SH", path)
+	t.Setenv("FAKE_WT", lane)
+}
+
+// laneGitIdentity gives the lane's own git commands an author, so a commit it
+// makes in a script needs no -c flags.
+func laneGitIdentity(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_AUTHOR_NAME", "test")
+	t.Setenv("GIT_AUTHOR_EMAIL", "test@example.com")
+	t.Setenv("GIT_COMMITTER_NAME", "test")
+	t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
+}
+
+// depBranch cuts a landed branch from main with one file on it, the way another
+// unit's landed work arrives, and leaves main where it was.
+func depBranch(t *testing.T, repo, file, content string) {
+	t.Helper()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("checkout", "-q", "-b", "dep/landed")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(repo, file)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, file), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, repo, "dep work")
+	git("checkout", "-q", "main")
+}
+
+// mergeCase runs one fake lane on a real worktree and returns the settled unit,
+// the run's stdout and the lane's worktree, so each shape of arrival is told the
+// same way.
+func mergeCase(t *testing.T, script string, dep func(t *testing.T, repo string)) (UnitState, string, string) {
+	t.Helper()
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	laneGitIdentity(t)
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	if dep != nil {
+		dep(t, repo)
+	}
+	wt := worktreePath(repo, "enc", "w1")
+	fakeLaneAction(t, wt, script)
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st.Units["A"], stdout, wt
+}
+
+// A lane that merges a landed branch has the dep's code in its worktree, but it
+// did not write those files and they are outside its paths. The unit settles
+// done, and the note does not name the dep's files as its own.
+func TestMergeOfALandedBranchSettlesDone(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "git merge --no-ff dep/landed -m 'merge dep/landed'",
+		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
+	if u.Status != "done" {
+		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
+	}
+	if strings.Contains(u.Note, "fleet.go") {
+		t.Fatalf("note %q names the dep's file as the unit's work", u.Note)
+	}
+	if !strings.Contains(stdout, "done: A") {
+		t.Fatalf("output:\n%s", stdout)
+	}
+}
+
+// A fast-forward leaves no commit at all. The reflog names the merge, so the
+// files it brought are arrived, not written: still done, still unmentioned.
+func TestFastForwardOfALandedBranchSettlesDone(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "git merge --ff-only dep/landed",
+		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
+	if u.Status != "done" {
+		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
+	}
+	if strings.Contains(u.Note, "fleet.go") {
+		t.Fatalf("note %q names the dep's file as the unit's work", u.Note)
+	}
+}
+
+// A conflict resolved inside the unit's own paths is the lane's own resolution,
+// so it is its work and inside its paths: done.
+func TestConflictResolvedInsideThePathsSettlesDone(t *testing.T) {
+	u, stdout, _ := mergeCase(t, `mkdir -p src
+printf 'lane\n' > src/lane.go
+git add src/lane.go
+git commit -q -m 'lane work'
+git merge --no-ff dep/landed -m 'merge dep/landed' || true
+printf 'resolved\n' > src/lane.go
+git add src/lane.go
+git commit -q --no-edit`,
+		func(t *testing.T, repo string) { depBranch(t, repo, "src/lane.go", "dep\n") })
+	if u.Status != "done" {
+		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
+	}
+	if !strings.Contains(u.Note, "lane committed its own work") || !strings.Contains(u.Note, "src/lane.go") {
+		t.Fatalf("note %q must name the resolution as the lane's own work", u.Note)
+	}
+}
+
+// A cherry-pick is the lane's own commit by attribution, so a picked file
+// outside the paths still blocks, and the note names the lane's commit, not the
+// commit it picked from.
+func TestCherryPickOutsideThePathsStillBlocks(t *testing.T) {
+	var depShort string
+	u, stdout, wt := mergeCase(t, "git cherry-pick dep/landed",
+		func(t *testing.T, repo string) {
+			depBranch(t, repo, "fleet.go", "dep\n")
+			var err error
+			if depShort, err = gitRun(repo, "rev-parse", "--short", "dep/landed"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	laneShort, err := gitRun(wt, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(u.Note, "changed files outside your paths") || !strings.Contains(u.Note, "fleet.go") {
+		t.Fatalf("note %q must name the picked file", u.Note)
+	}
+	// The picked commit is the lane's own, so the note must name the lane's
+	// commit: naming the dep's would read as if the dep wrote it here.
+	if laneShort == depShort {
+		t.Fatalf("the cherry-pick did not create a commit of the lane's own")
+	}
+	if !strings.Contains(u.Note, laneShort) || strings.Contains(u.Note, depShort) {
+		t.Fatalf("note %q must name the lane's commit %q, not the dep's %q", u.Note, laneShort, depShort)
 	}
 }

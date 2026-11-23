@@ -271,60 +271,158 @@ func gitNul(dir string, args ...string) ([]string, error) {
 	return names, nil
 }
 
-// committedFiles lists the files the lane's own commits changed between the
-// recorded head and HEAD. An empty head lists nothing: it is every unit
-// dispatched before the guard landed.
-func committedFiles(dir, head string) ([]string, error) {
+// laneCommit is one commit on the lane's own first-parent chain from HEAD back
+// to the recorded head, with the short name a note points at.
+type laneCommit struct {
+	full  string
+	short string
+}
+
+// laneCommits lists the commits the lane made between head and HEAD: the
+// first-parent chain from HEAD back to head, newest first. A merge brings the
+// other branch's commits into the range, but they are not on this chain, so
+// they never count as the lane's own. An empty head lists nothing: it is every
+// unit dispatched before the guard landed.
+func laneCommits(dir, head string) ([]laneCommit, error) {
 	if head == "" {
 		return nil, nil
 	}
-	return gitNul(dir, "diff", "--name-only", "-z", head, "HEAD")
+	out, err := gitRun(dir, "log", "--first-parent", "--format=%H %h", head+"..HEAD")
+	if err != nil {
+		return nil, err
+	}
+	var commits []laneCommit
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		commits = append(commits, laneCommit{full: fields[0], short: fields[1]})
+	}
+	return commits, nil
 }
 
-// laneChanges is what a lane touched since its unit was dispatched: the files
-// its own commits changed, and the files git still sees as uncommitted or
-// untracked. A commit takes its files out of the second list, which is the hole
-// the guard exists to close.
-type laneChanges struct {
-	committed   []string
-	uncommitted []string
+// commitFiles lists the files a commit wrote. A normal commit writes what
+// differs from its parent. A merge would also name everything the other side
+// brought, which the lane did not write, so it is narrowed to the files that
+// differ from every parent: the resolution work and nothing else.
+func commitFiles(dir string, c laneCommit) ([]string, error) {
+	mine, err := gitNul(dir, "diff", "--name-only", "-z", c.full+"^1", c.full)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := gitRun(dir, "rev-parse", "--verify", "--quiet", c.full+"^2"); err != nil {
+		return mine, nil // one parent: a normal commit wrote all of it
+	}
+	theirs, err := gitNul(dir, "diff", "--name-only", "-z", c.full+"^2", c.full)
+	if err != nil {
+		return nil, err
+	}
+	both := toSet(theirs)
+	var out []string
+	for _, f := range mine {
+		if both[f] {
+			out = append(out, f)
+		}
+	}
+	return out, nil
 }
 
-// changedSince is every file the lane touched, from the recorded head to now.
-// Without a recorded head it is today's list, git status alone.
-func changedSince(dir, head string) (laneChanges, error) {
-	uncommitted, err := changedFiles(dir)
-	if err != nil {
-		return laneChanges{}, err
+// arrivedCommits lists the commits a fast-forward brought onto the lane branch
+// between head and HEAD. A fast-forward creates no commit and leaves no trace in
+// the graph, so those commits would read as the lane's own work. The branch
+// reflog records the move and the state it moved from, which names them.
+//
+// A reflog that cannot be read returns nothing: attribution then falls back to
+// the graph, which is all there is.
+func arrivedCommits(dir, head string) map[string]bool {
+	if head == "" {
+		return nil
 	}
-	committed, err := committedFiles(dir, head)
+	out, err := gitRun(dir, "log", "-g", "--format=%H %gs", "HEAD")
 	if err != nil {
-		return laneChanges{}, err
+		return nil
 	}
-	return laneChanges{committed: committed, uncommitted: uncommitted}, nil
+	type entry struct{ hash, subject string }
+	var entries []entry
+	for _, line := range strings.Split(out, "\n") {
+		hash, subject, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		entries = append(entries, entry{hash: hash, subject: subject})
+	}
+	arrived := map[string]bool{}
+	for i, e := range entries {
+		// The recorded head is where this unit's window starts: older moves
+		// are another unit's business.
+		if e.hash == head {
+			break
+		}
+		if i+1 >= len(entries) || !strings.Contains(e.subject, "Fast-forward") {
+			continue
+		}
+		brought, err := gitRun(dir, "rev-list", "--first-parent", entries[i+1].hash+".."+e.hash)
+		if err != nil {
+			continue
+		}
+		for _, c := range strings.Fields(brought) {
+			arrived[c] = true
+		}
+	}
+	return arrived
 }
 
-// carryingCommit is the lane commit that last touched file between head and
-// HEAD, abbreviated, so a blocked note can point at it.
-func carryingCommit(dir, head, file string) string {
-	out, err := gitRun(dir, "log", "-1", "--format=%h", head+"..HEAD", "--", file)
-	if err != nil {
-		return ""
+// writtenFiles maps every file the lane wrote between head and HEAD to the short
+// commit that wrote it, newest commit wins. A file that only arrived, through a
+// merge or a fast-forward, is absent: the unit did not write it, so no note may
+// claim it did and no path may call it outside.
+func writtenFiles(dir, head string) (map[string]string, error) {
+	if head == "" {
+		return nil, nil
 	}
+	commits, err := laneCommits(dir, head)
+	if err != nil {
+		return nil, err
+	}
+	arrived := arrivedCommits(dir, head)
+	written := map[string]string{}
+	for _, c := range commits {
+		if arrived[c.full] {
+			continue
+		}
+		files, err := commitFiles(dir, c)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			if _, ok := written[f]; !ok {
+				written[f] = c.short
+			}
+		}
+	}
+	return written, nil
+}
+
+// writtenNames lists the files of a written set in a stable order, so one note
+// reads the same on every run.
+func writtenNames(written map[string]string) []string {
+	out := make([]string, 0, len(written))
+	for f := range written {
+		out = append(out, f)
+	}
+	sort.Strings(out)
 	return out
 }
 
-// outsideList names the outside files, and for one the lane committed, the
-// short commit that carried it. An uncommitted file is named alone: no commit
-// carried it.
-func outsideList(dir, head string, outside []string, committed map[string]bool) string {
-	tokens := make([]string, 0, len(outside))
-	for _, f := range outside {
-		if committed[f] {
-			if c := carryingCommit(dir, head, f); c != "" {
-				tokens = append(tokens, f+" in "+c)
-				continue
-			}
+// filesWithCommits names the files, and for one the lane wrote, the short commit
+// that wrote it. An uncommitted file is named alone: no commit carried it.
+func filesWithCommits(written map[string]string, files []string) string {
+	tokens := make([]string, 0, len(files))
+	for _, f := range files {
+		if c := written[f]; c != "" {
+			tokens = append(tokens, f+" in "+c)
+			continue
 		}
 		tokens = append(tokens, f)
 	}
@@ -358,6 +456,13 @@ func commitLaneWork(dir, message string, files []string) error {
 // plan's base instead would catch that commit and also every earlier unit on the
 // same worktree, so the base is the unit's own dispatch head, not the plan's.
 //
+// Committed work is attributed per file, not by subtracting one tree from
+// another: a file counts only when a commit the lane made is what changed it. A
+// lane told to merge a landed branch then keeps the dep's files out of its
+// account, because a merge does not write them; only its own resolution is its
+// work. A cherry-pick is the lane's own commit by the same rule, and it blocks
+// when the file is outside the paths.
+//
 // A unit whose state carries no recorded head, which is every unit dispatched
 // before this guard landed, is judged by git status alone, exactly as it was.
 // The guard is new, not retroactive.
@@ -365,7 +470,11 @@ func commitLaneWork(dir, message string, files []string) error {
 // The returned note says what the lane committed by itself, for the settle note.
 func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) (bool, string) {
 	dir, head := minionDir(p, m), st.Units[u.ID].LaneHead
-	changes, err := changedSince(dir, head)
+	uncommitted, err := changedFiles(dir)
+	if err != nil {
+		return false, ""
+	}
+	written, err := writtenFiles(dir, head)
 	if err != nil {
 		return false, ""
 	}
@@ -378,32 +487,31 @@ func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) (boo
 		}
 		return out
 	}
-	// Committed work is the lane's own; uncommitted work is what dungeon
-	// commits. A file in both lists is still uncommitted, so it is committed.
-	var mineCommitted, mineUncommitted, outside []string
-	committed := toSet(changes.committed)
-	for _, f := range keep(changes.committed) {
+	// Written work is the lane's own; uncommitted work is what dungeon commits.
+	// A file in both lists is still uncommitted, so it is committed.
+	var mineWritten, mineUncommitted, outside []string
+	for _, f := range keep(writtenNames(written)) {
 		if ownedBy(u.Paths, f) {
-			mineCommitted = append(mineCommitted, f)
+			mineWritten = append(mineWritten, f)
 		} else {
 			outside = append(outside, f)
 		}
 	}
-	for _, f := range keep(changes.uncommitted) {
+	for _, f := range keep(uncommitted) {
 		if ownedBy(u.Paths, f) {
 			mineUncommitted = append(mineUncommitted, f)
-		} else if !committed[f] {
+		} else if _, wrote := written[f]; !wrote {
 			outside = append(outside, f)
 		}
 	}
 	note := ""
-	if len(mineCommitted) > 0 && writes(m.Role) {
-		note = "lane committed its own work: " + truncate(strings.Join(mineCommitted, " "), 100)
+	if len(mineWritten) > 0 && writes(m.Role) {
+		note = "lane committed its own work: " + truncate(filesWithCommits(written, mineWritten), 100)
 	}
 	switch {
 	case len(outside) > 0:
 		st.SetUnit(u.ID, "blocked", "changed files outside your paths: "+
-			truncate(outsideList(dir, head, outside, committed), 100))
+			truncate(filesWithCommits(written, outside), 100))
 		return true, ""
 	case len(mineUncommitted) == 0:
 		return false, note
