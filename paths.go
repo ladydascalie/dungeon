@@ -238,6 +238,99 @@ func parsePorcelainZ(out []byte) []string {
 	return files
 }
 
+// laneHead is the lane branch's commit when the unit is dispatched: the base
+// the worktree guard counts the unit's changes from. A minion with no lane of
+// its own has no head, and neither does a worktree that is not a git checkout,
+// so nothing is recorded and the guard stays off for that unit.
+func laneHead(p Plan, m Minion) string {
+	if !writes(m.Role) {
+		return ""
+	}
+	head, err := gitRun(minionDir(p, m), "rev-parse", "HEAD")
+	if err != nil {
+		return ""
+	}
+	return head
+}
+
+// gitNul runs git and splits the NUL-terminated names it printed. It reads the
+// bytes itself, so a name that begins or ends with a space survives: gitRun
+// trims, and the first byte of the first name is then lost.
+func gitNul(dir string, args ...string) ([]string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s in %s: %w", strings.Join(args, " "), dir, err)
+	}
+	var names []string
+	for _, name := range strings.Split(string(out), "\x00") {
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// committedFiles lists the files the lane's own commits changed between the
+// recorded head and HEAD. An empty head lists nothing: it is every unit
+// dispatched before the guard landed.
+func committedFiles(dir, head string) ([]string, error) {
+	if head == "" {
+		return nil, nil
+	}
+	return gitNul(dir, "diff", "--name-only", "-z", head, "HEAD")
+}
+
+// laneChanges is what a lane touched since its unit was dispatched: the files
+// its own commits changed, and the files git still sees as uncommitted or
+// untracked. A commit takes its files out of the second list, which is the hole
+// the guard exists to close.
+type laneChanges struct {
+	committed   []string
+	uncommitted []string
+}
+
+// changedSince is every file the lane touched, from the recorded head to now.
+// Without a recorded head it is today's list, git status alone.
+func changedSince(dir, head string) (laneChanges, error) {
+	uncommitted, err := changedFiles(dir)
+	if err != nil {
+		return laneChanges{}, err
+	}
+	committed, err := committedFiles(dir, head)
+	if err != nil {
+		return laneChanges{}, err
+	}
+	return laneChanges{committed: committed, uncommitted: uncommitted}, nil
+}
+
+// carryingCommit is the lane commit that last touched file between head and
+// HEAD, abbreviated, so a blocked note can point at it.
+func carryingCommit(dir, head, file string) string {
+	out, err := gitRun(dir, "log", "-1", "--format=%h", head+"..HEAD", "--", file)
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
+// outsideList names the outside files, and for one the lane committed, the
+// short commit that carried it. An uncommitted file is named alone: no commit
+// carried it.
+func outsideList(dir, head string, outside []string, committed map[string]bool) string {
+	tokens := make([]string, 0, len(outside))
+	for _, f := range outside {
+		if committed[f] {
+			if c := carryingCommit(dir, head, f); c != "" {
+				tokens = append(tokens, f+" in "+c)
+				continue
+			}
+		}
+		tokens = append(tokens, f)
+	}
+	return strings.Join(tokens, " ")
+}
+
 // commitLaneWork commits the named files on the branch the worktree has
 // checked out. The parent does this, not the lane: a lane leaves its work in
 // the worktree and never commits.
@@ -258,38 +351,71 @@ func commitLaneWork(dir, message string, files []string) error {
 // outside those paths means the split was not respected: it blocks and names
 // the files. A non-writing lane has no branch of its own, so its uncommitted
 // work still blocks.
-func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) bool {
-	files, err := changedFiles(minionDir(p, m))
+//
+// The count starts at the head recorded when the unit was dispatched, so a lane
+// that commits its own work cannot hide it: git status goes empty and the unit
+// would settle green whatever the lane touched. Diffing the branch against the
+// plan's base instead would catch that commit and also every earlier unit on the
+// same worktree, so the base is the unit's own dispatch head, not the plan's.
+//
+// A unit whose state carries no recorded head, which is every unit dispatched
+// before this guard landed, is judged by git status alone, exactly as it was.
+// The guard is new, not retroactive.
+//
+// The returned note says what the lane committed by itself, for the settle note.
+func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) (bool, string) {
+	dir, head := minionDir(p, m), st.Units[u.ID].LaneHead
+	changes, err := changedSince(dir, head)
 	if err != nil {
-		return false
+		return false, ""
 	}
-	var mine, outside []string
-	for _, f := range files {
-		switch {
-		case underEncounter(o.planPath, f):
-			// the state, a brief, a session: not code, and not the lane's work
-		case ownedBy(u.Paths, f):
-			mine = append(mine, f)
-		default:
+	keep := func(files []string) []string {
+		var out []string
+		for _, f := range files {
+			if !underEncounter(o.planPath, f) {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	// Committed work is the lane's own; uncommitted work is what dungeon
+	// commits. A file in both lists is still uncommitted, so it is committed.
+	var mineCommitted, mineUncommitted, outside []string
+	committed := toSet(changes.committed)
+	for _, f := range keep(changes.committed) {
+		if ownedBy(u.Paths, f) {
+			mineCommitted = append(mineCommitted, f)
+		} else {
 			outside = append(outside, f)
 		}
+	}
+	for _, f := range keep(changes.uncommitted) {
+		if ownedBy(u.Paths, f) {
+			mineUncommitted = append(mineUncommitted, f)
+		} else if !committed[f] {
+			outside = append(outside, f)
+		}
+	}
+	note := ""
+	if len(mineCommitted) > 0 && writes(m.Role) {
+		note = "lane committed its own work: " + truncate(strings.Join(mineCommitted, " "), 100)
 	}
 	switch {
 	case len(outside) > 0:
 		st.SetUnit(u.ID, "blocked", "changed files outside your paths: "+
-			truncate(strings.Join(outside, " "), 100))
-		return true
-	case len(mine) == 0:
-		return false
+			truncate(outsideList(dir, head, outside, committed), 100))
+		return true, ""
+	case len(mineUncommitted) == 0:
+		return false, note
 	case !writes(m.Role):
-		st.SetUnit(u.ID, "blocked", "uncommitted work in "+truncate(strings.Join(mine, " "), 100))
-		return true
+		st.SetUnit(u.ID, "blocked", "uncommitted work in "+truncate(strings.Join(mineUncommitted, " "), 100))
+		return true, ""
 	}
 	message := "dungeon: commit lane work for unit " + u.ID
-	if err := commitLaneWork(minionDir(p, m), message, mine); err != nil {
+	if err := commitLaneWork(dir, message, mineUncommitted); err != nil {
 		st.SetUnit(u.ID, "blocked", "could not commit work in "+
-			truncate(strings.Join(mine, " "), 100)+": "+err.Error())
-		return true
+			truncate(strings.Join(mineUncommitted, " "), 100)+": "+err.Error())
+		return true, ""
 	}
-	return false
+	return false, note
 }

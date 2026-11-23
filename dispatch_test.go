@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -59,14 +60,28 @@ case "$1 $2" in
     if [ "$4" = "ctrl+c" ]; then grep -v "^$3:" "$FAKE_STARTED" > "$FAKE_STARTED.tmp"; mv "$FAKE_STARTED.tmp" "$FAKE_STARTED"; fi
     echo '{"result":{"type":"ok"}}' ;;
   "agent prompt")
+    # The prompt names the brief, so any encounter's lane can answer: the
+    # report sits in the encounter directory, one level above briefs/.
+    brief=$(printf '%s' "$4" | sed -n 's/^Read \(.*\) and do it\..*$/\1/p')
+    unit=$(basename "$brief" .md)
+    enc=$(dirname "$(dirname "$brief")")
     if [ "$FAKE_REPORT" = "1" ]; then
-      # The prompt names the brief, so any encounter's lane can answer: the
-      # report sits in the encounter directory, one level above briefs/.
-      brief=$(printf '%s' "$4" | sed -n 's/^Read \(.*\) and do it\..*$/\1/p')
-      unit=$(basename "$brief" .md)
-      enc=$(dirname "$(dirname "$brief")")
       mkdir -p "$enc/reports"
       echo "did the thing" > "$enc/reports/$unit.md"
+    fi
+    if [ -n "$FAKE_COMMITS" ] && [ -f "$FAKE_COMMITS" ]; then
+      # One line per unit: unit:path:message. The lane writes the file and
+      # commits it, the way a lane that ignores the rule would.
+      line=$(sed -n "s/^$unit://p" "$FAKE_COMMITS" | head -1)
+      if [ -n "$line" ]; then
+        file=${line%%:*}
+        msg=${line#*:}
+        mkdir -p "$(dirname "$FAKE_WT/$file")"
+        echo "lane work" > "$FAKE_WT/$file"
+        git -C "$FAKE_WT" add -A
+        git -C "$FAKE_WT" -c user.name=test -c user.email=test@example.com \
+          commit -q -m "$msg"
+      fi
     fi
     echo '{"result":{"type":"ok"}}' ;;
 esac
@@ -805,6 +820,15 @@ func TestDungeonCommitsLaneWorkOnTheLaneBranch(t *testing.T) {
 	if clean, _ := changedFiles(wt); len(clean) != 0 {
 		t.Fatalf("worktree still dirty after the commit: %v", clean)
 	}
+	// Uncommitted work inside the paths is still dungeon's to commit, so the
+	// note reads exactly as it did before the guard.
+	note := st.Units["A"].Note
+	if !strings.Contains(note, "accept: true ok") {
+		t.Fatalf("note %q lost the accept receipt", note)
+	}
+	if strings.Contains(note, "lane committed") {
+		t.Fatalf("note %q must not claim the lane committed: dungeon did", note)
+	}
 }
 
 // A change outside the unit's paths still blocks the unit and names the files.
@@ -1135,5 +1159,266 @@ func TestAnInterruptedAcceptKillsOnlyTheGateGroup(t *testing.T) {
 	waitGone(t, forked)
 	if err := syscall.Kill(sibling.Process.Pid, 0); err != nil {
 		t.Fatalf("the accept killed a process outside the gate's group: %v", err)
+	}
+}
+
+// fakeLaneCommits tells the fake herdr to make the lane commit one file per
+// unit: unit:path:message, one line each. The commit lands when the prompt
+// arrives, which is inside the dispatch, so it is the lane's own work.
+func fakeLaneCommits(t *testing.T, lane string, lines ...string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "lane-commits")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_COMMITS", path)
+	t.Setenv("FAKE_WT", lane)
+}
+
+// recordedLaneHead reads the dispatch head straight from the state file. The
+// test that proves the hole is closed must run against the code before the
+// guard, which had no such field, so it parses the JSON itself.
+func recordedLaneHead(t *testing.T, statePath, unit string) string {
+	t.Helper()
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		Units map[string]struct {
+			LaneHead string `json:"lane_head"`
+		} `json:"units"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	return raw.Units[unit].LaneHead
+}
+
+// A lane that commits inside its own paths leaves nothing uncommitted. The work
+// is there and gated, so the unit settles done, and the note says the lane
+// committed so the parent can see it happened.
+func TestLaneCommitInsidePathsSettlesDone(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	wt := worktreePath(repo, "enc", "w1")
+	fakeLaneCommits(t, wt, "A:src/lane.go:lane works")
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	base, err := gitRun(repo, "rev-parse", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "done: A") {
+		t.Fatalf("output:\n%s", stdout)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done: %s", got, st.Units["A"].Note)
+	}
+	note := st.Units["A"].Note
+	if !strings.Contains(note, "lane committed its own work") || !strings.Contains(note, "src/lane.go") {
+		t.Fatalf("note %q must say the lane committed its own work", note)
+	}
+	if !strings.Contains(note, "accept: true ok") {
+		t.Fatalf("note %q lost the accept receipt", note)
+	}
+
+	if got := recordedLaneHead(t, statePath, "A"); got != base {
+		t.Fatalf("recorded head %q, want the dispatch head %q", got, base)
+	}
+	// The lane's commit is on the branch: dungeon did not add a second one.
+	if subject, err := gitRun(repo, "log", "-1", "--format=%s", "enc/w1"); err != nil || subject != "lane works" {
+		t.Fatalf("lane branch head %q: %v", subject, err)
+	}
+	if clean, _ := changedFiles(wt); len(clean) != 0 {
+		t.Fatalf("worktree still dirty: %v", clean)
+	}
+}
+
+// The regression this unit exists to prevent: a lane that commits work outside
+// its declared paths leaves git status empty, so the settle check used to see
+// nothing, commit nothing, and settle the unit green. It must block, name the
+// file and name the short commit that carried it.
+func TestLaneCommitOutsidePathsBlocks(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	wt := worktreePath(repo, "enc", "w1")
+	fakeLaneCommits(t, wt, "A:fleet.go:lane wanders")
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "blocked: A") {
+		t.Fatalf("output:\n%s", stdout)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s", got, st.Units["A"].Note)
+	}
+	short, err := gitRun(wt, "log", "-1", "--format=%h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := st.Units["A"].Note
+	if !strings.Contains(note, "changed files outside your paths") ||
+		!strings.Contains(note, "fleet.go") || !strings.Contains(note, short) {
+		t.Fatalf("note %q must name fleet.go and commit %q", note, short)
+	}
+}
+
+const twoUnitPlan = `encounter: enc
+repo: %REPO%
+base: main
+concurrency: 1
+minions:
+  - {id: w1, role: worker, worktree: w1}
+units:
+  - id: A
+    minion: w1
+    paths: [a/**]
+    goal: Do the first thing.
+    accept: true
+  - id: B
+    minion: w1
+    paths: [b/**]
+    goal: Do the second thing.
+    accept: true
+`
+
+// The second unit on a minion counts from its own dispatch head. The first
+// unit's commits are already there when it starts, and they are not its work.
+func TestSecondUnitIsNotBlockedByTheFirstsCommits(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, strings.Replace(twoUnitPlan, "%REPO%", repo, 1))
+	fakeLaneCommits(t, worktreePath(repo, "enc", "w1"),
+		"A:a/first.go:first lane", "B:b/second.go:second lane")
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	code, stdout, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath)
+	if code != 0 {
+		t.Fatalf("next exit %d: %s", code, stderr)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"A", "B"} {
+		if got := st.UnitStatus(id); got != "done" {
+			t.Fatalf("unit %q = %q, want done: %s", id, got, st.Units[id].Note)
+		}
+		if note := st.Units[id].Note; !strings.Contains(note, "lane committed its own work") {
+			t.Fatalf("unit %q note %q must say the lane committed", id, note)
+		}
+	}
+	if strings.Contains(stdout, "blocked:") {
+		t.Fatalf("the second unit was blocked by the first unit's commits:\n%s", stdout)
+	}
+}
+
+// And the second unit's own commit outside its paths is still caught.
+func TestSecondUnitCommitOutsidePathsStillBlocks(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, strings.Replace(twoUnitPlan, "%REPO%", repo, 1))
+	fakeLaneCommits(t, worktreePath(repo, "enc", "w1"),
+		"A:a/first.go:first lane", "B:elsewhere.go:second lane wanders")
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	if code, _, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath); code != 0 {
+		t.Fatalf("next: %s", stderr)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit A %q, want done: %s", got, st.Units["A"].Note)
+	}
+	if got := st.UnitStatus("B"); got != "blocked" {
+		t.Fatalf("unit B %q, want blocked: %s", got, st.Units["B"].Note)
+	}
+	note := st.Units["B"].Note
+	if !strings.Contains(note, "elsewhere.go") || strings.Contains(note, "a/first.go") {
+		t.Fatalf("note %q must name only the second unit's own change", note)
+	}
+}
+
+// A state with no recorded head is judged as before: the guard is new, not
+// retroactive, so a unit already in flight settles on git status alone.
+func TestStateWithNoRecordedHeadBehavesAsBefore(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	wt := worktreePath(repo, "enc", "w1")
+
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	// The lane committed outside its paths before the guard existed.
+	if err := os.WriteFile(filepath.Join(wt, "fleet.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, wt, "lane wanders")
+	report := reportPath(planPath, "A")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("did the thing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetUnit("A", "working", "brief "+briefPath(planPath, "A")); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordedLaneHead(t, statePath, "A"); got != "" {
+		t.Fatalf("this fixture needs a state with no recorded head, got %q", got)
+	}
+	if err := SaveState(statePath, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, _, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath); code != 0 {
+		t.Fatalf("next: %s", stderr)
+	}
+	st, err = LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "done" {
+		t.Fatalf("unit %q, want done as before: %s", got, st.Units["A"].Note)
+	}
+	if note := st.Units["A"].Note; strings.Contains(note, "lane committed") {
+		t.Fatalf("note %q must read as it did before the guard", note)
 	}
 }

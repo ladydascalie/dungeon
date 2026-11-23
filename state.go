@@ -35,6 +35,12 @@ type UnitState struct {
 	// written before the field existed reads as confirmed, so an old encounter
 	// does not re-prompt a fleet that is already working.
 	PromptPending bool `json:"prompt_pending,omitempty"`
+	// LaneHead is the lane branch's commit when the unit was dispatched. The
+	// worktree guard counts the unit's changes from it, so a lane that commits
+	// its own work cannot hide it behind an empty git status. A unit dispatched
+	// before the guard landed carries none, and the guard then reads git status
+	// alone: it is new, not retroactive.
+	LaneHead string `json:"lane_head,omitempty"`
 	// Landed records the merge that put this unit on an integration branch. A
 	// cross-plan dep reads it: done alone does not mean the code is there.
 	Landed *Landed `json:"landed,omitempty"`
@@ -250,6 +256,21 @@ func (s *State) SetLanded(id, ref, commit string) {
 func (s *State) SetPromptPending(id string, pending bool) {
 	u := s.Units[id]
 	u.PromptPending = pending
+	s.Units[id] = u
+}
+
+// RecordLaneHead records where the lane stood when the unit was dispatched. It
+// keeps the first head: a re-dispatch of the same unit counts from the earliest
+// one, so work the lane did between the two dispatches is still the unit's.
+func (s *State) RecordLaneHead(id, head string) {
+	if head == "" {
+		return
+	}
+	u := s.Units[id]
+	if u.LaneHead != "" {
+		return
+	}
+	u.LaneHead = head
 	s.Units[id] = u
 }
 

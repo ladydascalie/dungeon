@@ -79,7 +79,7 @@ func TestChangedFileUnderTheEncounterIsNotOutside(t *testing.T) {
 	st, _ := LoadState(filepath.Join(enc, ".dungeon", "state.json"))
 	u := Unit{ID: "A", Paths: []string{"src/**"}}
 	o := dispatchOpts{planPath: planPath}
-	if !blockedByWorktree(o, p, &st, u, Minion{ID: "w1", Role: RoleWorker}) {
+	if blocked, _ := blockedByWorktree(o, p, &st, u, Minion{ID: "w1", Role: RoleWorker}); !blocked {
 		t.Fatal("want the outside change to block")
 	}
 	if got := st.Units["A"].Note; strings.Contains(got, "a.png") || strings.Contains(got, ".dungeon") {
@@ -248,7 +248,105 @@ func TestUntrackedDirectoryIsMatchedFileByFile(t *testing.T) {
 	st, _ := LoadState(filepath.Join(enc, ".dungeon", "state.json"))
 	u := Unit{ID: "A", Paths: []string{"cmd/**"}}
 	o := dispatchOpts{planPath: planPath}
-	if blockedByWorktree(o, p, &st, u, Minion{ID: "w1", Role: RoleWorker}) {
-		t.Fatalf("work inside cmd/** blocked: %q", st.Units["A"].Note)
+	if blocked, note := blockedByWorktree(o, p, &st, u, Minion{ID: "w1", Role: RoleWorker}); blocked {
+		t.Fatalf("work inside cmd/** blocked: %q", note)
+	}
+}
+
+// A lane that commits its own work leaves git status empty. Counting from the
+// head recorded at dispatch still sees it, and the note names both the file and
+// the short commit that carried it.
+func TestCommittedWorkOutsideThePathsBlocksWithItsCommit(t *testing.T) {
+	repo := gitRepo(t)
+	enc := t.TempDir()
+	planPath := filepath.Join(enc, ".dungeon", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte("encounter: enc\nminions: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Plan{Encounter: "enc", Repo: repo}
+	wt := worktreePath(repo, p.Encounter, "w1")
+	if err := ensureIntegrationWorktree(repo, "main", wt, "enc/w1"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitRun(wt, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "elsewhere.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, wt, "lane wanders")
+	short, err := gitRun(wt, "log", "-1", "--format=%h")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u := Unit{ID: "A", Paths: []string{"src/**"}}
+	o := dispatchOpts{planPath: planPath}
+	m := Minion{ID: "w1", Role: RoleWorker}
+
+	guarded, _ := LoadState(filepath.Join(enc, ".dungeon", "state.json"))
+	guarded.RecordLaneHead("A", head)
+	blocked, _ := blockedByWorktree(o, p, &guarded, u, m)
+	if !blocked {
+		t.Fatal("a commit outside the paths must block")
+	}
+	note := guarded.Units["A"].Note
+	if !strings.Contains(note, "changed files outside your paths") ||
+		!strings.Contains(note, "elsewhere.txt") || !strings.Contains(note, short) {
+		t.Fatalf("note %q must name the file and commit %q", note, short)
+	}
+
+	// The guard is not retroactive: a state with no recorded head reads git
+	// status alone, as it did before, so the same commit goes unseen.
+	legacy, _ := LoadState(filepath.Join(enc, ".dungeon", "state.json"))
+	if blocked, note := blockedByWorktree(o, p, &legacy, u, m); blocked {
+		t.Fatalf("a state with no recorded head blocked: %q", note)
+	}
+}
+
+// A file the lane committed and then modified again is named once: the commit
+// list and the status list both hold it, and it is one outside change.
+func TestCommittedThenModifiedFileIsNamedOnce(t *testing.T) {
+	repo := gitRepo(t)
+	enc := t.TempDir()
+	planPath := filepath.Join(enc, ".dungeon", "plan.yaml")
+	if err := os.MkdirAll(filepath.Dir(planPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(planPath, []byte("encounter: enc\nminions: []\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := Plan{Encounter: "enc", Repo: repo}
+	wt := worktreePath(repo, p.Encounter, "w1")
+	if err := ensureIntegrationWorktree(repo, "main", wt, "enc/w1"); err != nil {
+		t.Fatal(err)
+	}
+	head, err := gitRun(wt, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt, "fleet.go"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, wt, "lane wanders")
+	if err := os.WriteFile(filepath.Join(wt, "fleet.go"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	st, _ := LoadState(filepath.Join(enc, ".dungeon", "state.json"))
+	st.RecordLaneHead("A", head)
+	u := Unit{ID: "A", Paths: []string{"src/**"}}
+	if blocked, _ := blockedByWorktree(dispatchOpts{planPath: planPath}, p, &st, u, Minion{ID: "w1", Role: RoleWorker}); !blocked {
+		t.Fatal("want the outside change to block")
+	}
+	note := st.Units["A"].Note
+	if got := strings.Count(note, "fleet.go"); got != 1 {
+		t.Fatalf("note %q names fleet.go %d times, want once", note, got)
 	}
 }

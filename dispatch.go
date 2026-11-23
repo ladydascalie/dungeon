@@ -387,6 +387,11 @@ func dispatchUnit(ctx context.Context, h mux, o dispatchOpts, p Plan, st *State,
 	// instead of a lane that looks busy and never was. A retry keeps the
 	// existing status and its history: only the first dispatch changes it.
 	if st.UnitStatus(u.ID) != "working" {
+		// Record where the lane stood before the brief goes out. The worktree
+		// guard counts this unit's changes from there, so a lane that commits
+		// its own work is still checked. The first head is kept: work a lane did
+		// between two dispatches is still the unit's work.
+		st.RecordLaneHead(u.ID, laneHead(p, m))
 		if err := st.SetUnit(u.ID, "working", "brief "+brief); err != nil {
 			return err
 		}
@@ -411,7 +416,8 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 	}
 	// Dungeon commits the lane's work on the lane branch before the accept runs.
 	// A change outside the unit's paths still blocks the unit and names the files.
-	if blockedByWorktree(o, p, st, u, m) {
+	blocked, laneNote := blockedByWorktree(o, p, st, u, m)
+	if blocked {
 		return "blocked"
 	}
 	if u.Verdict != "" {
@@ -435,7 +441,14 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 		st.SetUnit(u.ID, "rejected", fmt.Sprintf("accept failed: %s (%s)", u.Accept, receipt))
 		return "rejected"
 	}
-	st.SetUnit(u.ID, "done", fmt.Sprintf("accept: %s ok (%s)", u.Accept, receipt))
+	note := fmt.Sprintf("accept: %s ok (%s)", u.Accept, receipt)
+	if laneNote != "" {
+		// The lane committed work inside its own paths instead of leaving it
+		// uncommitted. Nothing blocks: the work is there and this gate proved
+		// it. The note says so, so the parent can see the lane committed.
+		note += "; " + laneNote
+	}
+	st.SetUnit(u.ID, "done", note)
 	return "done"
 }
 
