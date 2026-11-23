@@ -434,3 +434,57 @@ func TestChangedSinceReportsAGitError(t *testing.T) {
 		t.Fatalf("error %q must name what git could not read", err)
 	}
 }
+
+// A normal repository is not refused. The check names specific ways git reports
+// a tree it does not hold, not the presence of a feature a repo happens to use.
+func TestBlindStateAllowsANormalRepo(t *testing.T) {
+	repo := gitRepo(t)
+	note, err := blindState(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note != "" {
+		t.Fatalf("note %q, want none on a normal repo", note)
+	}
+}
+
+// A filter configured with no attribute driving it is inert: no file in the
+// tree goes through it, so it says nothing false. git-lfs installs filter
+// commands in a machine's global config, and every repo that never names them
+// must stay usable.
+func TestBlindStateAllowsAConfiguredFilterThatDrivesNoAttribute(t *testing.T) {
+	repo := gitRepo(t)
+	for key, value := range map[string]string{
+		"filter.hide.clean":  "printf 'base\n'",
+		"filter.hide.smudge": "cat",
+	} {
+		cmd := exec.Command("git", "-C", repo, "config", key, value)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git config %s: %v\n%s", key, err, out)
+		}
+	}
+	note, err := blindState(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note != "" {
+		t.Fatalf("note %q, want none for an unused filter", note)
+	}
+}
+
+// The repository dungeon itself lives in is not refused either: the guard must
+// not block the checkout an operator runs it from.
+func TestBlindStateAllowsTheDungeonRepo(t *testing.T) {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse --show-toplevel: %v", err)
+	}
+	root := strings.TrimSpace(string(out))
+	note, err := blindState(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if note != "" {
+		t.Fatalf("note %q, want none on the dungeon repo", note)
+	}
+}
