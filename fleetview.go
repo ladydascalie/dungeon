@@ -17,9 +17,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// The fleet view is a renderer over FleetModel. It reads no plan and no state
-// of its own: every fact on screen is in the model, and the only live read is
-// the selected lane's preview on the refresh tick.
+// The fleet view is a renderer over FleetModel. The list reads no plan and no
+// state of its own: every fact on screen is in the model, and the only live
+// read is the selected lane's preview on the refresh tick. An opened encounter
+// is the exception: it keeps a whole viewModel, refreshed on the same tick, so
+// the split shows the encounter view's own facts and not a copy of them.
 
 const (
 	fleetSectionWorking = iota
@@ -107,6 +109,15 @@ type fleetViewModel struct {
 
 	expanded map[string]bool
 
+	// plan is the encounter opened under the fleet, nil when closed. focus is
+	// "fleet" or "plan": the plan keeps the whole viewModel, so the innards of
+	// a running encounter are one enter away and need no second process.
+	plan        *viewModel
+	planName    string
+	planLoading bool
+	want        string
+	focus       string
+
 	cursor int
 
 	preview       string
@@ -145,7 +156,12 @@ func (m fleetViewModel) refresh() tea.Cmd {
 		if keep == "" {
 			keep = fleetFirstKey(model, expanded)
 		}
-		preview, forKey, header, previewErr := fleetPreview(ctx, backend, model, keep)
+		var preview, forKey, header, previewErr string
+		// The plan pane owns the rows the preview would use, so skip the pane
+		// capture while it is open and pay for it again once the split closes.
+		if m.plan == nil {
+			preview, forKey, header, previewErr = fleetPreview(ctx, backend, model, keep)
+		}
 		return fleetMsg{
 			model:         model,
 			keep:          keep,
@@ -162,10 +178,11 @@ func (m fleetViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.sizePlan()
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(m.refresh(), tick(m.interval))
+		return m, tea.Batch(m.planCmd(), m.refresh(), tick(m.interval))
 
 	case fleetMsg:
 		m.model = msg.model
@@ -181,6 +198,20 @@ func (m fleetViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		return m, nil
 
+	case refreshedMsg:
+		// The plan pane's own loads arrive here. The fleet model sends fleetMsg,
+		// so the two never mix.
+		if m.plan == nil {
+			return m, nil
+		}
+		*m.plan = m.plan.applyRefresh(msg)
+		m.planLoading = false
+		if m.want != "" {
+			m.plan.rebuildOrder(m.want)
+			m.want = ""
+		}
+		return m, nil
+
 	case fleetNoticeMsg:
 		if msg.err != nil {
 			m.notice = msg.text + ": " + msg.err.Error()
@@ -190,7 +221,7 @@ func (m fleetViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		return m, m.key(msg.String())
+		return m, m.keyMsg(msg)
 	}
 	return m, nil
 }
@@ -210,6 +241,11 @@ func (m *fleetViewModel) key(key string) tea.Cmd {
 	}
 	m.notice = ""
 	switch key {
+	case "tab":
+		if m.plan != nil {
+			m.focus = "plan"
+		}
+		return nil
 	case "esc":
 		// esc backs out of nothing here and never quits: the fleet view is the
 		// only window an operator has on detached lanes, so q is the quit key.
@@ -222,10 +258,16 @@ func (m *fleetViewModel) key(key string) tea.Cmd {
 		m.cursor = 0
 	case "G", "end":
 		m.cursor = len(m.items()) - 1
-	case "enter", "d":
+	case "enter":
+		if it, ok := m.selectedItem(); ok {
+			return m.openPlan(it)
+		}
+	case "d":
 		if _, ok := m.selectedItem(); ok {
 			m.overlay = "detail"
 		}
+	case "r":
+		return m.refresh()
 	case " ":
 		if _, ok := m.selectedItem(); ok {
 			m.overlay = "actions"
@@ -242,13 +284,22 @@ type fleetAction struct {
 }
 
 var fleetActions = []fleetAction{
-	{"j", "jump to the lane"},
+	{"f", "jump to the lane"},
 	{"h", "open the hunk session"},
 	{"c", "copy the pane id"},
 	{"e", "expand or fold failed and settled units"},
 }
 
 func (m *fleetViewModel) actionKey(key string) tea.Cmd {
+	// The key printed in the box runs its action. Only j, k and enter move the
+	// cursor, so a named shortcut needs no second keypress.
+	for i, action := range fleetActions {
+		if key == action.key {
+			m.action = i
+			key = "enter"
+			break
+		}
+	}
 	switch key {
 	case "esc", " ":
 		m.overlay = ""
@@ -272,7 +323,7 @@ func (m *fleetViewModel) actionKey(key string) tea.Cmd {
 			return nil
 		}
 		switch fleetActions[m.action].key {
-		case "j":
+		case "f":
 			return m.jumpCmd(it)
 		case "h":
 			return m.hunkCmd(it)
@@ -289,8 +340,172 @@ func (m *fleetViewModel) actionKey(key string) tea.Cmd {
 			m.rebuildOrder(fleetFoldCursorKey(m.items(), it))
 		}
 	}
-	m.notice = "no action on " + key
+	if key != "enter" {
+		m.notice = "no action on " + key
+	}
 	return nil
+}
+
+// keyMsg routes a key to the pane that holds the focus. The plan pane is a
+// whole dungeon view, so it takes every key it can use except the two that
+// move between the panes.
+func (m *fleetViewModel) keyMsg(msg tea.KeyMsg) tea.Cmd {
+	if m.plan != nil && m.focus == "plan" {
+		return m.planKey(msg)
+	}
+	return m.key(msg.String())
+}
+
+func (m *fleetViewModel) planKey(msg tea.KeyMsg) tea.Cmd {
+	p := m.plan
+	switch msg.String() {
+	case "tab":
+		m.focus = "fleet"
+		return nil
+	case "esc":
+		if m.planAtRest() {
+			m.closePlan()
+			// The preview comes back the moment the split closes, not on the tick.
+			return m.refresh()
+		}
+	}
+	next, cmd := p.Update(msg)
+	*p = next.(viewModel)
+	return cmd
+}
+
+// planAtRest is true when the plan pane holds nothing of its own, so esc hands
+// the keyboard back to the fleet instead of closing something inside the plan.
+func (m *fleetViewModel) planAtRest() bool {
+	p := m.plan
+	return p == nil || (p.overlay == "" && !p.help && !p.prefix && !p.choiceMode())
+}
+
+// openPlan shows one encounter under the fleet. A unit row lands the plan
+// cursor on that unit, so the innards open where the operator was looking.
+func (m *fleetViewModel) openPlan(it fleetItem) tea.Cmd {
+	var enc *FleetEncounter
+	for i := range m.model.Encounters {
+		if m.model.Encounters[i].Name == it.encounter {
+			enc = &m.model.Encounters[i]
+			break
+		}
+	}
+	switch {
+	case enc == nil:
+		m.notice = "no plan for " + it.encounter
+		return nil
+	case enc.Err != "":
+		m.notice = "the plan will not read: " + enc.Err
+		return nil
+	}
+	if m.plan != nil && m.planName == it.encounter {
+		if !it.summary && !it.broken && it.row.ID != "" {
+			m.plan.rebuildOrder(it.row.ID)
+		}
+		m.focus = "plan"
+		return nil
+	}
+	p := newViewModel(enc.Path, StatePath(enc.Path), m.interval)
+	p.backend = m.backend
+	m.plan, m.planName, m.planLoading = &p, it.encounter, true
+	m.focus = "plan"
+	m.want = ""
+	if !it.summary && !it.broken {
+		m.want = it.row.ID
+	}
+	m.sizePlan()
+	return p.refresh()
+}
+
+func (m *fleetViewModel) closePlan() {
+	m.plan = nil
+	m.planName = ""
+	m.planLoading = false
+	m.want = ""
+	m.focus = "fleet"
+}
+
+// planCmd re-reads the open plan on the fleet's own tick. One ticker drives
+// both panes, so the split never drifts against itself.
+func (m *fleetViewModel) planCmd() tea.Cmd {
+	if m.plan == nil {
+		return nil
+	}
+	return m.plan.refresh()
+}
+
+// splitHeights gives the fleet the top third of the frame and the open plan
+// the rest. The plan keeps at least four rows: it is why the split exists.
+func (m fleetViewModel) splitHeights() (fleetH, planH int) {
+	fleetH = max(6, min(14, m.height/3))
+	fleetH = min(fleetH, max(3, m.height-9))
+	planH = max(4, m.height-fleetH-2)
+	return fleetH, planH
+}
+
+// sizePlan gives the plan pane the geometry it renders to. viewModel draws to
+// its own width and height, so the split owns that pair, not the plan.
+func (m *fleetViewModel) sizePlan() {
+	if m.plan == nil {
+		return
+	}
+	_, planH := m.splitHeights()
+	m.plan.width, m.plan.height = m.width, planH
+}
+
+// splitView puts the fleet on top and the open plan underneath. The plan keeps
+// its own header, its own footer and its own keys: the split is a geometry,
+// not a second renderer.
+func (m fleetViewModel) splitView() string {
+	if m.height < 16 {
+		// Too short for two panes: the plan takes the frame, and the fleet keeps
+		// only the footer hint that names it.
+		return m.planPane(max(4, m.height-2)) + "\n" + m.footerView()
+	}
+	fleetH, planH := m.splitHeights()
+	if m.overlay == "actions" {
+		// The box needs its rows, and the plan lends them while it is open.
+		fleetH = min(max(fleetH, 10), max(3, m.height-9))
+		planH = max(4, m.height-fleetH-2)
+	}
+	top := m.fleetPane(fleetH)
+	if m.overlay == "actions" {
+		top = overlayBottomRight(top, m.actionBox(), m.width)
+	}
+	return top + "\n" + m.planPane(planH) + "\n" + m.footerView()
+}
+
+// fleetPane draws the list without the preview, sized to the split.
+func (m fleetViewModel) fleetPane(height int) string {
+	rows := max(1, height-m.headerHeight())
+	lines, cursorLine := m.listLines(m.width)
+	lines = window(lines, cursorLine, rows)
+	block := m.headerView() + "\n" + strings.Join(lines, "\n")
+	if pad := height - m.headerHeight() - len(lines); pad > 0 {
+		block += strings.Repeat("\n", pad)
+	}
+	return block
+}
+
+// planPane draws the open plan at the height the split gives it. The plan
+// renders to its own size, so the split hands it one before every frame.
+func (m fleetViewModel) planPane(height int) string {
+	if m.plan == nil {
+		return ""
+	}
+	if m.planLoading {
+		return dimStyle.Render(truncate("loading "+m.planName+" …", max(1, m.width)))
+	}
+	m.plan.width, m.plan.height = m.width, height
+	lines := strings.Split(m.plan.View(), "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m fleetViewModel) jumpCmd(it fleetItem) tea.Cmd {
@@ -1001,19 +1216,20 @@ func (m fleetViewModel) listLines(width int) ([]string, int) {
 func (m fleetViewModel) render() string {
 	if m.err != nil {
 		return titleStyle.Render("dungeon fleet") + "\n\n" + m.err.Error() + "\n\n" +
-			dimStyle.Render("space r to retry, q to quit") + "\n"
+			dimStyle.Render("r retry · q quit") + "\n"
 	}
-	var body string
-	switch m.overlay {
-	case "detail":
-		body = m.detailOverlay()
-	case "actions":
-		body = m.listBody()
-		body = overlayBottomRight(body, m.actionBox(), m.width)
-	default:
-		body = m.listBody()
+	if m.overlay == "detail" {
+		// The card is a full frame: a card squeezed into the top third is
+		// unreadable, and esc brings the split back.
+		return m.headerView() + "\n" + m.detailOverlay() + "\n" + m.footerView()
 	}
-	return m.headerView() + "\n" + body + "\n" + m.footerView()
+	if m.plan != nil {
+		return m.splitView()
+	}
+	if m.overlay == "actions" {
+		return m.headerView() + "\n" + overlayBottomRight(m.listBody(), m.actionBox(), m.width) + "\n" + m.footerView()
+	}
+	return m.headerView() + "\n" + m.listBody() + "\n" + m.footerView()
 }
 
 // View clamps the frame to the terminal exactly as the encounter view does.
@@ -1197,12 +1413,18 @@ func (m fleetViewModel) actionBox() string {
 }
 
 func (m fleetViewModel) footerView() string {
-	keys := "j/k move · enter detail · space actions · q quit"
+	keys := "j/k move · enter plan · d detail · space actions · q quit"
+	if m.plan != nil {
+		keys = "FLEET · tab plan · j/k move · enter plan · d detail · space actions · q quit"
+		if m.focus == "plan" {
+			keys = "PLAN · tab fleet · esc back · ctrl+c quit"
+		}
+	}
 	if m.overlay == "detail" {
 		keys = "esc close · q quit"
 	}
 	if m.overlay == "actions" {
-		keys = "j/k choose · enter run · esc close · q quit"
+		keys = "f/h/c/e run · j/k choose · enter run · esc close · q quit"
 	}
 	if m.notice != "" {
 		keys = m.notice

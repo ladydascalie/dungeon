@@ -584,13 +584,27 @@ section the unit that moved last leads, ordered by the unit's own state
 timestamp or its report, not by the encounter's touch, so two encounters running
 at once interleave by activity.
 
-`j`/`k` move, `g`/`G` jump to the ends, `enter` or `d` opens the detail, and
-`space` opens the actions: jump to the lane, open its hunk session, copy the
-pane id, expand or fold failed and settled units. `q` quits. `esc` only closes
-an overlay and never quits, so a detached fleet is never lost to one keystroke.
+`j`/`k` move, `g`/`G` jump to the ends, and `d` opens the detail card.
+`enter` opens that row's plan under the fleet: the fleet keeps the top of the
+frame and the whole `dungeon view` takes the rest, with the plan cursor on the
+unit the fleet was on. A folded failure or a broken plan names its encounter,
+and `enter` opens the plan or says why it will not read. `tab` moves the
+keyboard between the two panes; `esc` closes the plan's overlay first, then the
+split, and never quits, so a detached fleet is never lost to one keystroke. In
+the plan pane every key is the plan view's own.
+
+`space` opens the actions: `f` jumps to the lane, `h` opens its hunk session,
+`c` copies the pane id, and `e` expands or folds failed and settled units. The
+key printed beside an action runs it; `j`/`k` and `enter` still choose. `q`
+quits.
+
+The split drives both panes from one ticker, so the fleet and the plan it shows
+never disagree about how old they are. Closing the split gives the preview its
+rows back on the next frame.
 
 The preview under the list reads the selected lane's pane once per refresh tick.
-When the pane is gone or unreadable it shows the lane's report instead, from
+It is hidden while the split is open, because the plan owns those rows. When the
+pane is gone or unreadable it shows the lane's report instead, from
 `.dungeon/reports/<unit>.md`, and the header names which of the two it read.
 
 The fleet view never writes. It reads plans, state, reports and panes. No key
