@@ -1201,8 +1201,8 @@ func recordedLaneHead(t *testing.T, statePath, unit string) string {
 }
 
 // A lane that commits inside its own paths leaves nothing uncommitted. The work
-// is there and gated, so the unit settles done, and the note says the lane
-// committed so the parent can see it happened.
+// is there and gated, so the unit settles done, and the note names the work it
+// found committed so the parent can see it happened.
 func TestLaneCommitInsidePathsSettlesDone(t *testing.T) {
 	repo := gitRepo(t)
 	fakeHerdr(t, "")
@@ -1233,8 +1233,8 @@ func TestLaneCommitInsidePathsSettlesDone(t *testing.T) {
 		t.Fatalf("unit %q, want done: %s", got, st.Units["A"].Note)
 	}
 	note := st.Units["A"].Note
-	if !strings.Contains(note, "lane committed its own work") || !strings.Contains(note, "src/lane.go") {
-		t.Fatalf("note %q must say the lane committed its own work", note)
+	if !strings.Contains(note, "already committed in your paths") || !strings.Contains(note, "src/lane.go") {
+		t.Fatalf("note %q must say the work was already committed", note)
 	}
 	if !strings.Contains(note, "accept: true ok") {
 		t.Fatalf("note %q lost the accept receipt", note)
@@ -1255,7 +1255,7 @@ func TestLaneCommitInsidePathsSettlesDone(t *testing.T) {
 // The regression this unit exists to prevent: a lane that commits work outside
 // its declared paths leaves git status empty, so the settle check used to see
 // nothing, commit nothing, and settle the unit green. It must block, name the
-// file and name the short commit that carried it.
+// file and carry the plan edit that covers it.
 func TestLaneCommitOutsidePathsBlocks(t *testing.T) {
 	repo := gitRepo(t)
 	fakeHerdr(t, "")
@@ -1281,14 +1281,12 @@ func TestLaneCommitOutsidePathsBlocks(t *testing.T) {
 	if got := st.UnitStatus("A"); got != "blocked" {
 		t.Fatalf("unit %q, want blocked: %s", got, st.Units["A"].Note)
 	}
-	short, err := gitRun(wt, "log", "-1", "--format=%h")
-	if err != nil {
-		t.Fatal(err)
-	}
 	note := st.Units["A"].Note
-	if !strings.Contains(note, "changed files outside your paths") ||
-		!strings.Contains(note, "fleet.go") || !strings.Contains(note, short) {
-		t.Fatalf("note %q must name fleet.go and commit %q", note, short)
+	for _, want := range []string{"changed files outside your paths", "fleet.go",
+		"dungeon edit unit A --paths-add '<glob>'"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q must carry %q", note, want)
+		}
 	}
 }
 
@@ -1336,8 +1334,8 @@ func TestSecondUnitIsNotBlockedByTheFirstsCommits(t *testing.T) {
 		if got := st.UnitStatus(id); got != "done" {
 			t.Fatalf("unit %q = %q, want done: %s", id, got, st.Units[id].Note)
 		}
-		if note := st.Units[id].Note; !strings.Contains(note, "lane committed its own work") {
-			t.Fatalf("unit %q note %q must say the lane committed", id, note)
+		if note := st.Units[id].Note; !strings.Contains(note, "already committed in your paths") {
+			t.Fatalf("unit %q note %q must say the work was already committed", id, note)
 		}
 	}
 	if strings.Contains(stdout, "blocked:") {
@@ -1476,16 +1474,33 @@ func depBranch(t *testing.T, repo, file, content string) {
 	git("checkout", "-q", "main")
 }
 
+// landDep merges dep/landed into main, so a lane's worktree is cut with the
+// dep's file already in the tree it starts from, the way a landed branch is.
+func landDep(t *testing.T, repo string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repo, "merge", "--no-ff", "dep/landed", "-m", "merge dep/landed")
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git merge dep/landed: %v\n%s", err, out)
+	}
+}
+
 // mergeCase runs one fake lane on a real worktree and returns the settled unit,
-// the run's stdout and the lane's worktree, so each shape of arrival is told the
-// same way.
-func mergeCase(t *testing.T, script string, dep func(t *testing.T, repo string)) (UnitState, string, string) {
+// the run's stdout and the lane's worktree, so each shape of change is told the
+// same way. paths overrides the unit's declared paths when it is not empty.
+func mergeCase(t *testing.T, paths, script string, dep func(t *testing.T, repo string)) (UnitState, string, string) {
 	t.Helper()
 	repo := gitRepo(t)
 	fakeHerdr(t, "")
 	t.Setenv("FAKE_REPORT", "1")
 	laneGitIdentity(t)
-	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	plan := planFor(repo)
+	if paths != "" {
+		plan = strings.Replace(plan, "paths: [src/**]", "paths: ["+paths+"]", 1)
+	}
+	planPath, statePath, _ := encounter(t, repo, plan)
 	if dep != nil {
 		dep(t, repo)
 	}
@@ -1506,40 +1521,177 @@ func mergeCase(t *testing.T, script string, dep func(t *testing.T, repo string))
 	return st.Units["A"], stdout, wt
 }
 
-// A lane that merges a landed branch has the dep's code in its worktree, but it
-// did not write those files and they are outside its paths. The unit settles
-// done, and the note does not name the dep's files as its own.
-func TestMergeOfALandedBranchSettlesDone(t *testing.T) {
-	u, stdout, _ := mergeCase(t, "git merge --no-ff dep/landed -m 'merge dep/landed'",
+// blockedOutside fails the test unless the unit blocked and its note names the
+// files and the plan edit that would have covered them.
+func blockedOutside(t *testing.T, u UnitState, stdout string, files ...string) {
+	t.Helper()
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	want := append([]string{"changed files outside your paths",
+		"dungeon edit unit A --paths-add '<glob>'"}, files...)
+	for _, w := range want {
+		if !strings.Contains(u.Note, w) {
+			t.Fatalf("note %q must carry %q", u.Note, w)
+		}
+	}
+}
+
+// B1: a lane asks git to merge its own out-of-paths commit from a side branch.
+// The commit is on a second parent, so no first-parent walk and no note can
+// blame it, but the tree holds the file and the recorded head does not.
+func TestLaneCommitMergedFromASideBranchBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `git checkout -q -b lane/side
+mkdir -p demo
+printf 'lane\n' > demo/a.go
+git add demo/a.go
+git commit -q -m 'lane wanders'
+git checkout -q -
+git merge --no-ff lane/side -m 'merge lane/side'`, nil)
+	blockedOutside(t, u, stdout, "demo/a.go")
+}
+
+// B2: the lane commits outside, parks the commit on a side branch and
+// fast-forwards to it. The branch moves, the tree holds the file, the recorded
+// head does not.
+func TestLaneFastForwardToAParkedCommitBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `git checkout -q -b lane/parked
+printf 'lane\n' > fleet.go
+git add fleet.go
+git commit -q -m 'lane parks'
+git checkout -q -
+git merge --ff-only lane/parked`, nil)
+	blockedOutside(t, u, stdout, "fleet.go")
+}
+
+// B3: the lane rebases onto a landed dep instead of merging it. Every dep commit
+// is now on the first-parent chain, and no reflog entry calls it a
+// fast-forward, so the dep's file is in the tree and outside the paths: block.
+func TestLaneRebaseOntoALandedBranchBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `mkdir -p src
+printf 'lane\n' > src/lane.go
+git add src/lane.go
+git commit -q -m 'lane work'
+git rebase dep/landed`, func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
+	blockedOutside(t, u, stdout, "fleet.go")
+}
+
+// A merge is the normal way to hit the guard now: the dep's file is in the tree,
+// outside the unit's paths, and the note says how to widen them.
+func TestMergeOfAnUndeclaredBranchBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", "git merge --no-ff dep/landed -m 'merge dep/landed'",
+		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
+	blockedOutside(t, u, stdout, "fleet.go")
+}
+
+// B4: the lane renames a landed dep file into its own paths. The destination is
+// inside the paths and the deletion is outside, so the block names the deletion:
+// --no-renames keeps the two halves apart instead of reporting the destination
+// alone.
+func TestRenameOfALandedFileIntoThePathsBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `mkdir -p src
+git mv fleet.go src/fleet.go
+git commit -q -m 'rename the dep file'`,
+		func(t *testing.T, repo string) {
+			depBranch(t, repo, "fleet.go", "dep\n")
+			landDep(t, repo)
+		})
+	blockedOutside(t, u, stdout, "fleet.go")
+	if strings.Contains(u.Note, "outside your paths: src/fleet.go") {
+		t.Fatalf("note %q blames the destination, not the deletion", u.Note)
+	}
+}
+
+// The other half of B4: the dep branch is not on the base, so its file is not in
+// the dispatch head either. The lane merges it and renames it into its own paths,
+// and the tree it leaves holds nothing outside those paths, so it is contained:
+// the lane deleted nothing that was there when it started, and the content now
+// lives in a file it owns.
+func TestMergeThenRenameIntoThePathsLeavesAContainedTree(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `mkdir -p src
+git merge --no-ff dep/landed -m 'merge dep/landed'
+git mv fleet.go src/fleet.go
+git commit -q -m 'rename the dep file'`,
 		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
 	if u.Status != "done" {
 		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
 	}
-	if strings.Contains(u.Note, "fleet.go") {
-		t.Fatalf("note %q names the dep's file as the unit's work", u.Note)
+}
+
+// A cherry-pick writes the file into the tree as the lane's own commit, which is
+// outside its paths, so it blocks like any other change.
+func TestCherryPickOutsideThePathsBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", "git cherry-pick dep/landed",
+		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
+	blockedOutside(t, u, stdout, "fleet.go")
+}
+
+// B5: a check that cannot run has proved nothing. A head git cannot read blocks
+// with the error, rather than reporting an empty change set and passing.
+func TestAGitErrorBlocksAndNamesIt(t *testing.T) {
+	repo := gitRepo(t)
+	fakeHerdr(t, "")
+	t.Setenv("FAKE_REPORT", "1")
+	planPath, statePath, _ := encounter(t, repo, planFor(repo))
+	if code, _, stderr := runCLI("up", "--no-dispatch", "--plan", planPath); code != 0 {
+		t.Fatalf("up: %s", stderr)
+	}
+	report := reportPath(planPath, "A")
+	if err := os.MkdirAll(filepath.Dir(report), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(report, []byte("did the thing\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const unreadable = "0123456789012345678901234567890123456789"
+	if err := st.SetUnit("A", "working", "brief "+briefPath(planPath, "A")); err != nil {
+		t.Fatal(err)
+	}
+	st.RecordLaneHead("A", unreadable)
+	if err := SaveState(statePath, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, _, stderr := runCLI("next", "--poll", "10ms", "--timeout", "5s", "--plan", planPath); code != 0 {
+		t.Fatalf("next: %s", stderr)
+	}
+	st, err = LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.UnitStatus("A"); got != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s", got, st.Units["A"].Note)
+	}
+	note := st.Units["A"].Note
+	if !strings.Contains(note, "could not check the unit's changes") || !strings.Contains(note, unreadable) {
+		t.Fatalf("note %q must name the error", note)
+	}
+}
+
+// A lane that merges a landed branch into a unit whose paths cover it is inside
+// its paths: the merge is a change like any other and the unit settles done.
+func TestMergeOfADeclaredBranchSettlesDone(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "src/**, fleet.go", "git merge --no-ff dep/landed -m 'merge dep/landed'",
+		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
+	if u.Status != "done" {
+		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
+	}
+	if !strings.Contains(u.Note, "already committed in your paths") || !strings.Contains(u.Note, "fleet.go") {
+		t.Fatalf("note %q must name the declared file as committed", u.Note)
 	}
 	if !strings.Contains(stdout, "done: A") {
 		t.Fatalf("output:\n%s", stdout)
 	}
 }
 
-// A fast-forward leaves no commit at all. The reflog names the merge, so the
-// files it brought are arrived, not written: still done, still unmentioned.
-func TestFastForwardOfALandedBranchSettlesDone(t *testing.T) {
-	u, stdout, _ := mergeCase(t, "git merge --ff-only dep/landed",
-		func(t *testing.T, repo string) { depBranch(t, repo, "fleet.go", "dep\n") })
-	if u.Status != "done" {
-		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
-	}
-	if strings.Contains(u.Note, "fleet.go") {
-		t.Fatalf("note %q names the dep's file as the unit's work", u.Note)
-	}
-}
-
-// A conflict resolved inside the unit's own paths is the lane's own resolution,
-// so it is its work and inside its paths: done.
+// A conflict resolved inside the unit's own paths is its own work and inside its
+// paths: done.
 func TestConflictResolvedInsideThePathsSettlesDone(t *testing.T) {
-	u, stdout, _ := mergeCase(t, `mkdir -p src
+	u, stdout, _ := mergeCase(t, "", `mkdir -p src
 printf 'lane\n' > src/lane.go
 git add src/lane.go
 git commit -q -m 'lane work'
@@ -1551,40 +1703,7 @@ git commit -q --no-edit`,
 	if u.Status != "done" {
 		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
 	}
-	if !strings.Contains(u.Note, "lane committed its own work") || !strings.Contains(u.Note, "src/lane.go") {
-		t.Fatalf("note %q must name the resolution as the lane's own work", u.Note)
-	}
-}
-
-// A cherry-pick is the lane's own commit by attribution, so a picked file
-// outside the paths still blocks, and the note names the lane's commit, not the
-// commit it picked from.
-func TestCherryPickOutsideThePathsStillBlocks(t *testing.T) {
-	var depShort string
-	u, stdout, wt := mergeCase(t, "git cherry-pick dep/landed",
-		func(t *testing.T, repo string) {
-			depBranch(t, repo, "fleet.go", "dep\n")
-			var err error
-			if depShort, err = gitRun(repo, "rev-parse", "--short", "dep/landed"); err != nil {
-				t.Fatal(err)
-			}
-		})
-	if u.Status != "blocked" {
-		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
-	}
-	laneShort, err := gitRun(wt, "rev-parse", "--short", "HEAD")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(u.Note, "changed files outside your paths") || !strings.Contains(u.Note, "fleet.go") {
-		t.Fatalf("note %q must name the picked file", u.Note)
-	}
-	// The picked commit is the lane's own, so the note must name the lane's
-	// commit: naming the dep's would read as if the dep wrote it here.
-	if laneShort == depShort {
-		t.Fatalf("the cherry-pick did not create a commit of the lane's own")
-	}
-	if !strings.Contains(u.Note, laneShort) || strings.Contains(u.Note, depShort) {
-		t.Fatalf("note %q must name the lane's commit %q, not the dep's %q", u.Note, laneShort, depShort)
+	if !strings.Contains(u.Note, "already committed in your paths") || !strings.Contains(u.Note, "src/lane.go") {
+		t.Fatalf("note %q must name the resolution", u.Note)
 	}
 }

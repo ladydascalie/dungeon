@@ -443,9 +443,10 @@ func settle(ctx context.Context, o dispatchOpts, p Plan, st *State, u Unit, m Mi
 	}
 	note := fmt.Sprintf("accept: %s ok (%s)", u.Accept, receipt)
 	if laneNote != "" {
-		// The lane committed work inside its own paths instead of leaving it
-		// uncommitted. Nothing blocks: the work is there and this gate proved
-		// it. The note says so, so the parent can see the lane committed.
+		// Work inside the unit's paths is already committed in the tree, so
+		// there was nothing for dungeon to commit. Nothing blocks: the work is
+		// there and this gate proved it. The note names the files, so the
+		// parent can see what carried them.
 		note += "; " + laneNote
 	}
 	st.SetUnit(u.ID, "done", note)

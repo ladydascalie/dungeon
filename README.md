@@ -307,6 +307,15 @@ An integrator unit must not set `accept`: its worktree is cut from base and
 does not contain the other writers' work, so the gate can never pass. `dungeon land`
 merges and re-gates.
 
+Paths are the commit guard as well as the work split. At settle dungeon diffs the
+tree against the commit recorded when the unit was dispatched, so every changed
+file must sit inside the unit's paths, whatever carried it: the lane's own
+commit, a merge, a fast-forward, a rebase, a cherry-pick or the working tree. A
+unit that merges a landed branch therefore declares that branch's files in its
+own paths. The block note names the files and the `--paths-add` edit that fixes
+it. Work inside the paths is committed on the lane branch, so a lane still never
+commits.
+
 `dungeon edit` changes one field of one unit or one minion without editing yaml
 by hand. It edits the text, so comments, blank lines and the rest of the file
 survive, and it prints the diff. It refuses a change that adds a finding, and

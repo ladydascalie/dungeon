@@ -257,9 +257,9 @@ func TestUntrackedDirectoryIsMatchedFileByFile(t *testing.T) {
 }
 
 // A lane that commits its own work leaves git status empty. Counting from the
-// head recorded at dispatch still sees it, and the note names both the file and
-// the short commit that carried it.
-func TestCommittedWorkOutsideThePathsBlocksWithItsCommit(t *testing.T) {
+// head recorded at dispatch still sees it, the note names the file, and the note
+// carries the plan edit that would have covered it.
+func TestCommittedWorkOutsideThePathsBlocks(t *testing.T) {
 	repo := gitRepo(t)
 	enc := t.TempDir()
 	planPath := filepath.Join(enc, ".dungeon", "plan.yaml")
@@ -283,10 +283,6 @@ func TestCommittedWorkOutsideThePathsBlocksWithItsCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitAll(t, wt, "lane wanders")
-	short, err := gitRun(wt, "log", "-1", "--format=%h")
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	u := Unit{ID: "A", Paths: []string{"src/**"}}
 	o := dispatchOpts{planPath: planPath}
@@ -299,9 +295,11 @@ func TestCommittedWorkOutsideThePathsBlocksWithItsCommit(t *testing.T) {
 		t.Fatal("a commit outside the paths must block")
 	}
 	note := guarded.Units["A"].Note
-	if !strings.Contains(note, "changed files outside your paths") ||
-		!strings.Contains(note, "elsewhere.txt") || !strings.Contains(note, short) {
-		t.Fatalf("note %q must name the file and commit %q", note, short)
+	for _, want := range []string{"changed files outside your paths", "elsewhere.txt",
+		"dungeon edit unit A --paths-add '<glob>'"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q must carry %q", note, want)
+		}
 	}
 
 	// The guard is not retroactive: a state with no recorded head reads git
@@ -354,75 +352,78 @@ func TestCommittedThenModifiedFileIsNamedOnce(t *testing.T) {
 	}
 }
 
-// A merge commit's difference from its first parent also names every file the
-// other branch changed, which the lane did not write. Only what differs from
-// every parent is the lane's resolution, so a file that arrived untouched is
-// never counted as written.
-func TestMergeWritesOnlyTheResolution(t *testing.T) {
+// A rename is the deletion it is plus the addition it makes. Without
+// --no-renames git reports only the destination, so a file renamed out of the
+// unit's paths would leave its deletion unseen; no pattern can hide a path it
+// deleted.
+func TestChangedSinceSeesBothSidesOfARename(t *testing.T) {
 	repo := gitRepo(t)
-	env := append(os.Environ(),
-		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
-		"GIT_AUTHOR_DATE=2000-01-01T00:00:00 +0000",
-		"GIT_COMMITTER_DATE=2000-01-01T00:00:00 +0000")
-	git := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", repo}, args...)...)
-		cmd.Env = env
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
+	if err := os.WriteFile(filepath.Join(repo, "fleet.go"), []byte("dep\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	write := func(name, body string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(repo, name), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	write("a.txt", "base\n")
-	write("b.txt", "base\n")
-	commitAll(t, repo, "files")
+	commitAll(t, repo, "dep work")
 	head, err := gitRun(repo, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	git("checkout", "-q", "-b", "dep/landed")
-	write("a.txt", "dep\n")
-	write("b.txt", "dep\n")
-	commitAll(t, repo, "dep work")
-	git("checkout", "-q", "main")
-
-	write("a.txt", "lane\n")
-	commitAll(t, repo, "lane work")
-	merge := exec.Command("git", "-C", repo, "merge", "--no-ff", "dep/landed", "-m", "merge dep/landed")
-	merge.Env = env
-	if err := merge.Run(); err == nil {
-		t.Fatal("the fixture needs a conflict on a.txt")
+	if err := os.MkdirAll(filepath.Join(repo, "src"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	write("a.txt", "resolved\n")
-	commitAll(t, repo, "merge dep/landed")
+	cmd := exec.Command("git", "-C", repo, "mv", "fleet.go", "src/fleet.go")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git mv: %v\n%s", err, out)
+	}
 
-	written, err := writtenFiles(repo, head)
+	changed, uncommitted, err := changedSince(repo, head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	short, err := gitRun(repo, "rev-parse", "--short", "HEAD")
+	if len(changed) != 2 || changed[0] != "fleet.go" || changed[1] != "src/fleet.go" {
+		t.Fatalf("changedSince = %q, want the deletion and the addition", changed)
+	}
+	// The rename is staged and not committed, so both halves are dungeon's to
+	// commit when the source is inside the paths.
+	if len(uncommitted) != 1 || uncommitted[0] != "src/fleet.go" {
+		t.Fatalf("uncommitted = %q, want the destination git status reports", uncommitted)
+	}
+}
+
+// An untracked file is a change like any other, and git diff names only tracked
+// paths, so the uncommitted list is what makes it count.
+func TestChangedSinceCountsAnUntrackedFile(t *testing.T) {
+	repo := gitRepo(t)
+	head, err := gitRun(repo, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := written["a.txt"]; got != short {
-		t.Fatalf("a.txt named by %q, want the merge %q: %v", got, short, written)
+	if err := os.MkdirAll(filepath.Join(repo, "cmd", "tool"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := written["b.txt"]; ok {
-		t.Fatalf("a file that arrived through the merge was counted as written: %v", written)
+	if err := os.WriteFile(filepath.Join(repo, "cmd", "tool", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	commits, err := laneCommits(repo, head)
+
+	changed, uncommitted, err := changedSince(repo, head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(commits) != 2 {
-		t.Fatalf("laneCommits = %v, want the lane's own two commits", commits)
+	if len(changed) != 1 || changed[0] != "cmd/tool/main.go" {
+		t.Fatalf("changedSince = %q, want the untracked file", changed)
+	}
+	if len(uncommitted) != 1 || uncommitted[0] != "cmd/tool/main.go" {
+		t.Fatalf("uncommitted = %q, want the untracked file", uncommitted)
+	}
+}
+
+// A check that cannot read the recorded head has proved nothing, so it reports
+// the error rather than an empty change set. The caller blocks on it.
+func TestChangedSinceReportsAGitError(t *testing.T) {
+	repo := gitRepo(t)
+	changed, _, err := changedSince(repo, "0123456789012345678901234567890123456789")
+	if err == nil {
+		t.Fatalf("a head that is not a commit returned %q and no error", changed)
+	}
+	if !strings.Contains(err.Error(), "0123456789012345678901234567890123456789") {
+		t.Fatalf("error %q must name what git could not read", err)
 	}
 }

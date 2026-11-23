@@ -207,6 +207,14 @@ Good units, in the order that matters:
 - **A small unit.** A unit a lane can finish in one sitting gets a report worth
   reading.
 
+Paths are also the commit guard. At settle dungeon diffs the tree against the
+commit recorded when the unit was dispatched, so every changed file must sit
+inside the unit's paths, whatever carried it: the lane's own commit, a merge, a
+fast-forward, a rebase, a cherry-pick or the working tree. A unit that merges a
+landed branch therefore declares that branch's files in its own paths. The block
+note names the files and the `dungeon edit unit <id> --paths-add '<glob>'` that
+widens them.
+
 More than one encounter under `.dungeon`: `dungeon view` opens a picker, and
 every other command needs `--plan`, or `--all` on `up`, `next` and `land` to
 sweep every encounter. Extra encounters live at `.dungeon/<name>/plan.yaml` with
