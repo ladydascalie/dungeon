@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -49,10 +50,12 @@ func (t *fleetTarget) settled() bool {
 }
 
 // fleetOpts is what a sweep refuses: --plan names one encounter, --state names
-// one state file, and a sweep is every encounter with its own state.
+// one state file, and a sweep is every encounter with its own state. only is
+// the encounters the operator named, and an empty only means the whole fleet.
 type fleetOpts struct {
 	planPath  string
 	statePath string
+	only      []string
 	stderr    io.Writer
 }
 
@@ -67,14 +70,69 @@ func (f fleetOpts) refusal() string {
 	return ""
 }
 
+// nameList is --only: repeatable, and comma separated inside one value, so
+// `--only a --only b` and `--only a,b` reach the same targets. set records that
+// the flag was typed at all, because an empty --only is a mistake, not a sweep
+// of everything.
+type nameList struct {
+	names []string
+	set   bool
+}
+
+func (l *nameList) String() string { return strings.Join(l.names, ",") }
+
+func (l *nameList) Set(v string) error {
+	l.set = true
+	for _, name := range strings.Split(v, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			l.names = append(l.names, name)
+		}
+	}
+	return nil
+}
+
+func onlyFlag(fs *flag.FlagSet) *nameList {
+	l := &nameList{}
+	fs.Var(l, "only", "name the encounters a sweep means: repeat or comma separate")
+	return l
+}
+
+// onlyGuard refuses --only where it cannot mean anything. A single plan is
+// named with --plan, and a name that is not a name cannot filter.
+func onlyGuard(l *nameList, all bool, stderr io.Writer) int {
+	if !l.set {
+		return 0
+	}
+	if !all {
+		fmt.Fprintln(stderr, "dungeon: --only names the encounters a sweep means, so it needs --all")
+		fmt.Fprintln(stderr, "dungeon: name one plan with --plan")
+		return 2
+	}
+	if len(l.names) == 0 {
+		fmt.Fprintln(stderr, "dungeon: --only needs an encounter name")
+		return 2
+	}
+	return 0
+}
+
 // fleetLoad is what loading a fleet found. duplicate stops the whole sweep,
 // because two plan files that claim one encounter name would share one worktree,
-// one branch and one box key.
+// one branch and one box key. left holds every encounter the load could not
+// take, with the name --only would use to ask for it.
 type fleetLoad struct {
 	targets   []*fleetTarget
+	left      []fleetLeft
 	total     int
 	skipped   int
 	duplicate string
+}
+
+// fleetLeft is one encounter that did not load: the name the operator can pass
+// to --only, and why the load refused it.
+type fleetLeft struct {
+	Name   string
+	Path   string
+	Reason string
 }
 
 // loadFleet loads every encounter and applies the same guards the single-plan
@@ -94,6 +152,7 @@ func loadFleet(force bool, out io.Writer) fleetLoad {
 		if reason != "" {
 			fmt.Fprintf(out, "skipped %s: %s\n", shortPath(e.Path), reason)
 			load.skipped++
+			load.left = append(load.left, fleetLeft{Name: e.Name, Path: e.Path, Reason: reason})
 			continue
 		}
 		if first, ok := seen[t.encounter()]; ok {
@@ -287,7 +346,7 @@ func nextAllCmd(ctx context.Context, o dispatchOpts, flags fleetOpts) int {
 		fmt.Fprintf(flags.stderr, "dungeon: %s\n", msg)
 		return 2
 	}
-	load, code := sweepTargets(o.force, o.out, flags.stderr)
+	load, code := sweepTargets(o.force, flags.only, o.out, flags.stderr)
 	if code != 0 {
 		return code
 	}
@@ -314,16 +373,75 @@ func nextAllCmd(ctx context.Context, o dispatchOpts, flags fleetOpts) int {
 
 // sweepTargets loads the fleet and turns a refusal into the exit code the
 // operator gets. Every fleet command starts here.
-func sweepTargets(force bool, out, stderr io.Writer) (fleetLoad, int) {
+func sweepTargets(force bool, only []string, out, stderr io.Writer) (fleetLoad, int) {
 	load := loadFleet(force, out)
 	if load.duplicate != "" {
 		fmt.Fprintf(stderr, "dungeon: %s\n", load.duplicate)
 		return load, 2
 	}
+	load, code := filterFleet(load, only, stderr)
+	if code != 0 {
+		return load, code
+	}
 	if len(load.targets) == 0 {
 		return load, noTargets(stderr)
 	}
 	return load, 0
+}
+
+// filterFleet keeps the encounters an operator named and nothing else. A name
+// is the plan's encounter: field, else the directory holding plan.yaml, which is
+// the name the view, the digest and duplicate already use.
+//
+// It runs after loadFleet and never before: an encounter the operator did not
+// name must not change whether the sweep runs. Only the encounters in scope are
+// counted afterwards, so an out-of-scope plan that failed to load neither fails
+// the run nor inflates its skipped summary.
+func filterFleet(load fleetLoad, only []string, stderr io.Writer) (fleetLoad, int) {
+	if len(only) == 0 {
+		return load, 0
+	}
+	wanted := make(map[string]bool, len(only))
+	var order []string
+	for _, name := range only {
+		if !wanted[name] {
+			wanted[name] = true
+			order = append(order, name)
+		}
+	}
+	left := make(map[string]fleetLeft, len(load.left))
+	for _, l := range load.left {
+		left[l.Name] = l
+	}
+
+	var out fleetLoad
+	out.duplicate = load.duplicate
+	matched := map[string]bool{}
+	for _, t := range load.targets {
+		if name := t.encounter(); wanted[name] {
+			out.targets = append(out.targets, t)
+			matched[name] = true
+		}
+	}
+	var unknown []string
+	for _, name := range order {
+		if matched[name] {
+			continue
+		}
+		if l, ok := left[name]; ok {
+			// The operator asked for this encounter, so its finding is the
+			// answer, not an unknown name.
+			fmt.Fprintf(stderr, "dungeon: --only %s: %s does not load: %s\n", name, shortPath(l.Path), l.Reason)
+			return load, 2
+		}
+		unknown = append(unknown, name)
+	}
+	if len(unknown) > 0 {
+		fmt.Fprintf(stderr, "dungeon: --only matched no encounter: %s\n", strings.Join(unknown, ", "))
+		return load, 2
+	}
+	out.total = len(out.targets)
+	return out, 0
 }
 
 // upAllInput is one up --all: the dispatch options, the flags it refuses, and
@@ -342,7 +460,7 @@ func upAllCmd(ctx context.Context, in upAllInput) int {
 		fmt.Fprintf(in.flags.stderr, "dungeon: %s\n", msg)
 		return 2
 	}
-	load, code := sweepTargets(in.opts.force, in.opts.out, in.flags.stderr)
+	load, code := sweepTargets(in.opts.force, in.flags.only, in.opts.out, in.flags.stderr)
 	if code != 0 {
 		return code
 	}
@@ -675,21 +793,25 @@ func worktreeOnBranch(path, branch string) bool {
 // combines them on one branch.
 func landAllCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs, lf := landFlagSet("land", stderr)
+	only := onlyFlag(fs)
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		return 2
+	}
+	if code := onlyGuard(only, true, stderr); code != 0 {
+		return code
 	}
 	if len(rest) > 0 {
 		*lf.planPath = rest[0]
 	}
 	o := *lf.opts
 	o.skipGate, o.force, o.out = *lf.noGate, *lf.force, stdout
-	flags := fleetOpts{planPath: *lf.planPath, statePath: lf.statePath, stderr: stderr}
+	flags := fleetOpts{planPath: *lf.planPath, statePath: lf.statePath, only: only.names, stderr: stderr}
 	if msg := flags.refusal(); msg != "" {
 		fmt.Fprintf(stderr, "dungeon: %s\n", msg)
 		return 2
 	}
-	load, code := sweepTargets(o.force, stdout, stderr)
+	load, code := sweepTargets(o.force, flags.only, stdout, stderr)
 	if code != 0 {
 		return code
 	}
@@ -743,10 +865,14 @@ func landOrFleet(ctx context.Context, args []string, stdout, stderr io.Writer) i
 	// The router parses with the same flag set the commands use, so a flag it
 	// does not route on cannot make it miss --all.
 	fs, lf := landFlagSet("land", io.Discard)
+	only := onlyFlag(fs)
 	rest, err := parseMixed(fs, args)
 	if err != nil {
 		// Let landCmd report the flag error the operator actually made.
 		return landCmd(ctx, args, stdout, stderr)
+	}
+	if code := onlyGuard(only, *lf.all, stderr); code != 0 {
+		return code
 	}
 	if *lf.all {
 		return landAllCmd(ctx, args, stdout, stderr)

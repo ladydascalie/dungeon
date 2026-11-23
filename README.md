@@ -60,6 +60,7 @@ dungeon down                       # close the lanes, keep the run
 
 dungeon up --all                   # spawn every encounter, then one next --all round
 dungeon next --all                 # sweep every encounter in one pass
+dungeon next --all --only a,b      # sweep only the encounters named
 dungeon land --all                 # land every encounter on one combined branch
 
 dungeon clear                      # delete the finished plans, keep the runs
@@ -483,6 +484,18 @@ dungeon land --all --branch fleet/run-1
 `--all` with `--plan` or `--state` is exit 2: a sweep keeps one state per
 encounter.
 A plan edited after dispatch is refused unless `--force`.
+
+`--only` names the encounters a sweep means. It takes a name once or comma
+separated, so `--only a --only b` and `--only a,b` are one sweep. A name is the
+plan's `encounter:` field, else the directory holding `plan.yaml`, which is the
+name the view, the digest and `duplicate` use. A name that matches no encounter,
+or a plan that failed to load, is exit 2 with that plan's finding; no target
+after filtering is exit 2; `--only` without `--all` is exit 2, because a single
+plan is named with `--plan`. Every encounter is still loaded, so a broken plan
+out of scope cannot fail a run nobody asked for. It exists because `land --all`
+in a repo with finished encounters lands all of them, re-runs their gates, and
+one stale conflict withholds the combined branch for the live work, so a sweep
+must be able to say `--only a,b`.
 
 `next --all` opens one mux for the whole sweep, not one per plan, and prints one
 block per plan. The block names the encounter and carries the same dispatched,
