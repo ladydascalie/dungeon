@@ -541,7 +541,8 @@ The lane owns the fix. Your moves, in order:
    your report to the operator with that line. It is a plan change, not a
    stalled watch.
 3. Re-queue: `dungeon set unit <id> planned --note "retry: <why>"`, then
-   `dungeon next`.
+   `dungeon next --force`: the plan edit moved the plan hash, so `next` refuses
+   it without the flag.
 4. If the unit itself is wrong, split it, reassign it, or cancel it. That is
    plan work, and plan work is yours.
 5. If it needs a decision only the operator can make, stop and ask. Do not

@@ -1688,6 +1688,88 @@ func TestMergeOfADeclaredBranchSettlesDone(t *testing.T) {
 	}
 }
 
+// The .dungeon exemption is a prefix, not a component. A lane that puts a code
+// file under pkg/.dungeon/ chooses only the directory, so the file is a change
+// outside its paths: it must block, or land merges it onto integration.
+func TestCommitUnderANestedDungeonBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `mkdir -p pkg/.dungeon
+printf 'lane\n' > pkg/.dungeon/inject.go
+git add pkg/.dungeon/inject.go
+git commit -q -m 'smuggle'`, nil)
+	blockedOutside(t, u, stdout, "pkg/.dungeon/inject.go")
+}
+
+// The exemption that is meant: .dungeon/ at the top of the lane's own worktree,
+// where a lane keeps screenshots and notes. A commit there is scratch, not work.
+func TestCommitUnderTheWorktreeDungeonSettlesDone(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `mkdir -p .dungeon/shots
+printf 'png\n' > .dungeon/shots/a.png
+git add .dungeon/shots/a.png
+git commit -q -m 'notes'`, nil)
+	if u.Status != "done" {
+		t.Fatalf("unit %q, want done: %s\n%s", u.Status, u.Note, stdout)
+	}
+	if strings.Contains(u.Note, "outside your paths") {
+		t.Fatalf("note %q blames the worktree .dungeon", u.Note)
+	}
+}
+
+// trackedOutside puts one file outside the unit's paths in the base commit, so a
+// blindness case modifies a file the guard already knows about rather than one
+// the lane adds.
+func trackedOutside(t *testing.T, repo string) {
+	t.Helper()
+	depBranch(t, repo, "outside.go", "base\n")
+	landDep(t, repo)
+}
+
+// A lane can tell the index not to look at a tracked file outside its paths and
+// then modify it. git status and git diff both go quiet, so the accept gate
+// would run against a tree that is not the tree land keeps. It blocks, and the
+// note names the file and the flag.
+func TestAssumeUnchangedFileBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `git update-index --assume-unchanged outside.go
+printf 'lane\n' > outside.go`, trackedOutside)
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	for _, want := range []string{"outside.go", "assume-unchanged"} {
+		if !strings.Contains(u.Note, want) {
+			t.Fatalf("note %q must carry %q", u.Note, want)
+		}
+	}
+}
+
+// The same with skip-worktree, which the index reports as its own tag.
+func TestSkipWorktreeFileBlocks(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `git update-index --skip-worktree outside.go
+printf 'lane\n' > outside.go`, trackedOutside)
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	for _, want := range []string{"outside.go", "skip-worktree"} {
+		if !strings.Contains(u.Note, want) {
+			t.Fatalf("note %q must carry %q", u.Note, want)
+		}
+	}
+}
+
+// core.fileMode off hides the executable bit from status and from the diff, so a
+// chmod outside the paths is a mode change nothing sees. It blocks, and the note
+// names the flag.
+func TestFileModeOffBlocksAndNamesTheFlag(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `git config core.fileMode false
+chmod +x outside.go`, trackedOutside)
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	for _, want := range []string{"core.fileMode", "git config core.fileMode true"} {
+		if !strings.Contains(u.Note, want) {
+			t.Fatalf("note %q must carry %q", u.Note, want)
+		}
+	}
+}
+
 // A conflict resolved inside the unit's own paths is its own work and inside its
 // paths: done.
 func TestConflictResolvedInsideThePathsSettlesDone(t *testing.T) {

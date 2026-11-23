@@ -168,15 +168,22 @@ func printEncounters(w io.Writer, found []Encounter) {
 
 // underEncounter reports whether a path belongs to the encounter rather than to
 // the code: the state, the briefs, the reports, the lane sessions.
+//
+// Two prefixes are exempt, and only two: the encounter directory the plan lives
+// in, and .dungeon/ at the top of the lane's own worktree, where a lane keeps
+// screenshots and notes. A .dungeon directory anywhere deeper in the path is
+// code: pkg/.dungeon/inject.go is a change outside the paths like any other, and
+// a component found in the middle of a path exempts nothing.
 func underEncounter(planPath, file string) bool {
-	// git reports changed files relative to the directory it runs in, so a
-	// lane's own .dungeon/ never matches the plan's encounter by subtraction.
-	// Every .dungeon component is encounter scratch: the state, a brief, a
-	// report, a screenshot.
-	for _, part := range strings.Split(filepath.ToSlash(file), "/") {
-		if part == ".dungeon" {
-			return true
-		}
+	// git reports changed files relative to the directory it runs in, so the
+	// worktree root .dungeon/ arrives as .dungeon/... or, from a subdirectory,
+	// behind leading ../ segments. The exemption is that prefix, not any depth.
+	parts := strings.Split(filepath.ToSlash(file), "/")
+	i := 0
+	for ; i < len(parts) && (parts[i] == "." || parts[i] == ".."); i++ {
+	}
+	if i < len(parts) && parts[i] == ".dungeon" {
+		return true
 	}
 	if !filepath.IsAbs(file) {
 		return false
@@ -186,6 +193,51 @@ func underEncounter(planPath, file string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// blindState names why git cannot be trusted to see this worktree: a path the
+// index has been told not to look at, or a repo told to ignore the executable
+// bit. A lane has bash, so it can set any of them on a tracked file outside its
+// paths, modify the file, and settle on a tree that differs from the one land
+// would keep. Nothing here fails open: a tree that cannot be read honestly is
+// blocked, and the note names the file or the flag.
+//
+// The marks are read before the refresh, because a refresh clears the
+// assume-unchanged bit it finds and reports the file as the change it is. That
+// read is honest, but the lane set the flag to hide a file, and the operator
+// should see the flag named rather than a change that looks ordinary.
+//
+// The refresh then runs before the caller reads the tree, so a stat cache that
+// says nothing changed does not decide the read. A non-zero exit from it is not
+// a failure: it reports the index it just refreshed, including unmerged
+// entries, and the read that follows is what the guard judges.
+func blindState(dir string) (string, error) {
+	entries, err := gitNul(dir, "ls-files", "-v", "-z")
+	if err != nil {
+		return "", err
+	}
+	var marks []string
+	for _, entry := range entries {
+		if len(entry) < 3 || entry[1] != ' ' {
+			continue
+		}
+		tag, path := entry[0], entry[2:]
+		switch {
+		case tag == 'S':
+			marks = append(marks, path+" is skip-worktree")
+		case tag >= 'a' && tag <= 'z':
+			marks = append(marks, path+" is assume-unchanged")
+		}
+	}
+	if len(marks) > 0 {
+		return "git is blind to part of this worktree: " + truncate(strings.Join(marks, ", "), 200) +
+			" (clear it: git update-index --no-assume-unchanged <file>, --no-skip-worktree <file>)", nil
+	}
+	if mode, err := gitRun(dir, "config", "--bool", "core.fileMode"); err == nil && mode == "false" {
+		return "git core.fileMode is false, so a mode change is invisible (git config core.fileMode true)", nil
+	}
+	_, _ = gitRun(dir, "update-index", "-q", "--really-refresh")
+	return "", nil
 }
 
 // ownedBy reports whether a changed file sits inside the paths a unit declared.
@@ -362,10 +414,23 @@ func commitLaneWork(dir, message string, files []string) error {
 // A git failure on a unit with a recorded head blocks. A check that cannot run
 // has not shown that the unit contains its work, and failing open is the one
 // failure a lane could aim for.
+//
+// The tree is read only when git can see it honestly. An index that carries an
+// assume-unchanged or skip-worktree entry, or a repo with core.fileMode off,
+// hides a tracked file from status and from the diff, so the accept gate would
+// run against a tree that is not the tree land merges. That blocks too, and the
+// note names the file or the flag.
 func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) (bool, string) {
 	dir, head := minionDir(p, m), st.Units[u.ID].LaneHead
 	if head == "" && !gitCheckout(dir) {
 		return false, ""
+	}
+	if note, err := blindState(dir); err != nil {
+		st.SetUnit(u.ID, "blocked", "could not read the unit's worktree: "+truncate(err.Error(), 200))
+		return true, ""
+	} else if note != "" {
+		st.SetUnit(u.ID, "blocked", note)
+		return true, ""
 	}
 	changed, uncommitted, err := changedSince(dir, head)
 	if err != nil {

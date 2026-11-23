@@ -115,6 +115,13 @@ func TestUnderEncounterAcceptsAnySpelling(t *testing.T) {
 		{"relative plan path, root relative file", relPlan, ".dungeon/state.json", true},
 		{"code", planPath, "src/main.go", false},
 		{"lookalike", planPath, "docs/.dungeonish/x", false},
+		// The exemption is a prefix, not a component: a lane that puts code
+		// under a .dungeon directory of its own chooses the directory, not the
+		// rule, so the file is a change outside the paths.
+		{"nested .dungeon is code", planPath, "pkg/.dungeon/inject.go", false},
+		{"nested .dungeon, deeper", planPath, "a/b/.dungeon/x.go", false},
+		{"nested .dungeon, from a subdirectory", planPath, "../../pkg/.dungeon/x.go", false},
+		{"absolute nested .dungeon", planPath, filepath.Join(enc, "pkg", ".dungeon", "inject.go"), false},
 	}
 	for _, c := range cases {
 		if got := underEncounter(c.plan, c.file); got != c.want {
