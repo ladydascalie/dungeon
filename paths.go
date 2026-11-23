@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -196,11 +197,19 @@ func underEncounter(planPath, file string) bool {
 }
 
 // blindState names why git cannot be trusted to see this worktree: a path the
-// index has been told not to look at, or a repo told to ignore the executable
-// bit. A lane has bash, so it can set any of them on a tracked file outside its
-// paths, modify the file, and settle on a tree that differs from the one land
-// would keep. Nothing here fails open: a tree that cannot be read honestly is
-// blocked, and the note names the file or the flag.
+// index has been told not to look at, a repo told to ignore the executable bit,
+// a ref that swaps the tree git reports for another one, or a clean or smudge
+// filter that rewrites a file on its way into git. A lane has bash, so it can
+// set any of them on a tracked file outside its paths, modify the file, and
+// settle on a tree that differs from the one land would keep. Nothing here
+// fails open: a tree that cannot be read honestly is blocked, and the note
+// names the file, the flag, the ref or the filter.
+//
+// The list is the shapes a review found, not every way git can be told to lie.
+// A longer list would still miss the next one. The guard catches drift, not a
+// hostile lane: a lane with the same shell in the same repository can forge
+// git evidence, rewrite the plan or edit the state. What holds the boundary is
+// the parent reading the diff and the gate, not this check.
 //
 // The marks are read before the refresh, because a refresh clears the
 // assume-unchanged bit it finds and reports the file as the change it is. That
@@ -236,8 +245,111 @@ func blindState(dir string) (string, error) {
 	if mode, err := gitRun(dir, "config", "--bool", "core.fileMode"); err == nil && mode == "false" {
 		return "git core.fileMode is false, so a mode change is invisible (git config core.fileMode true)", nil
 	}
+	if note, err := forgedState(dir); err != nil {
+		return "", err
+	} else if note != "" {
+		return note, nil
+	}
 	_, _ = gitRun(dir, "update-index", "-q", "--really-refresh")
 	return "", nil
+}
+
+// forgedState names why this repository is set up to report a tree it does not
+// hold: a replace ref swaps the object git reports for a commit of the lane's
+// choosing, and a clean or smudge filter rewrites a file as it enters or leaves
+// the object store. Both are the lie assume-unchanged tells the index, kept in
+// refs and config instead.
+//
+// A filter that is configured but drives no attribute is inert: no file in this
+// tree goes through it, so it says nothing false and is not named.
+func forgedState(dir string) (string, error) {
+	refs, err := gitRun(dir, "for-each-ref", "--format=%(refname)", "refs/replace")
+	if err != nil {
+		return "", err
+	}
+	if refs != "" {
+		return "this repo has a replace ref, so git reports a tree it does not hold: " +
+			truncate(strings.Join(strings.Fields(refs), ", "), 100) + " (clear it: git replace -d <ref>)", nil
+	}
+	applied, err := appliedFilters(dir)
+	if err != nil {
+		return "", err
+	}
+	if len(applied) > 0 {
+		return "a git filter rewrites this tree: " + truncate(strings.Join(applied, ", "), 150) +
+			" (remove the attribute or the filter's clean and smudge commands)", nil
+	}
+	return "", nil
+}
+
+// appliedFilters lists the filters that drive an attribute on a tracked file
+// and carry a clean or smudge command. The attribute read is what makes a
+// configured filter matter: git-lfs installs filter commands in every global
+// config, and only a repository whose attributes name that filter rewrites a
+// file. The read covers every attribute source, including the common git dir's
+// info/attributes, which is where a lane hides one: the worktree git dir is not
+// read for attributes.
+func appliedFilters(dir string) ([]string, error) {
+	files, err := gitNul(dir, "ls-files", "-z")
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	out, err := gitStdin(dir, strings.Join(files, "\x00")+"\x00", "check-attr", "-z", "--stdin", "filter")
+	if err != nil {
+		return nil, err
+	}
+	// check-attr -z emits three NUL-terminated fields per file: path, attribute,
+	// value.
+	fields := strings.Split(string(out), "\x00")
+	seen := map[string]bool{}
+	var applied []string
+	for i := 0; i+2 < len(fields); i += 3 {
+		path, value := fields[i], fields[i+2]
+		if value == "" || value == "unspecified" || value == "unset" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		for _, hook := range []string{"clean", "smudge"} {
+			set, err := configSet(dir, "filter."+value+"."+hook)
+			if err != nil {
+				return nil, err
+			}
+			if set {
+				applied = append(applied, path+" uses filter "+value+" ("+hook+")")
+				break
+			}
+		}
+	}
+	return applied, nil
+}
+
+// configSet reports whether a config key holds a value. git exits 1 when the
+// key is missing, which is a no rather than a failure.
+func configSet(dir, key string) (bool, error) {
+	out, err := exec.Command("git", "-C", dir, "config", "--get", key).Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("git config --get %s in %s: %w", key, dir, err)
+	}
+	return strings.TrimSpace(string(out)) != "", nil
+}
+
+// gitStdin runs git in dir with input on stdin and returns its stdout. One
+// attribute read covers the whole tree rather than one process per file.
+func gitStdin(dir, input string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s in %s: %w", strings.Join(args, " "), dir, err)
+	}
+	return out, nil
 }
 
 // ownedBy reports whether a changed file sits inside the paths a unit declared.
@@ -416,10 +528,13 @@ func commitLaneWork(dir, message string, files []string) error {
 // failure a lane could aim for.
 //
 // The tree is read only when git can see it honestly. An index that carries an
-// assume-unchanged or skip-worktree entry, or a repo with core.fileMode off,
-// hides a tracked file from status and from the diff, so the accept gate would
-// run against a tree that is not the tree land merges. That blocks too, and the
-// note names the file or the flag.
+// assume-unchanged or skip-worktree entry, a repo with core.fileMode off, a
+// replace ref, or a clean or smudge filter that applies to the tree hides the
+// change from status and from the diff, so the accept gate would run against a
+// tree that is not the tree land merges. That blocks too, and the note names
+// the file, the flag, the ref or the filter.
+//
+// These checks refuse the cheap lies. They are not a sandbox: see blindState.
 func blockedByWorktree(o dispatchOpts, p Plan, st *State, u Unit, m Minion) (bool, string) {
 	dir, head := minionDir(p, m), st.Units[u.ID].LaneHead
 	if head == "" && !gitCheckout(dir) {

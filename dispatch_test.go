@@ -1770,6 +1770,43 @@ chmod +x outside.go`, trackedOutside)
 	}
 }
 
+// A replace ref swaps the object git reports for one the lane chooses. The
+// dispatch head resolves to a doctored commit, so the diff against it is empty
+// however the tree changed, and the outside file rides the lane branch onto the
+// integration tree. It blocks, and the note names the ref.
+func TestReplaceRefBlocksAndNamesIt(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `head=$(git rev-parse HEAD)
+git replace -f "$head" "$(git commit-tree "$head^{tree}" -m 'doctored base')"
+printf 'lane\n' > outside.go`, trackedOutside)
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	for _, want := range []string{"replace ref", "refs/replace/", "git replace -d"} {
+		if !strings.Contains(u.Note, want) {
+			t.Fatalf("note %q must carry %q", u.Note, want)
+		}
+	}
+}
+
+// A clean filter on an attribute the lane writes into the common git dir makes
+// git hash the base content while the worktree holds the change: status and
+// diff both go empty. It blocks, and the note names the filter and the file.
+func TestCleanFilterThatAppliesBlocksAndNamesIt(t *testing.T) {
+	u, stdout, _ := mergeCase(t, "", `gd=$(git rev-parse --path-format=absolute --git-common-dir)
+mkdir -p "$gd/info"
+git config filter.hide.clean "printf 'base\n'"
+printf 'outside.go filter=hide\n' > "$gd/info/attributes"
+printf 'lane\n' > outside.go`, trackedOutside)
+	if u.Status != "blocked" {
+		t.Fatalf("unit %q, want blocked: %s\n%s", u.Status, u.Note, stdout)
+	}
+	for _, want := range []string{"rewrites this tree", "outside.go", "filter hide"} {
+		if !strings.Contains(u.Note, want) {
+			t.Fatalf("note %q must carry %q", u.Note, want)
+		}
+	}
+}
+
 // A conflict resolved inside the unit's own paths is its own work and inside its
 // paths: done.
 func TestConflictResolvedInsideThePathsSettlesDone(t *testing.T) {

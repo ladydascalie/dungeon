@@ -215,6 +215,16 @@ landed branch therefore declares that branch's files in its own paths. The block
 note names the files and the `dungeon edit unit <id> --paths-add '<glob>'` that
 widens them.
 
+The guard also refuses a worktree set up to report a tree it cannot see, and the
+note names the cause: an assume-unchanged or skip-worktree entry, `core.fileMode`
+false, a replace ref, or a clean or smudge filter whose attribute applies to the
+tree.
+
+The guard catches drift, not a hostile lane. A lane runs with the same shell in
+the same repository, so it can forge git evidence, rewrite the plan or edit the
+state. The boundary that holds is the parent reading the diff and the gate, not
+a check in this tool.
+
 More than one encounter under `.dungeon`: `dungeon view` opens a picker, and
 every other command needs `--plan`, or `--all` on `up`, `next` and `land` to
 sweep every encounter. Extra encounters live at `.dungeon/<name>/plan.yaml` with

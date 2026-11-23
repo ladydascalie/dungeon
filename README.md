@@ -316,6 +316,16 @@ own paths. The block note names the files and the `--paths-add` edit that fixes
 it. Work inside the paths is committed on the lane branch, so a lane still never
 commits.
 
+The guard also refuses a worktree set up to report a tree it cannot see, and the
+note names the cause: an assume-unchanged or skip-worktree entry, `core.fileMode`
+false, a replace ref, or a clean or smudge filter whose attribute applies to the
+tree. These are the shapes a review found, not every way git can be made to lie.
+
+The guard catches drift, not a hostile lane. A lane runs with the same shell in
+the same repository, so it can forge git evidence, rewrite the plan or edit the
+state. The boundary that holds is the parent reading the diff and the gate, not
+a check in this tool.
+
 `dungeon edit` changes one field of one unit or one minion without editing yaml
 by hand. It edits the text, so comments, blank lines and the rest of the file
 survive, and it prints the diff. It refuses a change that adds a finding, and
