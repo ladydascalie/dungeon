@@ -1487,3 +1487,354 @@ func TestUpAllLeavesASettledEncounterAlone(t *testing.T) {
 		t.Fatalf("one lane was spawned, want 1 agent start:\n%s", calls)
 	}
 }
+
+// --only names the encounters a sweep means, and both spellings reach the same
+// targets: the sweep drives those plans and no others.
+func TestOnlyReachesTheSameTargetsByBothSpellings(t *testing.T) {
+	cases := []struct {
+		name    string
+		only    []string
+		want    []string
+		notWant []string
+		same    bool // the same targets as the first case, so the same digest
+	}{
+		{name: "repeatable", only: []string{"--only", "one", "--only", "two"}, want: []string{"one", "two"}, notWant: []string{"three"}, same: true},
+		{name: "comma separated", only: []string{"--only", "one,two"}, want: []string{"one", "two"}, notWant: []string{"three"}, same: true},
+		{name: "both spellings in one call", only: []string{"--only", "one", "--only", "two,three"}, want: []string{"one", "two", "three"}},
+	}
+	var first string
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fleetRoot(t, "one", "two", "three")
+			if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+				t.Fatalf("up --all: %s", stderr)
+			}
+			args := append([]string{"next", "--all", "--dry-run"}, tc.only...)
+			code, stdout, stderr := runCLI(args...)
+			if code != 0 {
+				t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+			}
+			for _, name := range tc.want {
+				if !strings.Contains(stdout, name+"\n  would dispatch: A to w1\n") {
+					t.Fatalf("--only %v must sweep %s:\n%s", tc.only, name, stdout)
+				}
+			}
+			for _, name := range tc.notWant {
+				if strings.Contains(stdout, name+"\n") {
+					t.Fatalf("--only %v must not sweep %s:\n%s", tc.only, name, stdout)
+				}
+			}
+			if strings.Contains(stdout, "encounters skipped") {
+				t.Fatalf("a plan out of scope must not count as skipped:\n%s", stdout)
+			}
+			// The spellings are one flag, so the same names produce one digest.
+			if i == 0 {
+				first = stdout
+			} else if tc.same && stdout != first {
+				t.Fatalf("--only %v digest differs from the repeatable form:\n%s\nwant:\n%s", tc.only, stdout, first)
+			}
+		})
+	}
+}
+
+// A name that matches no encounter is exit 2, and the message names every name
+// that matched nothing. All three commands refuse it.
+func TestOnlyRefusesANameThatMatchesNoEncounter(t *testing.T) {
+	fleetRoot(t, "one", "two")
+	cases := map[string][]string{
+		"up":   {"up", "--all", "--no-dispatch"},
+		"next": {"next", "--all", "--dry-run"},
+		"land": {"land", "--all"},
+	}
+	for name, base := range cases {
+		args := append(base, "--only", "ghost", "--only", "phantom,one")
+		code, _, stderr := runCLI(args...)
+		if code != 2 {
+			t.Fatalf("%s exit %d, want 2: %s", name, code, stderr)
+		}
+		for _, want := range []string{"ghost", "phantom", "matched no encounter"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%s stderr missing %q:\n%s", name, want, stderr)
+			}
+		}
+	}
+}
+
+// A name that matches a plan that failed to load is exit 2 with that plan's
+// finding, not "unknown name": the operator asked for it and needs the reason.
+func TestOnlyRefusesANamedInvalidPlanWithItsFinding(t *testing.T) {
+	root, repo := fleetRoot(t, "one")
+	breakUnitMinion(t, writeFleetPlan(t, root, filepath.Join(".dungeon", "broken", "plan.yaml"), time.Now(), map[string]string{
+		"%ENC%": "broken", "%REPO%": repo, "%BASE%": "main", "%FILE%": "broken.txt",
+	}))
+
+	cases := []struct {
+		name  string
+		base  []string
+		unrun string
+	}{
+		{name: "up", base: []string{"up", "--all", "--no-dispatch"}, unrun: "spawned"},
+		{name: "next", base: []string{"next", "--all", "--dry-run"}, unrun: "would dispatch"},
+		{name: "land", base: []string{"land", "--all"}, unrun: "nothing to land"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append(tc.base, "--only", "broken")
+			code, stdout, stderr := runCLI(args...)
+			if code != 2 {
+				t.Fatalf("exit %d, want 2: %s", code, stderr)
+			}
+			for _, want := range []string{"--only broken", "does not load", "units[0].minion E_UNKNOWN_MINION"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr missing %q:\n%s", want, stderr)
+				}
+			}
+			if strings.Contains(stdout, tc.unrun) {
+				t.Fatalf("a refused sweep must run nothing:\n%s", stdout)
+			}
+		})
+	}
+	if _, err := os.Stat(worktreePath(repo, "broken", "w1")); err == nil {
+		t.Fatal("a refused sweep must not cut a worktree")
+	}
+}
+
+// --only without --all is exit 2 for all three commands: a single plan is named
+// with --plan. A --only with no name is refused too, rather than sweeping all.
+func TestOnlyWithoutAllIsRefused(t *testing.T) {
+	fakeHerdr(t, "")
+	t.Chdir(t.TempDir())
+	for _, args := range [][]string{
+		{"up", "--only", "one"},
+		{"next", "--only", "one"},
+		{"land", "--only", "one"},
+	} {
+		code, _, stderr := runCLI(args...)
+		if code != 2 {
+			t.Fatalf("%v exit %d, want 2: %s", args, code, stderr)
+		}
+		for _, want := range []string{"--only", "--all", "--plan"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%v stderr missing %q:\n%s", args, want, stderr)
+			}
+		}
+	}
+	for _, args := range [][]string{
+		{"up", "--all", "--only", ","},
+		{"next", "--all", "--only", " "},
+		{"land", "--all", "--only", ""},
+	} {
+		if code, _, stderr := runCLI(args...); code != 2 {
+			t.Fatalf("%v with no name exit %d, want 2: %s", args, code, stderr)
+		}
+	}
+}
+
+// A broken plan out of scope cannot fail a run the operator did not ask for:
+// --only loads every encounter as before, then sweeps only the named ones.
+func TestABrokenPlanOutOfScopeDoesNotFailTheRun(t *testing.T) {
+	root, repo := fleetRoot(t, "one", "two")
+	broken := writeFleetPlan(t, root, filepath.Join(".dungeon", "broken", "plan.yaml"), time.Now(), map[string]string{
+		"%ENC%": "broken", "%REPO%": repo, "%BASE%": "main", "%FILE%": "broken.txt",
+	})
+	breakUnitMinion(t, broken)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+		gone string
+	}{
+		{name: "up", args: []string{"up", "--all", "--no-dispatch", "--only", "one"}, want: "one: 1 spawned", gone: "two: 1 spawned"},
+		{name: "next", args: []string{"next", "--all", "--dry-run", "--only", "one"}, want: "one\n  would dispatch: A to w1\n", gone: "two\n"},
+		{name: "land", args: []string{"land", "--all", "--only", "one"}, want: "one: nothing to land", gone: "two: nothing to land"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runCLI(tc.args...)
+			if code != 0 {
+				t.Fatalf("exit %d, want 0: %s\n%s", code, stderr, stdout)
+			}
+			if !strings.Contains(stdout, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, stdout)
+			}
+			if strings.Contains(stdout, tc.gone) {
+				t.Fatalf("the sweep reached an encounter nobody named:\n%s", stdout)
+			}
+			if strings.Contains(stdout, "encounters skipped") {
+				t.Fatalf("an out-of-scope plan must not be counted:\n%s", stdout)
+			}
+		})
+	}
+}
+
+// The name is the plan's encounter: field, else the directory holding the plan.
+func TestOnlyMatchesThePlanEncounterNotItsDirectory(t *testing.T) {
+	repo := gitRepo(t)
+	root := t.TempDir()
+	fakeHerdr(t, "")
+	writeFleetPlan(t, root, filepath.Join(".dungeon", "box", "plan.yaml"), time.Now(), map[string]string{
+		"%ENC%": "timer", "%REPO%": repo, "%BASE%": "main", "%FILE%": "timer.txt",
+	})
+	t.Chdir(root)
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+
+	code, stdout, stderr := runCLI("next", "--all", "--dry-run", "--only", "timer")
+	if code != 0 {
+		t.Fatalf("the encounter name must filter: exit %d: %s", code, stderr)
+	}
+	if !strings.Contains(stdout, "timer\n  would dispatch: A to w1\n") {
+		t.Fatalf("the plan's encounter: must be the name:\n%s", stdout)
+	}
+
+	code, _, stderr = runCLI("next", "--all", "--dry-run", "--only", "box")
+	if code != 2 || !strings.Contains(stderr, "box") {
+		t.Fatalf("the directory is not the name: exit %d: %s", code, stderr)
+	}
+}
+
+// N4: land --all --only a,b lands only a and b, runs only their gates, and puts
+// both on the combined branch. Encounter c is neither landed nor gated. Only the
+// binary can see this: the router parses --only and then hands the same argv to
+// the sweep, which must know the flag too.
+func TestLandAllOnlyLandsTheNamedEncounters(t *testing.T) {
+	root, repo := fleetRoot(t, "a", "b", "c")
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	// All three finish, so only --only can keep c out of the sweep.
+	for _, name := range []string{"a", "b", "c"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	code, stdout, stderr := runCLI("land", "--all", "--only", "a,b")
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	for _, want := range []string{
+		"a: merged 1 units on a/integration",
+		"b: merged 1 units on b/integration",
+		"merged: a/A b/A",
+		"ok   a/A: test -f a.txt",
+		"ok   b/A: test -f b.txt",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("output missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "c: merged") || strings.Contains(stdout, "c/A") {
+		t.Fatalf("c is out of scope and must be neither landed nor gated:\n%s", stdout)
+	}
+	fleet := branchWorktreePath(repo, "fleet/integration")
+	for _, f := range []string{"a.txt", "b.txt"} {
+		if _, err := os.Stat(filepath.Join(fleet, f)); err != nil {
+			t.Fatalf("%s should be on the combined branch: %v", f, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fleet, "c.txt")); err == nil {
+		t.Fatalf("c.txt must not be on the combined branch")
+	}
+	if !landedOn(t, fleetStatePath(root, "a"), "a/integration") {
+		t.Fatalf("a/A must be recorded as landed")
+	}
+	if stateHasLanded(t, fleetStatePath(root, "c")) {
+		t.Fatalf("c must not be landed")
+	}
+}
+
+// landedOn reports whether state.json records any unit landed on ref.
+func landedOn(t *testing.T, path, ref string) bool {
+	t.Helper()
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	for _, u := range st.Units {
+		if u.Landed != nil && u.Landed.Ref == ref {
+			return true
+		}
+	}
+	return false
+}
+
+func stateHasLanded(t *testing.T, path string) bool {
+	t.Helper()
+	st, err := LoadState(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	for _, u := range st.Units {
+		if u.Landed != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// --only must reach the sweep through the binary on every command, not just the
+// two that never re-parse the argv. up spawns only the named encounter's lanes.
+func TestUpAllOnlySpawnsTheNamedEncounters(t *testing.T) {
+	root, repo := fleetRoot(t, "a", "b", "c")
+
+	code, stdout, stderr := runCLI("up", "--all", "--no-dispatch", "--only", "a")
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	if !strings.Contains(stdout, "a: ") {
+		t.Fatalf("--only a must spawn a:\n%s", stdout)
+	}
+	for _, name := range []string{"b", "c"} {
+		if strings.Contains(stdout, name+": ") {
+			t.Fatalf("--only a must not spawn %s:\n%s", name, stdout)
+		}
+		if _, err := os.Stat(worktreePath(repo, name, "w1")); err == nil {
+			t.Fatalf("--only a must not cut %s's worktree", name)
+		}
+	}
+	if !stateExists(t, fleetStatePath(root, "a")) {
+		t.Fatalf("a's state is written at spawn")
+	}
+	for _, name := range []string{"b", "c"} {
+		if stateExists(t, fleetStatePath(root, name)) {
+			t.Fatalf("--only a must not write %s's state", name)
+		}
+	}
+}
+
+// next digests only the named encounter, and the digest is the single-plan one.
+func TestNextAllOnlyDigestsTheNamedEncounters(t *testing.T) {
+	root, repo := fleetRoot(t, "a", "b", "c")
+	if code, _, stderr := runCLI("up", "--all", "--no-dispatch"); code != 0 {
+		t.Fatalf("up --all: %s", stderr)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		commitIn(t, worktreePath(repo, name, "w1"), name+".txt", name+"\n", name)
+		if code, _, stderr := runCLI("set", "unit", "A", "done", "--plan", fleetPlanPath(root, name)); code != 0 {
+			t.Fatalf("set %s: %s", name, stderr)
+		}
+	}
+
+	code, stdout, stderr := runCLI("next", "--all", "--only", "a,b", "--dry-run")
+	if code != 0 {
+		t.Fatalf("exit %d: %s\n%s", code, stderr, stdout)
+	}
+	for _, name := range []string{"a", "b"} {
+		if !strings.Contains(stdout, name+"\n  nothing to do\n") {
+			t.Fatalf("--only a,b must digest %s:\n%s", name, stdout)
+		}
+	}
+	if strings.Contains(stdout, "c\n") {
+		t.Fatalf("--only a,b must not digest c:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "encounters skipped") {
+		t.Fatalf("a plan out of scope must not count as skipped:\n%s", stdout)
+	}
+	if !stateExists(t, fleetStatePath(root, "c")) {
+		t.Fatalf("c keeps the state it had; --only must not clear it")
+	}
+}

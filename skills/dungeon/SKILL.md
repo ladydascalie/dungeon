@@ -348,6 +348,16 @@ saved as its plan's pass ends, so a crash loses nothing.
 `--all` with `--plan` or `--state` is exit 2: a sweep keeps one state per
 encounter. With one encounter no flag is needed.
 
+`--only` names the encounters a sweep means, once or comma separated, by the
+plan's `encounter:` field else the directory holding `plan.yaml`. A name that
+matches no encounter, or a plan that failed to load, is exit 2 with that plan's
+finding; no target after filtering is exit 2; `--only` without `--all` is exit
+2. Every encounter is still loaded, so a broken plan out of scope cannot fail a
+run nobody asked for. It exists because `land --all` in a repo with finished
+encounters lands all of them, re-runs their gates, and one stale conflict
+withholds the combined branch for the live work, so a sweep must be able to say
+`--only a,b`.
+
 `land --all` merges the fleet's integration branches under one gate. It lands
 each plan as `land` does, then cuts `--branch` (default `fleet/integration`) and
 re-runs every merged unit's accept against the combined tree. `--accept-timeout`
